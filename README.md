@@ -3,7 +3,6 @@
 > **Vue-Aware & Astro-Aware Structural Code Search MCP Server & CLI**  
 > Precise AST-based structural code searching across **Vue SFCs (`.vue`)**, **Astro components (`.astro`)**, and **React/Next (`.js`, `.jsx`, `.ts`, `.tsx`)** with exact line-number remapping.
 
-[![CI](https://github.com/your-org/vue-ast-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/your-org/vue-ast-mcp/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
 ---

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'bun:test';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   extractApiHandlers,
@@ -34,10 +35,12 @@ describe('File-Based Route Topology Engine (Phase 4)', () => {
   });
 
   describe('scanRoutes on Inertia.js (toko-km)', () => {
-    it('automatically detects Inertia framework and scans all page routes', async () => {
-      const result = await scanRoutes({
-        targetPath: TOKO_KM_PATH,
-      });
+    it.skipIf(!existsSync(TOKO_KM_PATH))(
+      'automatically detects Inertia framework and scans all page routes',
+      async () => {
+        const result = await scanRoutes({
+          targetPath: TOKO_KM_PATH,
+        });
 
       expect(result.framework).toBe('inertia');
       expect(result.totalRoutes).toBeGreaterThan(10);
