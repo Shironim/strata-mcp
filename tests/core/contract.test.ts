@@ -9,8 +9,14 @@ import {
 import { createMcpServer } from '../../src/mcp';
 
 const FIXTURES_DIR = join(import.meta.dir, '../fixtures');
-const VUE_APP_COMPONENTS = 'F:/Veritas/frontend-cadet/projects/vue-app/src/components';
-const ASTRO_APP_LAYOUTS = 'F:/Veritas/frontend-cadet/projects/astro-app/src/layouts';
+const VUE_APP_COMPONENTS = join(
+  import.meta.dir,
+  '../mock-projects/vue-app/src/components'
+);
+const ASTRO_APP_LAYOUTS = join(
+  import.meta.dir,
+  '../mock-projects/astro-app/src/layouts'
+);
 
 describe('Component Contract Extractor (Phase 2 RFC)', () => {
   it('detects component frameworks accurately by extension', () => {

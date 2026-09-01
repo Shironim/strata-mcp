@@ -8,7 +8,7 @@ import {
 import { createMcpServer } from '../../src/mcp';
 
 const FIXTURES_DIR = join(import.meta.dir, '../fixtures');
-const VUE_APP_DIR = 'F:/Veritas/frontend-cadet/projects/vue-app';
+const VUE_APP_DIR = join(import.meta.dir, '../mock-projects/vue-app');
 
 describe('Unused Components Audit Engine (Phase 4 RFC)', () => {
   it('evaluates glob patterns accurately with matchesGlob', () => {

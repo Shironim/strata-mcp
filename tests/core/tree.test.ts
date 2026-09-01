@@ -10,9 +10,9 @@ import {
 } from '../../src/engine/tree';
 import { createMcpServer } from '../../src/mcp';
 
-const VUE_APP_DIR = 'F:/Veritas/frontend-cadet/projects/vue-app';
-const REACT_APP_DIR = 'F:/Veritas/frontend-cadet/projects/react-app';
-const ASTRO_APP_DIR = 'F:/Veritas/frontend-cadet/projects/astro-app';
+const VUE_APP_DIR = join(import.meta.dir, '../mock-projects/vue-app');
+const REACT_APP_DIR = join(import.meta.dir, '../mock-projects/react-app');
+const ASTRO_APP_DIR = join(import.meta.dir, '../mock-projects/astro-app');
 
 describe('Component Hierarchy Tree & Graph Engine (Phase 3 RFC)', () => {
   it('resolves relative import paths across extensions and barrel indexes', () => {

@@ -1,0 +1,41 @@
+---
+import Layout from '../layouts/Layout.astro';
+import ProductCard, { type Product } from '../components/ProductCard';
+import { BaseButton as ActionBtn } from '../components';
+import ProductModal from '../components/ProductModal.vue';
+
+const products: Product[] = [
+  { id: '1', name: 'Wireless Headphones', price: 99.99, status: 'in-stock' },
+  { id: '2', name: 'Mechanical Keyboard', price: 149.5, status: 'low-stock' },
+  { id: '3', name: 'Gaming Mouse', price: 59.0, status: 'out-of-stock' },
+];
+---
+
+<Layout title="Product Catalog (Astro)">
+  <div style="padding: 24px; max-width: 1000px; margin: 0 auto;">
+    <header style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px;">
+      <h1>Product Catalog (Astro Islands)</h1>
+      <!-- Island with client:visible directive and aliased import -->
+      <ActionBtn client:visible variant="outline">
+        Refresh Catalog
+      </ActionBtn>
+    </header>
+
+    <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 20px;">
+      {products.map((item) => (
+        /* React component Island with client:load directive */
+        <ProductCard client:load product={item} />
+      ))}
+    </div>
+
+    <footer style="margin-top: 32px; text-align: center;">
+      <!-- Vue component Island with client:visible directive -->
+      <ActionBtn client:visible variant="secondary">
+        Load More Products
+      </ActionBtn>
+    </footer>
+
+    <!-- Vue component Island with client:only directive -->
+    <ProductModal client:only="vue" isOpen={false} />
+  </div>
+</Layout>

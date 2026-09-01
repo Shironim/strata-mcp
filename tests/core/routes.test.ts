@@ -1,5 +1,4 @@
 import { describe, expect, it } from 'bun:test';
-import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   extractApiHandlers,
@@ -8,7 +7,7 @@ import {
   scanRoutes,
 } from '../../src/engine/routes';
 
-const TOKO_KM_PATH = 'F:/Veritas/toko-km';
+const INERTIA_APP_DIR = join(import.meta.dir, '../mock-projects/inertia-app');
 
 describe('File-Based Route Topology Engine (Phase 4)', () => {
   describe('extractRouteParams', () => {
@@ -34,21 +33,22 @@ describe('File-Based Route Topology Engine (Phase 4)', () => {
     });
   });
 
-  describe('scanRoutes on Inertia.js (toko-km)', () => {
-    it.skipIf(!existsSync(TOKO_KM_PATH))(
-      'automatically detects Inertia framework and scans all page routes',
-      async () => {
-        const result = await scanRoutes({
-          targetPath: TOKO_KM_PATH,
-        });
+  describe('scanRoutes on Inertia.js (mock-projects/inertia-app)', () => {
+    it('automatically detects Inertia framework and scans all page routes', async () => {
+      const result = await scanRoutes({
+        targetPath: INERTIA_APP_DIR,
+      });
 
       expect(result.framework).toBe('inertia');
-      expect(result.totalRoutes).toBeGreaterThan(10);
+      expect(result.totalRoutes).toBe(3);
       expect(result.routes.some((r) => r.path === '/dashboard')).toBe(true);
+      expect(result.routes.some((r) => r.path === '/auth/login')).toBe(true);
+      expect(result.routes.some((r) => r.path === '/products/[id]')).toBe(true);
 
       const formatted = formatRoutesAsText(result);
       expect(formatted).toContain('Route Manifest (inertia)');
       expect(formatted).toContain('/dashboard [page]');
+      expect(formatted).toContain('/products/[id] [page]');
     });
   });
 

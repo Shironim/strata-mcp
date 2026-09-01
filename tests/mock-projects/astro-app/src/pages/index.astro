@@ -1,0 +1,13 @@
+---
+import Layout from '../layouts/Layout.astro';
+import BaseButton from '../components/BaseButton.vue';
+---
+
+<Layout title="Astro Storefront">
+  <main style="padding: 24px; text-align: center;">
+    <h1>Astro Islands Storefront</h1>
+    <a href="/catalog">
+      <BaseButton client:load variant="primary">Go to Catalog</BaseButton>
+    </a>
+  </main>
+</Layout>
