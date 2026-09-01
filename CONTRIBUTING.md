@@ -17,12 +17,12 @@ Thank you for your interest in contributing to `vue-ast-mcp`!
 
 ## Development Architecture
 
-- `src/engine/`: Core search engine, AST-grep wrapper, SFC splitter, offset remapper, template matcher, contract extractor (`contract.ts`), SQLite component graph (`tree.ts`), and unused component auditor (`audit.ts`).
+- `src/engine/`: Core search engine, AST-grep wrapper, SFC splitter, offset remapper, template matcher, contract extractor (`contract.ts`), component hierarchy tree engine (`tree.ts`), file-based route topology scanner (`routes.ts`), persistent SQLite codebase graph (`database.ts`), and unused component auditor (`audit.ts`).
 - `src/adapters/`: Document Adapter pattern (`VueAdapter`, `AstroAdapter`, `ScriptAdapter`, and `AdapterFactory`).
-- `src/mcp.ts`: Model Context Protocol server implementation exposing 8 tools.
+- `src/mcp.ts`: Model Context Protocol server implementation exposing 10 tools.
 - `src/cli.ts`: Standalone CLI companion (`vue-ast`).
 - `src/types.ts`: Centralized TypeScript data models and interfaces.
-- `tests/`: Automated unit, integration, and fixtures test suites (66 tests across 14 files).
+- `tests/`: Automated unit, integration, and fixtures test suites (114 tests across 21 files).
 
 ## Pull Request Guidelines
 

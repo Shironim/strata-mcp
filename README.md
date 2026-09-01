@@ -50,21 +50,15 @@ Existing AST tools like [ast-grep](https://ast-grep.github.io) are powerful for 
 
 ## Installation
 
-### Using Bun (Recommended)
+Requires **[Bun](https://bun.sh)** (`>= 1.1.0`) for high-performance AST processing and native `bun:sqlite` graph caching.
+
 ```bash
 bun add -g vue-ast-mcp
 # or run directly via bunx
 bunx vue-ast-mcp
 ```
 
-### Using Node.js / npm
-```bash
-npm install -g vue-ast-mcp
-# or run directly via npx
-npx vue-ast-mcp
-```
-
-> **Note for Bun users**: When installing `@ast-grep/cli` with Bun, ensure lifecycle scripts are trusted:
+> **Lifecycle scripts**: When installing `@ast-grep/cli` with Bun, ensure lifecycle scripts are trusted:
 > `bun pm trust @ast-grep/cli`
 
 ---
@@ -85,13 +79,13 @@ Connect `vue-ast-mcp` to your favorite AI agent:
 }
 ```
 
-### Cursor (`~/.cursor/mcp.json`)
+### Cursor (`~/.cursor/mcp.json`) / VSCode
 ```json
 {
   "mcpServers": {
     "vue-ast": {
-      "command": "npx",
-      "args": ["-y", "vue-ast-mcp"]
+      "command": "bun",
+      "args": ["run", "vue-ast-mcp"]
     }
   }
 }
@@ -108,16 +102,18 @@ Connect `vue-ast-mcp` to your favorite AI agent:
 | `find_component_usage(component_name, path, scope?)` | Adoption Audit | Scans component imports in script/frontmatter and tag usages in template/JSX across multi-casing (kebab & Pascal). |
 | `dump_syntax_tree(code, language?)` | AST Helper | Dumps the CST syntax tree of a code snippet for AST pattern debugging. |
 | `test_match_code_rule(rule_yaml, code_snippet)` | Rule Sandbox | Validates a YAML rule against an in-memory code snippet without touching disk (< 20ms). |
-| `extract_component_contract(path, output_format?)` | Token Economy | Extracts component interface (`props`, `emits`, `slots`, `exposed`) without template/CSS bloat (> 94% token savings). |
-| `get_component_tree(entry_path, max_depth?, output_format?)` | Architecture | Maps the downward component hierarchy tree (call graph / dependency tree) in < 15ms via embedded `bun:sqlite`. |
+| `extract_component_contract(path, output_format?)` | Token Economy | Extracts component interface (`props`, `emits`, `slots`, `exposed`, render boundary, and state dependencies) with > 94% token savings. |
+| `get_component_tree(entry_path, max_depth?, direction?, output_format?)` | Architecture | Maps downward or upward component hierarchy trees (call graph / blast radius) with auto-import and alias resolution. |
 | `find_unused_components(target_path, ignore_patterns?, output_format?)` | Dead Code Audit | Two-pass in-memory audit to identify orphan/dead components (0 usages) across the entire monorepo. |
+| `scan_routes(target_path, framework?, output_format?)` | Routing | Discovers file-based route topology, dynamic parameters, nested layouts, and API handlers (Next.js, Nuxt 3, Astro, Inertia). |
+| `query_state_impact(identifier, target_path?, output_format?)` | State Architecture | Traces all components, layout wrappers, and pages consuming a specific state store (Pinia, Zustand, Redux), Context, or composable. |
 
 ---
 
 ## High-Performance Architecture & Token Economy
 
 1. **Fast-Path Candidate Pruning (Engine B)**: Keyword-based file pre-filtering bypasses expensive AST subprocess spawning for non-matching files, dropping search execution times by **97%** (from ~1,150ms to < 30ms, and < 2ms for non-existent symbols).
-2. **Embedded `bun:sqlite` Relational Graph (Engine A)**: Uses Bun's zero-install C-level SQLite engine to map file relations and compute recursive component trees in **< 15ms** via SQL Common Table Expressions (CTE).
+2. **Persistent SQLite Codebase Graph Cache (Engine A)**: Uses native `bun:sqlite` with WAL mode in `.vue-ast/graph.db` to index components, edges, state dependencies, and routes with smart `mtime` delta synchronization (< 10ms warm sync) and instant SQL Recursive CTE blast radius queries.
 3. **Strict Token Economy**: Instead of dumping full 1,500-line components into the LLM context window, `extract_component_contract` delivers high-density interface summaries (< 80 tokens), preserving context window limits.
 
 ---
@@ -149,11 +145,38 @@ vue-ast contract ./src/components/ProductCard.vue --json
 # Generate indented call graph tree starting from root view/page
 vue-ast tree ./src/views/CatalogView.vue --depth 3
 
+# Trace Upward Blast Radius (consumers up to pages)
+vue-ast tree ./src/components/OldButton.vue --direction upward
+
 # Output tree as JSON hierarchy
 vue-ast tree ./src/views/CatalogView.vue --depth 3 --json
 ```
 
-### 4. Audit Unused / Dead Components
+### 4. Scan File-Based Route Topology (Next.js, Nuxt 3, Astro, Inertia)
+```bash
+# Scan routing topology, dynamic parameters, layouts, and API handlers
+vue-ast routes ./src
+
+# Scan with explicit framework hint and JSON output
+vue-ast routes . --framework inertia --json
+```
+
+### 5. Query State & Composable Impact (SQLite Graph)
+```bash
+# Trace all components, layout wrappers, and pages consuming a state store or composable
+vue-ast impact useForm --path ./resources/js
+
+# Query Pinia or Zustand store consumers
+vue-ast impact useCartStore --path ./src
+```
+
+### 6. Workspace Graph Delta Synchronization
+```bash
+# Manually synchronize local SQLite graph cache (.vue-ast/graph.db)
+vue-ast sync ./src
+```
+
+### 7. Audit Unused / Dead Components
 ```bash
 # Scan project for components with 0 usages (ignoring pages and stories)
 vue-ast unused ./src --ignore "**/pages/**,**/*.stories.*"
@@ -162,7 +185,7 @@ vue-ast unused ./src --ignore "**/pages/**,**/*.stories.*"
 vue-ast unused ./src --json
 ```
 
-### 5. Search AST Patterns Across Frameworks
+### 8. Search AST Patterns Across Frameworks
 ```bash
 # Search for Vue composables or functions
 vue-ast search "const $NAME = ref($$$)" --path ./src
@@ -174,7 +197,12 @@ vue-ast search "useEffect($$$, $$$)" --path ./src --lang tsx
 vue-ast search "import $$$ from '$$$'" --path ./src
 ```
 
-### 6. Dump CST Syntax Tree
+### 9. Test AST Rule in Memory Sandbox
+```bash
+vue-ast rule ./rules/my-rule.yaml --path ./src
+```
+
+### 10. Dump CST Syntax Tree
 ```bash
 vue-ast dump "const count = ref(0);" --lang ts
 ```
