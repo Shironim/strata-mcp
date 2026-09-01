@@ -58,9 +58,9 @@ Existing AST tools like [ast-grep](https://ast-grep.github.io) are powerful for 
 Requires **[Bun](https://bun.sh)** (`>= 1.1.0`) for high-performance AST processing and native `bun:sqlite` graph caching.
 
 ```bash
-bun add -g @shironim/strata-mcp
+bun add -g @dimassetoid/strata-mcp
 # or run directly via bunx
-bunx @shironim/strata-mcp
+bunx @dimassetoid/strata-mcp
 ```
 
 > **Lifecycle scripts**: When installing `@ast-grep/cli` with Bun, ensure lifecycle scripts are trusted:
@@ -78,7 +78,7 @@ Connect `strata-mcp` to your favorite AI agent:
   "mcpServers": {
     "strata": {
       "command": "bunx",
-      "args": ["@shironim/strata-mcp"]
+      "args": ["@dimassetoid/strata-mcp"]
     }
   }
 }
@@ -90,7 +90,7 @@ Connect `strata-mcp` to your favorite AI agent:
   "mcpServers": {
     "strata": {
       "command": "bunx",
-      "args": ["@shironim/strata-mcp"]
+      "args": ["@dimassetoid/strata-mcp"]
     }
   }
 }
