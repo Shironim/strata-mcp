@@ -77,6 +77,29 @@ export interface ComponentEmitContract {
   payload?: string;
 }
 
+export type RenderBoundaryType =
+  | 'server-component'
+  | 'client-component'
+  | 'server-action'
+  | 'isomorphic'
+  | 'client-only'
+  | 'server-only'
+  | 'astro-static'
+  | 'astro-island'
+  | 'unknown';
+
+export interface RenderBoundaryInfo {
+  boundary: RenderBoundaryType;
+  directive?: string;
+  isClientHydrated: boolean;
+}
+
+export interface StateDependencyInfo {
+  stores: string[];
+  contexts: string[];
+  composables: string[];
+}
+
 export interface ComponentContract {
   component: string;
   framework: 'vue' | 'react' | 'astro' | 'unknown';
@@ -85,6 +108,8 @@ export interface ComponentContract {
   emits: ComponentEmitContract[];
   slots: string[];
   exposed?: string[];
+  renderBoundary?: RenderBoundaryInfo;
+  stateDependencies?: StateDependencyInfo;
 }
 
 export interface ContractOptions {
@@ -97,6 +122,8 @@ export interface ComponentTreeNode {
   filePath: string;
   alias?: string;
   isDynamic?: boolean;
+  isAutoImported?: boolean;
+  isPage?: boolean;
   depth: number;
   children: ComponentTreeNode[];
 }
@@ -105,12 +132,15 @@ export interface ComponentTreeResult {
   root: ComponentTreeNode;
   totalComponents: number;
   maxDepthReached: number;
+  direction?: 'downward' | 'upward';
 }
 
 export interface ComponentTreeOptions {
   entryPath: string;
   maxDepth?: number;
+  direction?: 'downward' | 'upward';
   outputFormat?: 'text' | 'json';
+  aliasMap?: Record<string, string>;
 }
 
 export interface UnusedComponentInfo {
@@ -132,3 +162,72 @@ export interface UnusedComponentsOptions {
   ignorePatterns?: string[];
   outputFormat?: 'text' | 'json';
 }
+
+export type RouteFramework =
+  | 'next-app'
+  | 'next-pages'
+  | 'nuxt'
+  | 'astro'
+  | 'inertia'
+  | 'vue-router'
+  | 'unknown';
+
+export type RouteType = 'page' | 'api' | 'layout';
+
+export interface RouteParam {
+  name: string;
+  type: 'dynamic' | 'catch-all' | 'optional-catch-all';
+}
+
+export interface RouteInfo {
+  path: string;
+  filePath: string;
+  type: RouteType;
+  framework: RouteFramework;
+  params: RouteParam[];
+  layouts?: string[];
+  handlers?: string[];
+}
+
+export interface RouteManifestResult {
+  framework: RouteFramework;
+  baseDirectory: string;
+  totalRoutes: number;
+  routes: RouteInfo[];
+}
+
+export interface ScanRoutesOptions {
+  targetPath: string;
+  frameworkHint?: RouteFramework;
+  outputFormat?: 'text' | 'json';
+}
+
+export interface SyncStats {
+  added: number;
+  modified: number;
+  deleted: number;
+  unchanged: number;
+  total: number;
+  durationMs: number;
+}
+
+export interface StateImpactConsumer {
+  path: string;
+  isPage: boolean;
+  renderBoundary?: string;
+  kind: 'store' | 'context' | 'composable';
+  identifier: string;
+}
+
+export interface StateImpactResult {
+  identifier: string;
+  totalConsumers: number;
+  consumers: StateImpactConsumer[];
+}
+
+export interface QueryStateImpactOptions {
+  identifier: string;
+  targetPath?: string;
+  outputFormat?: 'text' | 'json';
+}
+
