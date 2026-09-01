@@ -1,15 +1,55 @@
 import { promises as fs } from 'node:fs';
 import { basename, extname, resolve } from 'node:path';
-import { parse as parseDom, NodeTypes } from '@vue/compiler-dom';
+import { parse as parseDom, NodeTypes, type RootNode, type TemplateChildNode } from '@vue/compiler-dom';
 import { executeAstGrep, isBinaryExecutionError } from './astgrep';
 import { parseSfc } from './splitter';
 import { parseAstro } from './astro-sfc';
+import { stripQuotes } from './patterns';
 import type {
   ComponentContract,
   ComponentEmitContract,
   ComponentPropContract,
   ContractOptions,
+  RenderBoundaryInfo,
+  StateDependencyInfo,
 } from '../types';
+
+const SLOT_TAG_PATTERN = /<slot(?:\s+name=['"]([^'"]+)['"])?[^>]*\/?>/gi;
+const DEFAULT_ENTRY_PATTERN = /^([A-Za-z0-9_$]+)\s*:\s*(.+?),?$/;
+const PROP_NAME_VALUE_PATTERN = /^([A-Za-z0-9_$]+)\s*:\s*([\s\S]+)$/;
+const REQUIRED_TRUE_PATTERN = /(?:^|[,\s])required\s*:\s*true/;
+const TYPE_ANNOTATION_PATTERN = /type\s*:\s*([A-Za-z0-9_$]+)/;
+const SHORTHAND_TYPE_PATTERN = /^[A-Za-z0-9_$]+$/;
+const DEFAULT_VALUE_PATTERN = /default\s*:\s*([^,\n}]+)/;
+const PROPERTY_SIGNATURE_PATTERN = /^([A-Za-z0-9_$]+)(\?)?:\s*(.+)$/;
+const WITH_DEFAULTS_SECOND_ARG_PATTERN = /withDefaults\s*\([^,]+,\s*(\{[\s\S]*?\})\s*\)/;
+const NAMED_PROPS_TYPE_PATTERN = /defineProps<([A-Za-z0-9_$]+)>\(\)/;
+const EMIT_CALL_SIGNATURE_PATTERN = /\(\s*(?:e\s*:\s*)?['"]([^'"]+)['"](?:\s*,\s*(.+?))?\s*\)/;
+const QUOTED_STRING_PATTERN = /['"]([^'"]+)['"]/g;
+const EXPOSED_NAME_PATTERN = /([A-Za-z0-9_$]+)\s*[,}]/g;
+const REACT_EVENT_HANDLER_PATTERN = /^on[A-Z]/;
+
+/** Reads the declared type of a runtime-JS prop value (`{ type: X }` or shorthand `X`). */
+function extractPropType(propValue: string): string {
+  const typeMatch = propValue.match(TYPE_ANNOTATION_PATTERN);
+  if (typeMatch && typeMatch[1]) return typeMatch[1];
+  return SHORTHAND_TYPE_PATTERN.test(propValue) ? propValue : 'any';
+}
+
+/** Reads the default value of a runtime-JS prop value (`{ default: 0 }`). */
+function extractPropDefault(propValue: string): string | undefined {
+  return propValue.match(DEFAULT_VALUE_PATTERN)?.[1]?.trim();
+}
+
+/** Reports whether a runtime-JS prop value declares `required: true`. */
+function isPropRequired(propValue: string): boolean {
+  return REQUIRED_TRUE_PATTERN.test(propValue);
+}
+
+/** Reports whether a React prop name is an event callback (`onXxx`). */
+function isReactEventHandler(propName: string): boolean {
+  return REACT_EVENT_HANDLER_PATTERN.test(propName);
+}
 
 /**
  * Detects the component framework based on file extension.
@@ -32,31 +72,40 @@ export function extractSlotsFromTemplate(templateContent: string): string[] {
     const ast = parseDom(templateContent);
     const slots = new Set<string>();
 
-    function walk(node: any) {
-      if (!node) return;
-
+    function walk(node: RootNode | TemplateChildNode): void {
       if (node.type === NodeTypes.ELEMENT && node.tag === 'slot') {
         let slotName = 'default';
-        if (node.props) {
-          for (const prop of node.props) {
-            if (prop.type === 6 && prop.name === 'name' && prop.value?.content) {
-              slotName = prop.value.content;
-            } else if (
-              prop.type === 7 &&
-              prop.name === 'bind' &&
-              prop.arg?.content === 'name' &&
-              prop.exp?.content
-            ) {
-              slotName = prop.exp.content.replace(/['"]/g, '');
-            }
+        for (const prop of node.props) {
+          if (prop.type === NodeTypes.ATTRIBUTE && prop.name === 'name' && prop.value?.content) {
+            slotName = prop.value.content;
+          } else if (
+            prop.type === NodeTypes.DIRECTIVE &&
+            prop.name === 'bind' &&
+            prop.arg &&
+            'content' in prop.arg &&
+            prop.arg.content === 'name' &&
+            prop.exp &&
+            'content' in prop.exp
+          ) {
+            slotName = stripQuotes(prop.exp.content);
           }
         }
         slots.add(slotName);
       }
 
-      if (node.children && Array.isArray(node.children)) {
+      if (
+        node.type === NodeTypes.ROOT ||
+        node.type === NodeTypes.ELEMENT ||
+        node.type === NodeTypes.FOR
+      ) {
         for (const child of node.children) {
           walk(child);
+        }
+      } else if (node.type === NodeTypes.IF) {
+        for (const branch of node.branches) {
+          for (const child of branch.children) {
+            walk(child);
+          }
         }
       }
     }
@@ -65,7 +114,7 @@ export function extractSlotsFromTemplate(templateContent: string): string[] {
     return Array.from(slots);
   } catch {
     // Non-fatal fallback for non-standard HTML / Astro islands
-    const matches = templateContent.matchAll(/<slot(?:\s+name=['"]([^'"]+)['"])?[^>]*\/?>/gi);
+    const matches = templateContent.matchAll(SLOT_TAG_PATTERN);
     const slots = new Set<string>();
     for (const m of matches) {
       slots.add(m[1] || 'default');
@@ -86,13 +135,182 @@ function parseDefaultsObject(objectCode: string): Record<string, string> {
   const lines = inner.split('\n');
   for (const line of lines) {
     const trimmed = line.trim();
-    const match = trimmed.match(/^([A-Za-z0-9_$]+)\s*:\s*(.+?),?$/);
+    const match = trimmed.match(DEFAULT_ENTRY_PATTERN);
     if (match && match[1] && match[2]) {
       defaults[match[1]] = match[2].trim();
     }
   }
 
   return defaults;
+}
+
+/**
+ * Extracts the first function-call argument from a call expression text, if it is an object literal.
+ * Example: `defineProps({ name: { type: String } })` -> `{ name: { type: String } }`.
+ */
+function extractObjectArgument(callText: string): string | null {
+  const open = callText.indexOf('(');
+  if (open === -1) return null;
+
+  let depth = 0;
+  let inString: string | null = null;
+
+  for (let i = open; i < callText.length; i++) {
+    const ch = callText[i];
+
+    if (inString) {
+      if (ch === '\\') {
+        i++;
+        continue;
+      }
+      if (ch === inString) inString = null;
+      continue;
+    }
+
+    if (ch === '"' || ch === "'" || ch === '`') {
+      inString = ch;
+      continue;
+    }
+
+    if (ch === '(') {
+      depth++;
+      continue;
+    }
+
+    if (ch === ')') {
+      depth--;
+      if (depth === 0) {
+        const arg = callText.slice(open + 1, i).trim();
+        return arg.startsWith('{') ? arg : null;
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Splits the inner text of an object literal into its top-level entries,
+ * respecting nested `{}`, `[]`, `()`, and string literals.
+ */
+function splitTopLevelEntries(inner: string): string[] {
+  const entries: string[] = [];
+  let depth = 0;
+  let current = '';
+  let inString: string | null = null;
+
+  for (let i = 0; i < inner.length; i++) {
+    const ch = inner[i];
+
+    if (inString) {
+      current += ch;
+      if (ch === '\\') {
+        current += inner[i + 1] ?? '';
+        i++;
+        continue;
+      }
+      if (ch === inString) inString = null;
+      continue;
+    }
+
+    if (ch === '"' || ch === "'" || ch === '`') {
+      inString = ch;
+      current += ch;
+      continue;
+    }
+
+    if (ch === '{' || ch === '[' || ch === '(') {
+      depth++;
+      current += ch;
+      continue;
+    }
+
+    if (ch === '}' || ch === ']' || ch === ')') {
+      depth--;
+      current += ch;
+      continue;
+    }
+
+    if (ch === ',' && depth === 0) {
+      const trimmed = current.trim();
+      if (trimmed) entries.push(trimmed);
+      current = '';
+      continue;
+    }
+
+    current += ch;
+  }
+
+  const trimmed = current.trim();
+  if (trimmed) entries.push(trimmed);
+  return entries;
+}
+
+/**
+ * Parses a single top-level runtime prop entry such as:
+ *   `name: { type: String, required: true, default: 'x' }`
+ *   `title: String`
+ */
+function parseRuntimePropEntry(entry: string): ComponentPropContract | null {
+  const match = entry.match(PROP_NAME_VALUE_PATTERN);
+  if (!match || !match[1]) return null;
+
+  const propValue = match[2].trim();
+
+  // If propValue is an object literal, extract fields using balance-depth split
+  if (propValue.startsWith('{') && propValue.endsWith('}')) {
+    const inner = propValue.slice(1, -1);
+    const fields = splitTopLevelEntries(inner);
+    let type = 'any';
+    let required = false;
+    let defaultValue: string | undefined;
+
+    for (const field of fields) {
+      const fieldMatch = field.match(/^([A-Za-z0-9_$]+)\s*:\s*([\s\S]+)$/);
+      if (!fieldMatch) continue;
+      const key = fieldMatch[1];
+      const val = fieldMatch[2].trim();
+
+      if (key === 'type') {
+        type = extractPropType(val);
+      } else if (key === 'required') {
+        required = val === 'true';
+      } else if (key === 'default') {
+        defaultValue = val;
+      }
+    }
+
+    return {
+      name: match[1],
+      type,
+      required,
+      default: defaultValue,
+    };
+  }
+
+  return {
+    name: match[1],
+    type: extractPropType(propValue),
+    required: isPropRequired(propValue),
+    default: extractPropDefault(propValue),
+  };
+}
+
+/**
+ * Parses a runtime-JS `defineProps({ ... })` object literal into prop contracts.
+ * Handles nested `type`/`default`/`required` pairs without confusing them with props.
+ */
+export function parseRuntimePropsObject(objectText: string): ComponentPropContract[] {
+  const cleaned = objectText.trim();
+  const inner = cleaned.startsWith('{') && cleaned.endsWith('}') ? cleaned.slice(1, -1) : cleaned;
+  const props: ComponentPropContract[] = [];
+
+  for (const entry of splitTopLevelEntries(inner)) {
+    const prop = parseRuntimePropEntry(entry);
+    if (prop) props.push(prop);
+  }
+
+  return props;
 }
 
 /**
@@ -118,7 +336,7 @@ rule:
 
     for (const m of rawMatches) {
       const text = m.text.trim();
-      const match = text.match(/^([A-Za-z0-9_$]+)(\?)?:\s*(.+)$/);
+      const match = text.match(PROPERTY_SIGNATURE_PATTERN);
       if (match && match[1]) {
         const name = match[1];
         const isOptional = match[2] === '?';
@@ -177,7 +395,7 @@ async function extractVueContract(filePath: string, content: string): Promise<Co
 
       for (const m of withDefaultsMatches) {
         const text = m.text;
-        const secondArgMatch = text.match(/withDefaults\s*\([^,]+,\s*(\{[\s\S]*?\})\s*\)/);
+        const secondArgMatch = text.match(WITH_DEFAULTS_SECOND_ARG_PATTERN);
         if (secondArgMatch && secondArgMatch[1]) {
           defaultsMap = parseDefaultsObject(secondArgMatch[1]);
         }
@@ -197,7 +415,7 @@ async function extractVueContract(filePath: string, content: string): Promise<Co
       for (const m of typePropsMatches) {
         const snippet = m.text;
         // Check if inline object type or named interface: defineProps<Props>()
-        const namedMatch = snippet.match(/defineProps<([A-Za-z0-9_$]+)>\(\)/);
+        const namedMatch = snippet.match(NAMED_PROPS_TYPE_PATTERN);
         if (namedMatch && namedMatch[1]) {
           const typeName = namedMatch[1];
           // Search for interface or type definition
@@ -240,34 +458,12 @@ async function extractVueContract(filePath: string, content: string): Promise<Co
         });
 
         for (const m of runtimeMatches) {
-          const pairs = await executeAstGrep({
-            code: m.text,
-            rule: `
-id: runtime-pair
-language: ${lang}
-rule:
-  kind: pair
-  inside:
-    pattern: defineProps({ $$$ })
-`,
-            language: lang,
-          });
+          const objectArg = extractObjectArgument(m.text);
+          if (!objectArg) continue;
 
-          for (const p of pairs) {
-            const keyMatch = p.text.match(/^([A-Za-z0-9_$]+)\s*:\s*(.+)$/s);
-            if (keyMatch && keyMatch[1]) {
-              const name = keyMatch[1];
-              const val = keyMatch[2];
-              const isRequired = /required\s*:\s*true/.test(val);
-              const typeMatch = val.match(/type\s*:\s*([A-Za-z0-9_$]+)/);
-              const defaultMatch = val.match(/default\s*:\s*([^,\n}]+)/);
-
-              props.push({
-                name,
-                type: typeMatch ? typeMatch[1] : 'any',
-                required: isRequired,
-                default: defaultMatch ? defaultMatch[1].trim() : undefined,
-              });
+          for (const p of parseRuntimePropsObject(objectArg)) {
+            if (!props.some((existing) => existing.name === p.name)) {
+              props.push(p);
             }
           }
         }
@@ -306,7 +502,7 @@ rule:
 
         for (const cs of callSigMatches) {
           const text = cs.text.trim();
-          const match = text.match(/\(\s*(?:e\s*:\s*)?['"]([^'"]+)['"](?:\s*,\s*(.+?))?\s*\)/);
+          const match = text.match(EMIT_CALL_SIGNATURE_PATTERN);
           if (match && match[1]) {
             emits.push({
               name: match[1],
@@ -320,7 +516,7 @@ rule:
           const propSigs = await extractPropertySignatures(m.text, lang);
           for (const ps of propSigs) {
             emits.push({
-              name: ps.name.replace(/['"]/g, ''),
+              name: stripQuotes(ps.name),
               payload: ps.type,
             });
           }
@@ -340,7 +536,7 @@ rule:
         });
 
         for (const m of arrayEmitsMatches) {
-          const names = m.text.matchAll(/['"]([^'"]+)['"]/g);
+          const names = m.text.matchAll(QUOTED_STRING_PATTERN);
           for (const n of names) {
             emits.push({ name: n[1] });
           }
@@ -359,7 +555,7 @@ rule:
       });
 
       for (const m of exposeMatches) {
-        const names = m.text.matchAll(/([A-Za-z0-9_$]+)\s*[,}]/g);
+        const names = m.text.matchAll(EXPOSED_NAME_PATTERN);
         for (const n of names) {
           if (n[1] !== 'defineExpose') {
             exposed.push(n[1]);
@@ -422,7 +618,7 @@ rule:
         }
 
         // In React, props starting with 'on' followed by uppercase letter are event callbacks
-        if (/^on[A-Z]/.test(p.name)) {
+        if (isReactEventHandler(p.name)) {
           emits.push({
             name: p.name,
             payload: p.type,
@@ -507,6 +703,171 @@ rule:
 }
 
 /**
+ * Detects isomorphic render boundary, SSR vs client hydration, and RSC directives.
+ */
+export function extractRenderBoundary(
+  filePath: string,
+  content: string,
+  framework: 'vue' | 'react' | 'astro' | 'unknown'
+): RenderBoundaryInfo {
+  const normPath = filePath.replace(/\\/g, '/');
+
+  if (framework === 'react') {
+    // 1. Check for 'use client' directive
+    if (/^\s*['"]use client['"]/m.test(content)) {
+      return {
+        boundary: 'client-component',
+        directive: 'use client',
+        isClientHydrated: true,
+      };
+    }
+
+    // 2. Check for 'use server' directive
+    if (/^\s*['"]use server['"]/m.test(content)) {
+      return {
+        boundary: 'server-action',
+        directive: 'use server',
+        isClientHydrated: false,
+      };
+    }
+
+    // 3. Next.js App router defaults to React Server Component (RSC)
+    if (normPath.startsWith('app/') || normPath.includes('/app/')) {
+      return {
+        boundary: 'server-component',
+        isClientHydrated: false,
+      };
+    }
+
+    // Standard client component in Vite/CRA/Next Pages router
+    return {
+      boundary: 'client-component',
+      isClientHydrated: true,
+    };
+  }
+
+  if (framework === 'vue') {
+    if (normPath.endsWith('.client.vue')) {
+      return {
+        boundary: 'client-only',
+        directive: '.client.vue',
+        isClientHydrated: true,
+      };
+    }
+    if (normPath.endsWith('.server.vue')) {
+      return {
+        boundary: 'server-only',
+        directive: '.server.vue',
+        isClientHydrated: false,
+      };
+    }
+    if (/<ClientOnly\b/i.test(content)) {
+      return {
+        boundary: 'isomorphic',
+        directive: '<ClientOnly>',
+        isClientHydrated: true,
+      };
+    }
+
+    return {
+      boundary: 'isomorphic',
+      isClientHydrated: true,
+    };
+  }
+
+  if (framework === 'astro') {
+    // Check if Astro component mounts any client-hydrated islands
+    const islandMatch = content.match(/\b(client:(?:load|visible|idle|media|only)(?:=[^>\s]+)?)/i);
+    if (islandMatch) {
+      return {
+        boundary: 'astro-island',
+        directive: islandMatch[1],
+        isClientHydrated: true,
+      };
+    }
+
+    return {
+      boundary: 'astro-static',
+      isClientHydrated: false,
+    };
+  }
+
+  return {
+    boundary: 'unknown',
+    isClientHydrated: false,
+  };
+}
+
+const COMMON_HOOKS_IGNORE = new Set([
+  'useState',
+  'useEffect',
+  'useCallback',
+  'useMemo',
+  'useRef',
+  'useId',
+  'useContext',
+  'useReducer',
+  'useTransition',
+  'useDeferredValue',
+  'useImperativeHandle',
+  'useLayoutEffect',
+  'useInsertionEffect',
+  'useSyncExternalStore',
+  'useSlots',
+  'useAttrs',
+  'useModel',
+]);
+
+/**
+ * Extracts out-of-band state and store dependencies (Pinia, Zustand, Redux, Context, inject).
+ */
+export function extractStateDependencies(
+  content: string,
+  _framework: 'vue' | 'react' | 'astro' | 'unknown'
+): StateDependencyInfo {
+  const stores = new Set<string>();
+  const contexts = new Set<string>();
+  const composables = new Set<string>();
+
+  // 1. Stores: Pinia / Zustand / Redux
+  const storeRegex = /\b(use[A-Za-z0-9_$]*Store)\b/g;
+  for (const m of content.matchAll(storeRegex)) {
+    stores.add(m[1]);
+  }
+
+  const reduxRegex = /\b(useSelector|useDispatch|useAppSelector|useAppDispatch)\b/g;
+  for (const m of content.matchAll(reduxRegex)) {
+    stores.add(m[1]);
+  }
+
+  // 2. React Context & Vue inject
+  const contextRegex = /\buseContext\(\s*([A-Za-z0-9_$]+)\s*\)/g;
+  for (const m of content.matchAll(contextRegex)) {
+    contexts.add(m[1]);
+  }
+
+  const vueInjectRegex = /\binject(?:\s*<[^>]*>)?\(\s*['"]?([A-Za-z0-9_$-]+)['"]?/g;
+  for (const m of content.matchAll(vueInjectRegex)) {
+    if (m[1]) contexts.add(m[1]);
+  }
+
+  // 3. Custom Composables / Hooks (useXxx)
+  const hookRegex = /\b(use[A-Z][A-Za-z0-9_$]*)\s*\(/g;
+  for (const m of content.matchAll(hookRegex)) {
+    const hookName = m[1];
+    if (!COMMON_HOOKS_IGNORE.has(hookName) && !stores.has(hookName) && hookName !== 'useContext') {
+      composables.add(hookName);
+    }
+  }
+
+  return {
+    stores: Array.from(stores),
+    contexts: Array.from(contexts),
+    composables: Array.from(composables),
+  };
+}
+
+/**
  * Public facade: extracts the public contract of a component (.vue, .tsx, .jsx, .astro).
  */
 export async function extractComponentContract(
@@ -517,16 +878,20 @@ export async function extractComponentContract(
   const content = explicitContent !== undefined ? explicitContent : await fs.readFile(resolvedPath, 'utf8');
   const framework = detectFramework(resolvedPath);
 
+  let baseContract: ComponentContract;
   switch (framework) {
     case 'vue':
-      return extractVueContract(resolvedPath, content);
+      baseContract = await extractVueContract(resolvedPath, content);
+      break;
     case 'react':
-      return extractReactContract(resolvedPath, content);
+      baseContract = await extractReactContract(resolvedPath, content);
+      break;
     case 'astro':
-      return extractAstroContract(resolvedPath, content);
+      baseContract = await extractAstroContract(resolvedPath, content);
+      break;
     default: {
       const component = basename(resolvedPath, extname(resolvedPath));
-      return {
+      baseContract = {
         component,
         framework: 'unknown',
         filePath: resolvedPath,
@@ -534,8 +899,18 @@ export async function extractComponentContract(
         emits: [],
         slots: [],
       };
+      break;
     }
   }
+
+  const renderBoundary = extractRenderBoundary(resolvedPath, content, framework);
+  const stateDependencies = extractStateDependencies(content, framework);
+
+  return {
+    ...baseContract,
+    renderBoundary,
+    stateDependencies,
+  };
 }
 
 /**
@@ -546,6 +921,13 @@ export function formatContractAsText(contract: ComponentContract): string {
     `Component: ${contract.component} (${contract.framework})`,
     `File: ${contract.filePath}`,
   ];
+
+  if (contract.renderBoundary) {
+    const directiveStr = contract.renderBoundary.directive
+      ? ` ('${contract.renderBoundary.directive}')`
+      : '';
+    lines.push(`Render Boundary: ${contract.renderBoundary.boundary}${directiveStr}`);
+  }
 
   lines.push('');
   lines.push('Props:');
@@ -585,6 +967,23 @@ export function formatContractAsText(contract: ComponentContract): string {
     lines.push('Exposed:');
     for (const exp of contract.exposed) {
       lines.push(`  - ${exp}`);
+    }
+  }
+
+  if (contract.stateDependencies) {
+    const { stores, contexts, composables } = contract.stateDependencies;
+    if (stores.length > 0 || contexts.length > 0 || composables.length > 0) {
+      lines.push('');
+      lines.push('State Dependencies:');
+      if (stores.length > 0) {
+        lines.push(`  - Stores: ${stores.join(', ')}`);
+      }
+      if (contexts.length > 0) {
+        lines.push(`  - Context/Injected: ${contexts.join(', ')}`);
+      }
+      if (composables.length > 0) {
+        lines.push(`  - Composables: ${composables.join(', ')}`);
+      }
     }
   }
 
