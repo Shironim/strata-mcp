@@ -15,7 +15,7 @@ describe('MCP Server & Tools (Task 5 DoD)', () => {
     expect(listHandler).toBeDefined();
 
     const toolsResult = await listHandler({ method: 'tools/list', params: {} });
-    expect(toolsResult.tools.length).toBe(8);
+    expect(toolsResult.tools.length).toBe(10);
 
     const toolNames = toolsResult.tools.map((t: any) => t.name);
     expect(toolNames).toContain('find_code');
@@ -26,6 +26,8 @@ describe('MCP Server & Tools (Task 5 DoD)', () => {
     expect(toolNames).toContain('extract_component_contract');
     expect(toolNames).toContain('get_component_tree');
     expect(toolNames).toContain('find_unused_components');
+    expect(toolNames).toContain('scan_routes');
+    expect(toolNames).toContain('query_state_impact');
   });
 
   it('invokes find_component_usage via MCP call tool handler', async () => {
@@ -70,6 +72,25 @@ describe('MCP Server & Tools (Task 5 DoD)', () => {
 
     expect(response.isError).toBeFalsy();
     expect(response.content[0].text).toContain('Debug CST');
+  });
+
+  it('returns tool error when dump_syntax_tree is called with unsupported language', async () => {
+    const server = createMcpServer();
+    const callHandler = (server as any)._requestHandlers?.get('tools/call');
+
+    const response = await callHandler({
+      method: 'tools/call',
+      params: {
+        name: 'dump_syntax_tree',
+        arguments: {
+          code: 'const a = 1;',
+          language: 'unsupported_lang_xyz',
+        },
+      },
+    });
+
+    expect(response.isError).toBe(true);
+    expect(response.content[0].text).toContain('ast-grep dump failed');
   });
 
   it('invokes test_match_code_rule for in-memory dynamic lazy import (TC-2.1)', async () => {
@@ -166,5 +187,114 @@ rule:
     expect(response.isError).toBe(true);
     expect(response.content[0].text).toContain('mapping values are not allowed');
     expect(response.content[0].text).toContain('Hint: wrap your pattern with quotes');
+  });
+
+  it('supports target_path alias interchangeably with path in find_component_usage', async () => {
+    const server = createMcpServer();
+    const callHandler = (server as any)._requestHandlers?.get('tools/call');
+
+    const response = await callHandler({
+      method: 'tools/call',
+      params: {
+        name: 'find_component_usage',
+        arguments: {
+          component_name: 'OldButton',
+          target_path: FIXTURES_DIR,
+          output_format: 'json',
+        },
+      },
+    });
+
+    expect(response.isError).toBeFalsy();
+    const parsed = JSON.parse(response.content[0].text);
+    expect(Array.isArray(parsed)).toBe(true);
+    expect(parsed.length).toBeGreaterThanOrEqual(4);
+  });
+
+  it('supports target_path alias in find_code and returns clean error on missing path', async () => {
+    const server = createMcpServer();
+    const callHandler = (server as any)._requestHandlers?.get('tools/call');
+
+    const successResponse = await callHandler({
+      method: 'tools/call',
+      params: {
+        name: 'find_code',
+        arguments: {
+          pattern: 'defineProps<$$$>()',
+          target_path: FIXTURES_DIR,
+        },
+      },
+    });
+    expect(successResponse.isError).toBeFalsy();
+    expect(successResponse.content[0].text).toContain('NewButton.vue:6');
+
+    const errorResponse = await callHandler({
+      method: 'tools/call',
+      params: {
+        name: 'find_code',
+        arguments: {
+          pattern: 'defineProps<$$$>()',
+        },
+      },
+    });
+    expect(errorResponse.isError).toBe(true);
+    expect(errorResponse.content[0].text).toContain("Missing required argument: 'path'");
+  });
+
+  it('invokes scan_routes via MCP call tool handler', async () => {
+    const server = createMcpServer();
+    const callHandler = (server as any)._requestHandlers?.get('tools/call');
+
+    const response = await callHandler({
+      method: 'tools/call',
+      params: {
+        name: 'scan_routes',
+        arguments: {
+          target_path: FIXTURES_DIR,
+        },
+      },
+    });
+
+    expect(response.isError).toBeFalsy();
+    expect(response.content[0].text).toContain('Route Manifest');
+  });
+
+  it('invokes get_component_tree with direction: upward via MCP call tool handler', async () => {
+    const server = createMcpServer();
+    const callHandler = (server as any)._requestHandlers?.get('tools/call');
+
+    const response = await callHandler({
+      method: 'tools/call',
+      params: {
+        name: 'get_component_tree',
+        arguments: {
+          entry_path: join(FIXTURES_DIR, 'OldButton.vue'),
+          direction: 'upward',
+        },
+      },
+    });
+
+    expect(response.isError).toBeFalsy();
+    expect(response.content[0].text).toContain('Upward Blast Radius');
+    expect(response.content[0].text).toContain('consumers explored');
+  });
+
+  it('invokes query_state_impact via MCP call tool handler', async () => {
+    const server = createMcpServer();
+    const callHandler = (server as any)._requestHandlers?.get('tools/call');
+
+    const response = await callHandler({
+      method: 'tools/call',
+      params: {
+        name: 'query_state_impact',
+        arguments: {
+          identifier: 'useRouter',
+          target_path: FIXTURES_DIR,
+        },
+      },
+    });
+
+    expect(response.isError).toBeFalsy();
+    expect(response.content[0].text).toContain('State Impact Analysis for: useRouter');
   });
 });

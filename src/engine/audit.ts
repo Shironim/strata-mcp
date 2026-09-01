@@ -3,6 +3,7 @@ import { basename, extname, normalize, relative, resolve } from 'node:path';
 import { collectFiles } from './collector';
 import { getCandidateNames } from './template';
 import { detectFramework } from './contract';
+import { escapeRegExp } from './patterns';
 import type {
   UnusedComponentInfo,
   UnusedComponentsOptions,
@@ -13,14 +14,19 @@ import type {
  * Checks if a file path matches a glob pattern (supports **, *, and ?).
  */
 export function matchesGlob(filePath: string, glob: string): boolean {
-  const normPath = filePath.replace(/\\/g, '/');
-  const normGlob = glob.replace(/\\/g, '/');
+  const normPath = filePath.replace(/\\/g, '/').replace(/^\.\//, '');
+  const normGlob = glob.replace(/\\/g, '/').replace(/^\.\//, '');
 
-  const regexStr = normGlob
-    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
-    .replace(/\*\*/g, '.*')
-    .replace(/\*/g, '[^/]*')
-    .replace(/\?/g, '.');
+  const tokens = normGlob.split(/(\/\*\*\/?|\*\*\/?|\*|\?)/);
+  const regexStr = tokens
+    .map((part) => {
+      if (part === '/**/' || part === '/**' || part === '**/') return '(?:.*\\/)?';
+      if (part === '**') return '.*';
+      if (part === '*') return '[^/]*';
+      if (part === '?') return '.';
+      return escapeRegExp(part);
+    })
+    .join('');
 
   const regex = new RegExp(`(?:^|/)${regexStr}(?:$|/)`);
   return regex.test(normPath);
@@ -31,8 +37,8 @@ export function matchesGlob(filePath: string, glob: string): boolean {
  */
 function isComponentReferencedInContent(content: string, candidateNames: string[]): boolean {
   for (const cand of candidateNames) {
-    // Check as word boundary, tag, or inside import string: '.../Card'
-    const regex = new RegExp(`\\b${cand}\\b|<${cand}[\\s/>]|['"].*?${cand}(?:\\.[a-z0-9]+)?['"]`);
+    const escaped = escapeRegExp(cand);
+    const regex = new RegExp(`\\b${escaped}\\b|<${escaped}[\\s/>]|['"].*?${escaped}(?:\\.[a-z0-9]+)?['"]`);
     if (regex.test(content)) return true;
   }
   return false;

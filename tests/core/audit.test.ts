@@ -17,6 +17,9 @@ describe('Unused Components Audit Engine (Phase 4 RFC)', () => {
     expect(matchesGlob('src/components/Card.stories.tsx', '**/*.stories.*')).toBe(true);
     expect(matchesGlob('src/components/Card.test.ts', '**/*.test.*')).toBe(true);
     expect(matchesGlob('src/components/ProductCard.vue', '**/*.stories.*')).toBe(false);
+    expect(matchesGlob('src/audit.ts', 'src/**/*.ts')).toBe(true);
+    expect(matchesGlob('src/engine/audit.ts', 'src/**/*.ts')).toBe(true);
+    expect(matchesGlob('audit.ts', '**/*.ts')).toBe(true);
   });
 
   it('audits fixtures directory and detects unreferenced CardComponent.tsx', async () => {
@@ -25,11 +28,16 @@ describe('Unused Components Audit Engine (Phase 4 RFC)', () => {
       ignorePatterns: [
         'Page*.vue',
         'Page*.tsx',
+        'AutoImport*.vue',
         'AsyncPage.vue',
         'AliasedPage.vue',
         'DynamicPage.tsx',
         'NamespacePage.tsx',
         'AstroIsland.astro',
+        'RuntimePropsButton.vue',
+        'TemplateEmit.vue',
+        'AliasTreeRoot.vue',
+        'AliasOverrideRoot.vue',
       ],
     });
 
@@ -60,6 +68,10 @@ describe('Unused Components Audit Engine (Phase 4 RFC)', () => {
         'DynamicPage.tsx',
         'NamespacePage.tsx',
         'AstroIsland.astro',
+        'RuntimePropsButton.vue',
+        'TemplateEmit.vue',
+        'AliasTreeRoot.vue',
+        'AliasOverrideRoot.vue',
       ],
     });
 

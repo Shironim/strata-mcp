@@ -14,12 +14,15 @@ import { dumpSyntaxTree, executeAstGrep, verifyAstGrepBinary } from './engine/as
 import { extractComponentContract, formatContractAsText } from './engine/contract';
 import { getComponentTree, formatTreeAsText } from './engine/tree';
 import { findUnusedComponents, formatUnusedAsText } from './engine/audit';
+import { scanRoutes, formatRoutesAsText } from './engine/routes';
+import { queryStateImpact, formatStateImpactAsText } from './engine/database';
+import type { RouteFramework } from './types';
 
 export function createMcpServer(): Server {
   const server = new Server(
     {
       name: 'vue-ast-mcp',
-      version: '0.2.0',
+      version: '0.4.0',
     },
     {
       capabilities: {
@@ -199,6 +202,18 @@ export function createMcpServer(): Server {
                 type: 'number',
                 description: 'Maximum traversal depth (default: 3)',
               },
+              direction: {
+                type: 'string',
+                enum: ['downward', 'upward'],
+                description:
+                  'Traversal direction: "downward" (root page -> child components) or "upward" (leaf component -> consumers/pages blast radius). Default: "downward".',
+              },
+              alias_map: {
+                type: 'object',
+                additionalProperties: { type: 'string' },
+                description:
+                  'Optional alias map that overrides/merges with auto-detected jsconfig/tsconfig paths (e.g. { "@/": "resources/js/" }). Keys may use "*" (wildcard) or end with "/" (prefix).',
+              },
               output_format: {
                 type: 'string',
                 enum: ['text', 'json'],
@@ -233,6 +248,64 @@ export function createMcpServer(): Server {
             required: ['target_path'],
           },
         },
+        {
+          name: 'scan_routes',
+          description:
+            'Discovers file-based route topology (URL routes, dynamic params, layouts, and API handlers) across Next.js (App & Pages), Nuxt 3, Astro, and Inertia.js.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              target_path: {
+                type: 'string',
+                description: 'Project root directory or pages/app folder to scan (alias: path)',
+              },
+              path: {
+                type: 'string',
+                description: 'Alias for target_path',
+              },
+              framework: {
+                type: 'string',
+                enum: ['next-app', 'next-pages', 'nuxt', 'astro', 'inertia', 'unknown'],
+                description: 'Optional framework hint if auto-detection should be bypassed',
+              },
+              output_format: {
+                type: 'string',
+                enum: ['text', 'json'],
+                description: 'Output format: text or json (default: "text")',
+              },
+            },
+            required: ['target_path'],
+          },
+        },
+        {
+          name: 'query_state_impact',
+          description:
+            'Queries all components, layout wrappers, and pages consuming a specific state store (Pinia/Zustand/Redux), Context, or custom composable using the SQLite graph cache.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              identifier: {
+                type: 'string',
+                description:
+                  'The state identifier to query (e.g. "useCartStore", "ThemeContext", "useRouter")',
+              },
+              target_path: {
+                type: 'string',
+                description: 'Project root directory (alias: path, default: ".")',
+              },
+              path: {
+                type: 'string',
+                description: 'Alias for target_path',
+              },
+              output_format: {
+                type: 'string',
+                enum: ['text', 'json'],
+                description: 'Output format: text or json (default: "text")',
+              },
+            },
+            required: ['identifier'],
+          },
+        },
       ],
     };
   });
@@ -242,9 +315,22 @@ export function createMcpServer(): Server {
 
     try {
       if (name === 'find_code') {
+        const targetPath = (args.path || args.target_path) ? String(args.path || args.target_path) : '';
+        if (!targetPath) {
+          return {
+            isError: true,
+            content: [{ type: 'text', text: "Missing required argument: 'path' (or 'target_path')" }],
+          };
+        }
+        if (!args.pattern) {
+          return {
+            isError: true,
+            content: [{ type: 'text', text: "Missing required argument: 'pattern'" }],
+          };
+        }
         const matches = await findCode({
           pattern: String(args.pattern),
-          targetPath: String(args.path),
+          targetPath,
           language: args.language ? String(args.language) : undefined,
           maxResults: args.max_results ? Number(args.max_results) : undefined,
         });
@@ -261,9 +347,22 @@ export function createMcpServer(): Server {
       }
 
       if (name === 'find_code_by_rule') {
+        const targetPath = (args.path || args.target_path) ? String(args.path || args.target_path) : '';
+        if (!targetPath) {
+          return {
+            isError: true,
+            content: [{ type: 'text', text: "Missing required argument: 'path' (or 'target_path')" }],
+          };
+        }
+        if (!args.rule_yaml) {
+          return {
+            isError: true,
+            content: [{ type: 'text', text: "Missing required argument: 'rule_yaml'" }],
+          };
+        }
         const matches = await findCodeByRule({
           rule: String(args.rule_yaml),
-          targetPath: String(args.path),
+          targetPath,
           maxResults: args.max_results ? Number(args.max_results) : undefined,
         });
 
@@ -279,9 +378,22 @@ export function createMcpServer(): Server {
       }
 
       if (name === 'find_component_usage') {
+        const targetPath = (args.path || args.target_path) ? String(args.path || args.target_path) : '';
+        if (!targetPath) {
+          return {
+            isError: true,
+            content: [{ type: 'text', text: "Missing required argument: 'path' (or 'target_path')" }],
+          };
+        }
+        if (!args.component_name) {
+          return {
+            isError: true,
+            content: [{ type: 'text', text: "Missing required argument: 'component_name'" }],
+          };
+        }
         const matches = await findComponentUsage({
           componentName: String(args.component_name),
-          targetPath: String(args.path),
+          targetPath,
           scope: args.scope as 'template' | 'script' | 'both',
           maxResults: args.max_results ? Number(args.max_results) : undefined,
         });
@@ -298,6 +410,12 @@ export function createMcpServer(): Server {
       }
 
       if (name === 'dump_syntax_tree') {
+        if (!args.code) {
+          return {
+            isError: true,
+            content: [{ type: 'text', text: "Missing required argument: 'code'" }],
+          };
+        }
         const tree = await dumpSyntaxTree(String(args.code), String(args.language || 'ts'));
         return {
           content: [{ type: 'text', text: tree }],
@@ -305,6 +423,12 @@ export function createMcpServer(): Server {
       }
 
       if (name === 'test_match_code_rule') {
+        if (!args.code_snippet || !args.rule_yaml) {
+          return {
+            isError: true,
+            content: [{ type: 'text', text: "Missing required arguments: 'code_snippet' and 'rule_yaml'" }],
+          };
+        }
         const rawMatches = await executeAstGrep({
           code: String(args.code_snippet),
           rule: String(args.rule_yaml),
@@ -329,7 +453,15 @@ export function createMcpServer(): Server {
       }
 
       if (name === 'extract_component_contract') {
-        const filePath = String(args.path);
+        const filePath = (args.path || args.target_path || args.file_path)
+          ? String(args.path || args.target_path || args.file_path)
+          : '';
+        if (!filePath) {
+          return {
+            isError: true,
+            content: [{ type: 'text', text: "Missing required argument: 'path'" }],
+          };
+        }
         const contract = await extractComponentContract(filePath);
         const isJson = args.output_format === 'json';
 
@@ -344,11 +476,31 @@ export function createMcpServer(): Server {
       }
 
       if (name === 'get_component_tree') {
-        const entryPath = String(args.entry_path);
+        const entryPath = (args.entry_path || args.path || args.target_path)
+          ? String(args.entry_path || args.path || args.target_path)
+          : '';
+        if (!entryPath) {
+          return {
+            isError: true,
+            content: [{ type: 'text', text: "Missing required argument: 'entry_path' (or 'path')" }],
+          };
+        }
         const maxDepth = args.max_depth !== undefined ? Number(args.max_depth) : undefined;
+        const direction = args.direction === 'upward' ? 'upward' : 'downward';
+        const aliasMap =
+          args.alias_map && typeof args.alias_map === 'object'
+            ? Object.fromEntries(
+                Object.entries(args.alias_map as Record<string, unknown>).map(([key, value]) => [
+                  key,
+                  String(value),
+                ])
+              )
+            : undefined;
         const result = await getComponentTree({
           entryPath,
           maxDepth,
+          direction,
+          aliasMap,
         });
         const isJson = args.output_format === 'json';
 
@@ -363,7 +515,15 @@ export function createMcpServer(): Server {
       }
 
       if (name === 'find_unused_components') {
-        const targetPath = String(args.target_path);
+        const targetPath = (args.target_path || args.path)
+          ? String(args.target_path || args.path)
+          : '';
+        if (!targetPath) {
+          return {
+            isError: true,
+            content: [{ type: 'text', text: "Missing required argument: 'target_path' (or 'path')" }],
+          };
+        }
         const ignorePatterns = Array.isArray(args.ignore_patterns)
           ? args.ignore_patterns.map(String)
           : undefined;
@@ -383,14 +543,66 @@ export function createMcpServer(): Server {
         };
       }
 
+      if (name === 'scan_routes') {
+        const targetPath = (args.target_path || args.path)
+          ? String(args.target_path || args.path)
+          : '';
+        if (!targetPath) {
+          return {
+            isError: true,
+            content: [{ type: 'text', text: "Missing required argument: 'target_path' (or 'path')" }],
+          };
+        }
+        const result = await scanRoutes({
+          targetPath,
+          frameworkHint: args.framework as RouteFramework | undefined,
+        });
+        const isJson = args.output_format === 'json';
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: isJson ? JSON.stringify(result, null, 2) : formatRoutesAsText(result),
+            },
+          ],
+        };
+      }
+
+      if (name === 'query_state_impact') {
+        const identifier = args.identifier ? String(args.identifier) : '';
+        if (!identifier) {
+          return {
+            isError: true,
+            content: [{ type: 'text', text: "Missing required argument: 'identifier'" }],
+          };
+        }
+        const targetPath = (args.target_path || args.path)
+          ? String(args.target_path || args.path)
+          : process.cwd();
+        const result = await queryStateImpact(targetPath, identifier);
+        const isJson = args.output_format === 'json';
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: isJson ? JSON.stringify(result, null, 2) : formatStateImpactAsText(result),
+            },
+          ],
+        };
+      }
+
       return {
         isError: true,
         content: [{ type: 'text', text: `Unknown tool name: ${name}` }],
       };
-    } catch (err: any) {
+    } catch (err) {
       return {
         isError: true,
-        content: [{ type: 'text', text: `Tool error (${name}): ${err.message}` }],
+        content: [
+          { type: 'text', text: `Tool error (${name}): ${err instanceof Error ? err.message : String(err)}` },
+        ],
       };
     }
   });

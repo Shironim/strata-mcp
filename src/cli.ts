@@ -5,6 +5,13 @@ import { dumpSyntaxTree } from './engine/astgrep';
 import { extractComponentContract, formatContractAsText } from './engine/contract';
 import { getComponentTree, formatTreeAsText } from './engine/tree';
 import { findUnusedComponents, formatUnusedAsText } from './engine/audit';
+import { scanRoutes, formatRoutesAsText } from './engine/routes';
+import {
+  formatStateImpactAsText,
+  queryStateImpact,
+  syncWorkspace,
+} from './engine/database';
+import type { RouteFramework } from './types';
 
 function printHelp() {
   console.log(`
@@ -15,18 +22,24 @@ Usage:
   vue-ast find-component-usage <component-name> [options]
   vue-ast contract <component-file> [options]
   vue-ast tree <entry-file> [options]
+  vue-ast routes [target-dir] [options]
+  vue-ast impact <state-identifier> [options]
+  vue-ast sync [target-dir]
   vue-ast unused [target-dir] [options]
   vue-ast rule <rule-file-or-yaml> [options]
   vue-ast dump <code> [options]
 
 Options:
-  --path <dir|file>   Target directory or file (default: .)
-  --depth <number>    Max tree depth for tree command (default: 3)
-  --ignore <pattern>  Glob pattern to ignore (can repeat or comma-separated)
-  --lang <lang>       Language hint (default: ts)
-  --scope <scope>     Component scope: template | script | both (default: both)
-  --json              Output raw JSON instead of text
-  --help, -h          Show this help message
+  --path <dir|file>       Target directory or file (default: .)
+  --depth <number>        Max tree depth for tree command (default: 3)
+  --direction <dir>       Tree traversal direction: downward | upward (default: downward)
+  --framework <hint>      Framework hint for routes command (next-app, nuxt, astro, inertia)
+  --alias <prefix=path>   Alias map for tree command, comma-separated (e.g. "@/=resources/js/")
+  --ignore <pattern>      Glob pattern to ignore (can repeat or comma-separated)
+  --lang <lang>           Language hint (default: ts)
+  --scope <scope>         Component scope: template | script | both (default: both)
+  --json                  Output raw JSON instead of text
+  --help, -h              Show this help message
 `);
 }
 
@@ -43,11 +56,17 @@ function parseArgs(args: string[]) {
     } else if (arg.startsWith('--')) {
       const key = arg.slice(2);
       const next = args[i + 1];
-      if (next && !next.startsWith('--')) {
+      if (next && !next.startsWith('-')) {
         flags[key] = next;
         i++;
       } else {
         flags[key] = true;
+      }
+    } else if (arg === '-p') {
+      const next = args[i + 1];
+      if (next && !next.startsWith('-')) {
+        flags.path = next;
+        i++;
       }
     } else {
       positional.push(arg);
@@ -55,6 +74,26 @@ function parseArgs(args: string[]) {
   }
 
   return { flags, positional };
+}
+
+/**
+ * Parses a comma-separated `--alias prefix=path` value into an alias map.
+ * Example: `@/=resources/js/,@components/=src/components/`.
+ */
+function parseAliasMap(raw: string | boolean | undefined): Record<string, string> | undefined {
+  if (!raw || typeof raw !== 'string') return undefined;
+
+  const aliasMap: Record<string, string> = {};
+  for (const part of raw.split(',')) {
+    const equalsIndex = part.indexOf('=');
+    if (equalsIndex <= 0) continue;
+
+    const alias = part.slice(0, equalsIndex).trim();
+    const target = part.slice(equalsIndex + 1).trim();
+    if (alias && target) aliasMap[alias] = target;
+  }
+
+  return Object.keys(aliasMap).length > 0 ? aliasMap : undefined;
 }
 
 export async function main(argv: string[] = process.argv.slice(2)) {
@@ -70,7 +109,7 @@ export async function main(argv: string[] = process.argv.slice(2)) {
   const isJson = Boolean(flags.json);
 
   try {
-    if (command === 'search') {
+    if (command === 'search' || command === 'find') {
       const pattern = positional[1];
       if (!pattern) {
         console.error('Error: Pattern is required for search command.');
@@ -91,17 +130,22 @@ export async function main(argv: string[] = process.argv.slice(2)) {
       return;
     }
 
-    if (command === 'find-component-usage') {
+    if (command === 'find-component-usage' || command === 'usage') {
       const componentName = positional[1];
       if (!componentName) {
         console.error('Error: Component name is required.');
         process.exit(1);
       }
 
+      const scope =
+        flags.scope === 'template' || flags.scope === 'script' || flags.scope === 'both'
+          ? flags.scope
+          : 'both';
+
       const matches = await findComponentUsage({
         componentName,
         targetPath,
-        scope: (flags.scope as any) || 'both',
+        scope,
       });
 
       if (isJson) {
@@ -161,9 +205,13 @@ export async function main(argv: string[] = process.argv.slice(2)) {
       }
 
       const maxDepth = flags.depth ? Number(flags.depth) : 3;
+      const direction = flags.direction === 'upward' ? 'upward' : 'downward';
+      const aliasMap = parseAliasMap(flags.alias);
       const result = await getComponentTree({
         entryPath: entryFile,
         maxDepth,
+        direction,
+        aliasMap,
       });
 
       if (isJson) {
@@ -174,7 +222,22 @@ export async function main(argv: string[] = process.argv.slice(2)) {
       return;
     }
 
-    if (command === 'unused' || command === 'find-unused') {
+    if (command === 'routes' || command === 'scan-routes') {
+      const scanPath = positional[1] || targetPath;
+      const result = await scanRoutes({
+        targetPath: scanPath,
+        frameworkHint: flags.framework as RouteFramework | undefined,
+      });
+
+      if (isJson) {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        console.log(formatRoutesAsText(result));
+      }
+      return;
+    }
+
+    if (command === 'unused' || command === 'find-unused' || command === 'audit') {
       const auditPath = positional[1] || targetPath;
       const ignoreArg = flags.ignore ? String(flags.ignore).split(',') : undefined;
 
@@ -187,6 +250,35 @@ export async function main(argv: string[] = process.argv.slice(2)) {
         console.log(JSON.stringify(result, null, 2));
       } else {
         console.log(formatUnusedAsText(result));
+      }
+      return;
+    }
+
+    if (command === 'impact' || command === 'state-impact') {
+      const identifier = positional[1];
+      if (!identifier) {
+        console.error('Error: State identifier (store, context, composable) is required.');
+        process.exit(1);
+      }
+
+      const result = await queryStateImpact(targetPath, identifier);
+      if (isJson) {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        console.log(formatStateImpactAsText(result));
+      }
+      return;
+    }
+
+    if (command === 'sync') {
+      const syncPath = positional[1] || targetPath;
+      const stats = await syncWorkspace(syncPath);
+      if (isJson) {
+        console.log(JSON.stringify(stats, null, 2));
+      } else {
+        console.log(
+          `Synced workspace: ${stats.total} total files (${stats.added} added, ${stats.modified} modified, ${stats.deleted} deleted, ${stats.unchanged} unchanged) in ${stats.durationMs}ms.`
+        );
       }
       return;
     }
@@ -205,8 +297,8 @@ export async function main(argv: string[] = process.argv.slice(2)) {
 
     console.error(`Unknown command: "${command}". Run "vue-ast --help" for available commands.`);
     process.exit(1);
-  } catch (err: any) {
-    console.error(`Error: ${err.message}`);
+  } catch (err) {
+    console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
     process.exit(1);
   }
 }
