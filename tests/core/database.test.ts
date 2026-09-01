@@ -14,17 +14,17 @@ const FIXTURES_DIR = join(import.meta.dir, '../fixtures');
 
 describe('Persistent SQLite Codebase Graph Cache Engine (bun:sqlite)', () => {
   beforeAll(() => {
-    const dbDir = join(FIXTURES_DIR, '.vue-ast');
+    const dbDir = join(FIXTURES_DIR, '.strata');
     if (existsSync(dbDir)) {
       rmSync(dbDir, { recursive: true, force: true });
     }
   });
 
-  it('initializes SQLite database in .vue-ast with WAL mode and gitignore', () => {
+  it('initializes SQLite database in .strata with WAL mode and gitignore', () => {
     const db = getWorkspaceDatabase(FIXTURES_DIR);
     expect(db).toBeDefined();
 
-    const gitignorePath = join(FIXTURES_DIR, '.vue-ast', '.gitignore');
+    const gitignorePath = join(FIXTURES_DIR, '.strata', '.gitignore');
     expect(existsSync(gitignorePath)).toBe(true);
 
     const pragmaJournal = db.query('PRAGMA journal_mode;').get() as { journal_mode: string };

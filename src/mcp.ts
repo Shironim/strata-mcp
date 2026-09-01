@@ -21,7 +21,7 @@ import type { RouteFramework } from './types';
 export function createMcpServer(): Server {
   const server = new Server(
     {
-      name: 'vue-ast-mcp',
+      name: 'strata-mcp',
       version: '0.4.0',
     },
     {
@@ -613,7 +613,7 @@ export function createMcpServer(): Server {
 export async function runServer(): Promise<void> {
   const binaryCheck = await verifyAstGrepBinary();
   if (!binaryCheck.ok) {
-    console.error(`[vue-ast-mcp WARNING]: ${binaryCheck.error}`);
+    console.error(`[strata-mcp WARNING]: ${binaryCheck.error}`);
   }
 
   const server = createMcpServer();

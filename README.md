@@ -1,7 +1,7 @@
-# vue-ast-mcp
+# strata-mcp
 
-> **Vue-Aware & Astro-Aware Structural Code Search MCP Server & CLI**  
-> Precise AST-based structural code searching across **Vue SFCs (`.vue`)**, **Astro components (`.astro`)**, and **React/Next (`.js`, `.jsx`, `.ts`, `.tsx`)** with exact line-number remapping.
+> **Multi-Framework Frontend Structural AST Search, Component Graph & Intelligence Engine**  
+> Precise AST-based structural code searching across **Vue SFCs (`.vue`)**, **Astro components (`.astro`)**, and **React/Next (`.js`, `.jsx`, `.ts`, `.tsx`)** with exact line-number remapping and persistent SQLite graph caching.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
@@ -9,29 +9,34 @@
 
 ## The Problem
 
-Modern frontend development frequently spans **Vue/Nuxt**, **React/Next**, and **Astro Islands**. Developers need structural code search (not just text regex) for tasks like:
+Modern frontend development frequently spans **Vue/Nuxt**, **React/Next**, and **Astro Islands**. Developers and AI coding agents need deep structural intelligence (not just text regex) for tasks like:
 - **Component Adoption Audits**: *"Where is legacy `OldButton` still used, and which pages haven't migrated to `NewButton`?"*
+- **Upward Blast Radius**: *"If I change `BaseTable.vue`, which child components, layouts, and route pages are affected?"*
+- **Route Topology Mapping**: *"What routes, layouts, and API handlers exist across Next.js, Nuxt 3, Astro, or Inertia?"*
+- **State Impact Tracing**: *"Which components and pages consume `useCartStore` or `ThemeContext`?"*
 - **Astro Island Auditing**: *"Which Vue and React components are embedded in `.astro` pages, and which ones are hydrated client-side (`client:load`, `client:visible`)?"*
-- **Dynamic & Re-export Patterns**: Finding components loaded lazily via `defineAsyncComponent()`, `React.lazy()`, `next/dynamic()`, or re-exported through barrel `index.ts` files.
 
 Existing AST tools like [ast-grep](https://ast-grep.github.io) are powerful for `.js/.jsx/.ts/.tsx`, but **fail on multi-language documents like `.vue` and `.astro`** because they treat entire files as HTML, breaking JavaScript/TypeScript AST parsing inside `<script>` and frontmatter (`---`) blocks.
 
 ---
 
-## How `vue-ast-mcp` Solves It
+## How `strata-mcp` Solves It
 
 ```
-.vue / .astro file
+.vue / .astro / .tsx file
    │
    ▼
 [Document Splitter]  ← @vue/compiler-sfc parse() / Astro frontmatter parser
    │
    ├── script / frontmatter block ──► [ast-grep engine] ──► matches (relative coordinates)
    │                                                            │
-   ├── template block ─────────────► [compiler-dom AST] ─► matches (relative coordinates + directives)
+   ├── template / JSX block ───────► [compiler-dom AST] ─► matches (relative coordinates + directives)
    │
    ▼
-[Offset Remapper] ← Remaps block-relative line/col back to original file line numbers
+[Offset Remapper]  ← Remaps block-relative line/col back to original file line numbers
+   │
+   ▼
+[Persistent SQLite Graph] (.strata/graph.db) ← Bun SQLite WAL mode, smart mtime delta sync (<10ms)
    │
    ▼
 [MCP / CLI Response] ← Token-efficient summary (file:line:col [client:directive] - snippet)
@@ -43,7 +48,8 @@ Existing AST tools like [ast-grep](https://ast-grep.github.io) are powerful for 
 4. **Local Alias & Namespace Linking**: Tracks aliased imports (`import { X as Y }`) and namespace calls (`<UI.X />`), automatically resolving `<Y />` in templates back to `X`.
 5. **Astro Island Directives**: Detects hydration directives (`client:load`, `client:visible`, `client:only`) and surfaces them directly in search results.
 6. **Exact Line Remapping**: Calculates the exact line and column numbers in the original `.vue` or `.astro` file.
-7. **Zero Token Flooding**: Outputs concise, line-oriented text by default (JSON optional).
+7. **Persistent SQLite Graph Cache**: Stores component hierarchies, render boundaries, state dependencies, and routes in `.strata/graph.db` with sub-millisecond CTE queries.
+8. **Zero Token Flooding**: Outputs concise, line-oriented text by default (JSON optional).
 
 ---
 
@@ -52,9 +58,9 @@ Existing AST tools like [ast-grep](https://ast-grep.github.io) are powerful for 
 Requires **[Bun](https://bun.sh)** (`>= 1.1.0`) for high-performance AST processing and native `bun:sqlite` graph caching.
 
 ```bash
-bun add -g vue-ast-mcp
+bun add -g strata-mcp
 # or run directly via bunx
-bunx vue-ast-mcp
+bunx strata-mcp
 ```
 
 > **Lifecycle scripts**: When installing `@ast-grep/cli` with Bun, ensure lifecycle scripts are trusted:
@@ -64,15 +70,15 @@ bunx vue-ast-mcp
 
 ## MCP Client Configuration
 
-Connect `vue-ast-mcp` to your favorite AI agent:
+Connect `strata-mcp` to your favorite AI agent:
 
 ### Claude Desktop / Claude Code (`claude_desktop_config.json`)
 ```json
 {
   "mcpServers": {
-    "vue-ast": {
+    "strata": {
       "command": "bunx",
-      "args": ["vue-ast-mcp"]
+      "args": ["strata-mcp"]
     }
   }
 }
@@ -82,9 +88,9 @@ Connect `vue-ast-mcp` to your favorite AI agent:
 ```json
 {
   "mcpServers": {
-    "vue-ast": {
+    "strata": {
       "command": "bun",
-      "args": ["run", "vue-ast-mcp"]
+      "args": ["run", "strata-mcp"]
     }
   }
 }
@@ -119,91 +125,91 @@ Connect `vue-ast-mcp` to your favorite AI agent:
 
 ## CLI Companion Usage
 
-You can also run `vue-ast` directly from the terminal without an MCP client:
+You can also run `strata` directly from the terminal without an MCP client (`vue-ast` is also supported as a backward-compatible alias):
 
 ### 1. Audit Component Adoption (Vue, React, Astro)
 ```bash
 # Find all usages of OldButton across .vue, .astro, and .tsx files
-vue-ast find-component-usage OldButton --path ./src
+strata find-component-usage OldButton --path ./src
 
 # Output as structured JSON (including clientDirective metadata)
-vue-ast find-component-usage OldButton --path ./src --json
+strata find-component-usage OldButton --path ./src --json
 ```
 
 ### 2. Extract Component Contract (Token-Efficient Interface)
 ```bash
-# Extract props, emits, and slots in human-readable summary
-vue-ast contract ./src/components/ProductCard.vue
+# Extract props, emits, slots, and render boundaries
+strata contract ./src/components/ProductCard.vue
 
 # Output as JSON contract
-vue-ast contract ./src/components/ProductCard.vue --json
+strata contract ./src/components/ProductCard.vue --json
 ```
 
 ### 3. Visualize Downward Component Hierarchy Tree
 ```bash
 # Generate indented call graph tree starting from root view/page
-vue-ast tree ./src/views/CatalogView.vue --depth 3
+strata tree ./src/views/CatalogView.vue --depth 3
 
 # Trace Upward Blast Radius (consumers up to pages)
-vue-ast tree ./src/components/OldButton.vue --direction upward
+strata tree ./src/components/OldButton.vue --direction upward
 
 # Output tree as JSON hierarchy
-vue-ast tree ./src/views/CatalogView.vue --depth 3 --json
+strata tree ./src/views/CatalogView.vue --depth 3 --json
 ```
 
 ### 4. Scan File-Based Route Topology (Next.js, Nuxt 3, Astro, Inertia)
 ```bash
 # Scan routing topology, dynamic parameters, layouts, and API handlers
-vue-ast routes ./src
+strata routes ./src
 
 # Scan with explicit framework hint and JSON output
-vue-ast routes . --framework inertia --json
+strata routes . --framework inertia --json
 ```
 
 ### 5. Query State & Composable Impact (SQLite Graph)
 ```bash
 # Trace all components, layout wrappers, and pages consuming a state store or composable
-vue-ast impact useForm --path ./resources/js
+strata impact useForm --path ./resources/js
 
 # Query Pinia or Zustand store consumers
-vue-ast impact useCartStore --path ./src
+strata impact useCartStore --path ./src
 ```
 
 ### 6. Workspace Graph Delta Synchronization
 ```bash
-# Manually synchronize local SQLite graph cache (.vue-ast/graph.db)
-vue-ast sync ./src
+# Manually synchronize local SQLite graph cache (.strata/graph.db)
+strata sync ./src
 ```
 
 ### 7. Audit Unused / Dead Components
 ```bash
 # Scan project for components with 0 usages (ignoring pages and stories)
-vue-ast unused ./src --ignore "**/pages/**,**/*.stories.*"
+strata unused ./src --ignore "**/pages/**,**/*.stories.*"
 
 # Output dead components as JSON
-vue-ast unused ./src --json
+strata unused ./src --json
 ```
 
 ### 8. Search AST Patterns Across Frameworks
 ```bash
 # Search for Vue composables or functions
-vue-ast search "const $NAME = ref($$$)" --path ./src
+strata search "const $NAME = ref($$$)" --path ./src
 
 # Search in React/TSX files
-vue-ast search "useEffect($$$, $$$)" --path ./src --lang tsx
+strata search "useEffect($$$, $$$)" --path ./src --lang tsx
 
 # Search in Astro frontmatter
-vue-ast search "import $$$ from '$$$'" --path ./src
+strata search "import $$$ from '$$$'" --path ./src
 ```
 
 ### 9. Test AST Rule in Memory Sandbox
 ```bash
-vue-ast rule ./rules/my-rule.yaml --path ./src
+strata rule ./rules/my-rule.yaml --path ./src
 ```
 
 ### 10. Dump CST Syntax Tree
 ```bash
-vue-ast dump "const count = ref(0);" --lang ts
+strata dump "const count = ref(0);" --lang ts
 ```
 
 ---

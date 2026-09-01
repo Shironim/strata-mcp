@@ -1,13 +1,14 @@
 {
-  "name": "vue-ast-mcp",
+  "name": "strata-mcp",
   "version": "0.4.0",
-  "description": "Vue-aware & Astro-aware structural code search MCP server and CLI companion",
+  "description": "Multi-framework frontend structural AST search, component graph, and route topology engine for AI agents (Vue, React, Next, Nuxt, Astro)",
   "type": "module",
   "main": "./src/index.ts",
   "types": "./src/types.ts",
   "bin": {
-    "vue-ast": "./src/cli.ts",
-    "vue-ast-mcp": "./src/mcp.ts"
+    "strata": "./src/cli.ts",
+    "strata-mcp": "./src/mcp.ts",
+    "vue-ast": "./src/cli.ts"
   },
   "scripts": {
     "test": "bun test",

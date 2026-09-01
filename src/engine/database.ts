@@ -38,11 +38,11 @@ export function isLayoutFile(filePath: string): boolean {
  */
 export function getWorkspaceDatabase(workspaceRoot: string): Database {
   const absRoot = resolve(workspaceRoot);
-  const dbDir = join(absRoot, '.vue-ast');
+  const dbDir = join(absRoot, '.strata');
 
   if (!existsSync(dbDir)) {
     mkdirSync(dbDir, { recursive: true });
-    // Write a .gitignore inside .vue-ast so cache DB is never checked into Git
+    // Write a .gitignore inside .strata so cache DB is never checked into Git
     try {
       writeFileSync(join(dbDir, '.gitignore'), '*\n');
     } catch {
@@ -142,6 +142,7 @@ export async function syncWorkspace(workspaceRoot: string): Promise<SyncStats> {
     const norm = f.replace(/\\/g, '/');
     return (
       SUPPORTED_EXTENSIONS.has(ext) &&
+      !norm.includes('/.strata/') &&
       !norm.includes('/.vue-ast/') &&
       !norm.includes('/node_modules/') &&
       !norm.includes('/vendor/') &&

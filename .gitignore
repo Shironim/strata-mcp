@@ -22,3 +22,5 @@ Desktop.ini
 .agents/
 .docs/
 .prompt-library/
+.strata/
+.vue-ast/

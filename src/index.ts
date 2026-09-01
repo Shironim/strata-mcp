@@ -1,5 +1,5 @@
 /**
- * vue-ast-mcp — Vue-Aware & Astro-Aware Structural Code Search Library
+ * strata-mcp — Multi-Framework Frontend Structural Code Search & Intelligence Library
  */
 
 export * from './types';

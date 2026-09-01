@@ -15,19 +15,19 @@ import type { RouteFramework } from './types';
 
 function printHelp() {
   console.log(`
-vue-ast — Vue-Aware & Astro-Aware Structural Code Search CLI
+strata — Multi-Framework Frontend Structural Code Search & Intelligence CLI
 
 Usage:
-  vue-ast search <pattern> [options]
-  vue-ast find-component-usage <component-name> [options]
-  vue-ast contract <component-file> [options]
-  vue-ast tree <entry-file> [options]
-  vue-ast routes [target-dir] [options]
-  vue-ast impact <state-identifier> [options]
-  vue-ast sync [target-dir]
-  vue-ast unused [target-dir] [options]
-  vue-ast rule <rule-file-or-yaml> [options]
-  vue-ast dump <code> [options]
+  strata search <pattern> [options]
+  strata find-component-usage <component-name> [options]
+  strata contract <component-file> [options]
+  strata tree <entry-file> [options]
+  strata routes [target-dir] [options]
+  strata impact <state-identifier> [options]
+  strata sync [target-dir]
+  strata unused [target-dir] [options]
+  strata rule <rule-file-or-yaml> [options]
+  strata dump <code> [options]
 
 Options:
   --path <dir|file>       Target directory or file (default: .)
@@ -295,7 +295,7 @@ export async function main(argv: string[] = process.argv.slice(2)) {
       return;
     }
 
-    console.error(`Unknown command: "${command}". Run "vue-ast --help" for available commands.`);
+    console.error(`Unknown command: "${command}". Run "strata --help" for available commands.`);
     process.exit(1);
   } catch (err) {
     console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);

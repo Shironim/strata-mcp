@@ -8,7 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.4.0] - 2026-09-02
 
 ### Added
-- **Persistent SQLite Codebase Graph Cache**: High-performance local graph cache (`.vue-ast/graph.db`) powered by native `bun:sqlite` with WAL mode. Replaces repeated per-request disk scanning with smart `mtime` delta synchronization (< 10ms warm sync).
+- **Project Rebranding (`strata-mcp`)**: Rebranded package to `strata-mcp` with CLI binary `strata` (with `vue-ast` preserved as backward-compatible alias), reflecting full multi-framework intelligence across Vue, React, Next.js, Nuxt 3, Astro, and Inertia.js.
+- **Persistent SQLite Codebase Graph Cache**: High-performance local graph cache (`.strata/graph.db`) powered by native `bun:sqlite` with WAL mode. Replaces repeated per-request disk scanning with smart `mtime` delta synchronization (< 10ms warm sync).
 - **Recursive CTE Blast Radius & Anti-Join Audits**: Enables instant SQL-level transitive closure queries for upward component blast radiuses, layout chains, and zero-overhead dead component detection.
 - **State Impact Analysis (`query_state_impact`)**: Traces all components, layout wrappers, and pages consuming a specific state store (Pinia/Zustand/Redux), Context, or custom composable.
 - **File-Based Route Topology Scanner (`scan_routes`)**: Automated discovery of routing manifests across Next.js (App Router & Pages Router), Nuxt 3, Astro, and Inertia.js. Resolves URL routes, dynamic parameters (`[id]`, `[...slug]`, `[[...optional]]`), layout nesting chains, and HTTP API handlers.
@@ -17,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Isomorphic Render Boundary Detection**: Automatic classification of React Server Components (RSC), `'use client'`, `'use server'`, Astro hydrated islands (`client:*`), and Nuxt `.client.vue` / `.server.vue`.
 - **Out-of-Band State & Store Dependency Extraction**: Extracts global state dependencies (Pinia, Zustand, Redux) and context/composable injections (`useContext`, `inject`, custom `use*` composables) directly into component contracts.
 - **Unified Parameter Aliases**: Seamless support for `path` and `target_path` aliases across all MCP tools, with informative error guarding for missing arguments.
-- **CLI Commands Expansion**: Added `vue-ast routes`, `vue-ast impact <state-id>`, `vue-ast sync`, and `--direction <downward|upward>` option for `vue-ast tree`.
+- **CLI Commands Expansion**: Added `strata routes`, `strata impact <state-id>`, `strata sync`, and `--direction <downward|upward>` option for `strata tree`.
 
 ## [0.3.0] - 2026-09-01
 
