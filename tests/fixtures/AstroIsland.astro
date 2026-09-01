@@ -1,0 +1,11 @@
+---
+import VueCounter from './VueCounter.vue';
+import ReactButton from './ReactButton.tsx';
+
+const pageTitle = "Astro Multi-Framework Island";
+---
+<div class="astro-container">
+  <h1>{pageTitle}</h1>
+  <VueCounter client:visible initialCount={10} />
+  <ReactButton client:load label="Interactive Action" />
+</div>
