@@ -62,3 +62,32 @@ export function remapMatches(
 ): ResolvedMatch[] {
   return rawMatches.map((match) => remapMatch(match, block, filePath));
 }
+
+/**
+ * Remaps matches produced from a template expression snippet back to the original file.
+ * `expressionStart` is the expression's line/column relative to the template block content.
+ */
+export function remapTemplateExpressionMatches(
+  rawMatches: RawMatch[],
+  templateBlock: SfcBlock,
+  expressionStart: { line: number; column: number },
+  filePath: string
+): ResolvedMatch[] {
+  const start = remapPosition(
+    expressionStart.line,
+    expressionStart.column,
+    templateBlock.loc.start
+  );
+
+  const expressionBlock: SfcBlock = {
+    type: 'template',
+    content: '',
+    lang: 'ts',
+    loc: {
+      start: { line: start.line, column: start.column, offset: 0 },
+      end: { line: start.line, column: start.column, offset: 0 },
+    },
+  };
+
+  return remapMatches(rawMatches, expressionBlock, filePath);
+}

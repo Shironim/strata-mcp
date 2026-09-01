@@ -214,10 +214,14 @@ export async function executeAstGrep(options: AstGrepQueryOptions): Promise<RawM
       });
 
       proc.on('close', (code) => {
-        if (code !== 0 && code !== 1 && stderr.trim()) {
-          let errorMsg = `ast-grep error (exit code ${code}): ${stderr.trim()}`;
+        if (code !== 0) {
+          const detail = stderr.trim() || `process exited with code ${code}`;
+          let errorMsg = `ast-grep error (exit code ${code}): ${detail}`;
           if (stderr.includes('mapping values are not allowed')) {
             errorMsg += '\nHint: wrap your pattern with quotes (e.g. pattern: "$NAME?: $$$") when using special characters like ?, :, {, }.';
+          }
+          if (stderr.includes('missing field') && stderr.includes('id')) {
+            errorMsg += '\nHint: add an "id:" field to your rule YAML (e.g. id: my-rule).';
           }
           reject(new Error(errorMsg));
           return;
@@ -274,25 +278,23 @@ export async function executeAstGrep(options: AstGrepQueryOptions): Promise<RawM
 }
 
 /**
- * Dumps syntax tree for a code snippet using ast-grep pattern debug-query.
+ * Dumps the CST of a code snippet.
  */
 export async function dumpSyntaxTree(code: string, language: string = 'ts'): Promise<string> {
   const bin = resolveAstGrepBinary();
   const isCmd = bin.endsWith('.cmd') || bin.endsWith('.bat');
-  const args = ['run', '--pattern', code, '--lang', language, '--debug-query=cst'];
+  const args = ['run', '--pattern', code, '--lang', language, '--debug-query=cst', '--stdin'];
 
   return new Promise((resolve, reject) => {
-    let stdout = '';
     let stderr = '';
 
     const proc = spawn(bin, args, {
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['pipe', 'ignore', 'pipe'],
       shell: isCmd,
     });
 
-    proc.stdout?.on('data', (chunk) => {
-      stdout += chunk.toString();
-    });
+    // Immediately close stdin to prevent ast-grep from scanning the working directory
+    proc.stdin?.end();
 
     proc.stderr?.on('data', (chunk) => {
       stderr += chunk.toString();
@@ -303,12 +305,12 @@ export async function dumpSyntaxTree(code: string, language: string = 'ts'): Pro
     });
 
     proc.on('close', (code) => {
-      const output = (stdout + '\n' + stderr).trim();
-      if (output.includes('Debug CST:') || code === 0) {
-        resolve(output);
-      } else {
-        reject(new Error(`ast-grep dump failed (exit ${code}): ${stderr}`));
+      const output = stderr.trim();
+      if (code !== 0) {
+        reject(new Error(`ast-grep dump failed (exit ${code}): ${output || 'unknown error'}`));
+        return;
       }
+      resolve(output);
     });
   });
 }

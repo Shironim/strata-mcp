@@ -1,8 +1,14 @@
 import { promises as fs } from 'node:fs';
 import { resolve } from 'node:path';
 import { executeAstGrep, isBinaryExecutionError } from './astgrep';
-import { findComponentInTemplateBlock, getCandidateNames } from './template';
+import {
+  extractTemplateExpressions,
+  findComponentInTemplateBlock,
+  getCandidateNames,
+} from './template';
 import { remapMatches } from './remapper';
+import { queryTemplateExpressions } from './expression-batch';
+import { escapeRegExp, JS_IDENTIFIER } from './patterns';
 import type { RawMatch, ResolvedMatch } from '../types';
 import { collectFiles } from './collector';
 import { formatMatchesAsText } from './formatter';
@@ -36,11 +42,9 @@ export function extractPatternKeywords(pattern?: string): string[] {
   if (!pattern) return [];
 
   const words = pattern
-    .replace(/\$[A-Za-z0-9_]+/g, ' ')
-    .replace(/\$\$\$[A-Za-z0-9_]*/g, ' ')
+    .replace(/\${1,3}[A-Za-z0-9_]*/g, ' ')
     .split(/[^A-Za-z0-9_]+/)
-    .map((w) => w.trim())
-    .filter((w) => w.length >= 2 && !w.startsWith('$'));
+    .filter((w) => w.length >= 2);
 
   return Array.from(new Set(words));
 }
@@ -63,13 +67,30 @@ export function extractRuleKeywords(ruleYaml?: string): string[] {
 }
 
 /**
+ * Extracts the local alias from an import clause, e.g. `import { X as Y }` -> `Y`.
+ */
+function extractImportAlias(importText: string, componentName: string): string | undefined {
+  const pattern = new RegExp(`\\b${escapeRegExp(componentName)}\\s+as\\s+(${JS_IDENTIFIER})`);
+  return importText.match(pattern)?.[1];
+}
+
+/**
+ * Checks whether a JSX element opening tag refers to the given component name.
+ * Supports namespace syntax such as `<UI.OldButton />`.
+ */
+function isJsxElementNameMatch(text: string, componentName: string): boolean {
+  const pattern = new RegExp(`^<([A-Za-z0-9_$.]+\\.)?${escapeRegExp(componentName)}[\\s/>]`);
+  return pattern.test(text);
+}
+
+/**
  * Scans script code for imports, dynamic imports, barrel re-exports, and extracts local alias if any.
  */
 async function findScriptUsages(
   code: string,
   componentName: string,
   lang: string
-): Promise<{ matches: RawMatch[]; localAliases: string[]; localAlias?: string }> {
+): Promise<{ matches: RawMatch[]; localAliases: string[] }> {
   const matches: RawMatch[] = [];
   const localAliases: string[] = [];
   const candidates = getCandidateNames(componentName);
@@ -88,11 +109,9 @@ async function findScriptUsages(
 
         // Check for alias: `import { X as Y }`
         for (const cand of candidates) {
-          const aliasMatch = m.text.match(new RegExp(`\\b${cand}\\s+as\\s+([A-Za-z0-9_$]+)`));
-          if (aliasMatch && aliasMatch[1]) {
-            if (!localAliases.includes(aliasMatch[1])) {
-              localAliases.push(aliasMatch[1]);
-            }
+          const alias = extractImportAlias(m.text, cand);
+          if (alias && !localAliases.includes(alias)) {
+            localAliases.push(alias);
           }
         }
       }
@@ -156,7 +175,7 @@ rule:
     }
   }
 
-  return { matches, localAliases, localAlias: localAliases[0] };
+  return { matches, localAliases };
 }
 
 /**
@@ -209,6 +228,18 @@ export async function findCode(options: SearchOptions): Promise<ResolvedMatch[]>
             if (isBinaryExecutionError(err)) throw err;
             // Non-fatal fallback for template matching
           }
+        } else if (options.language !== 'html') {
+          // Scan JS expressions inside template directives and interpolations (batched).
+          const expressions = extractTemplateExpressions(templateBlock.content);
+          matches.push(
+            ...(await queryTemplateExpressions({
+              expressions,
+              templateBlock,
+              filePath: file,
+              pattern: options.pattern,
+              language: options.language,
+            }))
+          );
         }
       }
 
@@ -255,19 +286,34 @@ export async function findCodeByRule(options: SearchOptions): Promise<ResolvedMa
         matches.push(...remapMatches(rawMatches, block, file));
       }
 
-      // Scan template block if rule targets HTML or language is html
+      // Scan template block if rule targets HTML; otherwise scan JS expressions in the template.
       const templateBlock = adapter.getTemplateBlock();
-      if (templateBlock && (options.language === 'html' || options.rule?.includes('language: html'))) {
-        try {
-          const rawMatches = await executeAstGrep({
-            code: templateBlock.content,
-            rule: options.rule,
-            language: 'html',
-          });
-          matches.push(...remapMatches(rawMatches, templateBlock, file));
-        } catch (err) {
-          if (isBinaryExecutionError(err)) throw err;
-          // Non-fatal fallback
+      if (templateBlock) {
+        const ruleTargetsHtml =
+          options.language === 'html' || options.rule?.includes('language: html');
+
+        if (ruleTargetsHtml) {
+          try {
+            const rawMatches = await executeAstGrep({
+              code: templateBlock.content,
+              rule: options.rule,
+              language: 'html',
+            });
+            matches.push(...remapMatches(rawMatches, templateBlock, file));
+          } catch (err) {
+            if (isBinaryExecutionError(err)) throw err;
+            // Non-fatal fallback
+          }
+        } else {
+          const expressions = extractTemplateExpressions(templateBlock.content);
+          matches.push(
+            ...(await queryTemplateExpressions({
+              expressions,
+              templateBlock,
+              filePath: file,
+              rule: options.rule,
+            }))
+          );
         }
       }
 
@@ -307,17 +353,13 @@ export async function findComponentUsage(options: ComponentSearchOptions): Promi
       // Scan script blocks: always extract aliases for template / JSX usage,
       // but only push script matches to results if scope is 'script' or 'both'.
       for (const block of adapter.getScriptBlocks()) {
-        const { matches: scriptMatches, localAliases, localAlias } = await findScriptUsages(
+        const { matches: scriptMatches, localAliases } = await findScriptUsages(
           block.content,
           options.componentName,
           block.lang || 'ts'
         );
-        if (localAliases) {
-          for (const alias of localAliases) {
-            detectedAliases.add(alias);
-          }
-        } else if (localAlias) {
-          detectedAliases.add(localAlias);
+        for (const alias of localAliases) {
+          detectedAliases.add(alias);
         }
 
         if (scope === 'script' || scope === 'both') {
@@ -368,10 +410,7 @@ rule:
             });
 
             for (const m of jsxMatches) {
-              const isMatch = targetNames.some((name) => {
-                const tagRegex = new RegExp(`^<([A-Za-z0-9_$.]+\\.)?${name}[\\s/>]`);
-                return tagRegex.test(m.text);
-              });
+              const isMatch = targetNames.some((name) => isJsxElementNameMatch(m.text, name));
 
               if (isMatch) {
                 if (!matches.some((e) => e.file === file && e.line === m.line && e.column === m.column)) {

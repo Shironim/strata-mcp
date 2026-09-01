@@ -1,6 +1,14 @@
-import { parse as parseDom, NodeTypes, type RootNode, type TemplateChildNode, type ElementNode } from '@vue/compiler-dom';
+import {
+  parse as parseDom,
+  NodeTypes,
+  type RootNode,
+  type TemplateChildNode,
+  type ElementNode,
+  type ExpressionNode,
+} from '@vue/compiler-dom';
 import type { RawMatch, ResolvedMatch, SfcBlock } from '../types';
 import { remapMatches } from './remapper';
+import { stripQuotes } from './patterns';
 
 /**
  * Converts PascalCase to kebab-case (e.g., OldButton -> old-button).
@@ -92,7 +100,7 @@ export function searchTemplateAst(templateContent: string, options: TemplateSear
                 (prop.exp.content === options.componentName ||
                   prop.exp.content === `'${options.componentName}'` ||
                   prop.exp.content === `"${options.componentName}"` ||
-                  isComponentNameMatch(prop.exp.content.replace(/['"]/g, ''), options.componentName))
+                  isComponentNameMatch(stripQuotes(prop.exp.content), options.componentName))
               ) {
                 isMatched = true;
                 break;
@@ -171,4 +179,66 @@ export function findComponentInTemplateBlock(
 ): ResolvedMatch[] {
   const rawMatches = searchTemplateAst(templateBlock.content, { componentName });
   return remapMatches(rawMatches, templateBlock, filePath);
+}
+
+export interface TemplateExpression {
+  content: string;
+  start: { line: number; column: number };
+}
+
+/**
+ * Extracts JS expression snippets from a Vue/Astro template:
+ * directive values (`@click`, `v-if`, `:prop`, `v-model`) and interpolations (`{{ ... }}`).
+ */
+export function extractTemplateExpressions(templateContent: string): TemplateExpression[] {
+  let root: RootNode;
+  try {
+    root = parseDom(templateContent);
+  } catch {
+    return [];
+  }
+
+  const expressions: TemplateExpression[] = [];
+
+  function pushExpression(exp: ExpressionNode | undefined): void {
+    if (!exp || !('content' in exp)) return;
+    const content = exp.content.trim();
+    if (!content) return;
+
+    expressions.push({
+      content,
+      start: { line: exp.loc.start.line, column: exp.loc.start.column },
+    });
+  }
+
+  function walk(node: RootNode | TemplateChildNode): void {
+    if (node.type === NodeTypes.ELEMENT) {
+      for (const prop of node.props) {
+        if (prop.type === NodeTypes.DIRECTIVE && prop.exp) {
+          pushExpression(prop.exp);
+        }
+      }
+    } else if (node.type === NodeTypes.INTERPOLATION) {
+      pushExpression(node.content);
+    } else if (node.type === NodeTypes.IF) {
+      for (const branch of node.branches) {
+        if (branch.condition) pushExpression(branch.condition);
+        for (const child of branch.children) walk(child);
+      }
+      return;
+    } else if (node.type === NodeTypes.FOR) {
+      if (node.source) pushExpression(node.source);
+    }
+
+    if (
+      node.type === NodeTypes.ROOT ||
+      node.type === NodeTypes.ELEMENT ||
+      node.type === NodeTypes.FOR
+    ) {
+      for (const child of node.children) walk(child);
+    }
+  }
+
+  walk(root);
+  return expressions;
 }
