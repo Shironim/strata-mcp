@@ -15,6 +15,8 @@ import type {
   StateImpactConsumer,
   StateImpactResult,
   SyncStats,
+  UnusedStateItem,
+  UnusedStateResult,
 } from '../types';
 
 const SUPPORTED_EXTENSIONS = new Set(['.vue', '.astro', '.tsx', '.jsx', '.ts', '.js']);
@@ -426,6 +428,7 @@ export async function queryStateImpact(
   workspaceRoot: string,
   identifier: string
 ): Promise<StateImpactResult> {
+  const startTime = performance.now();
   const absRoot = resolve(workspaceRoot);
   await syncWorkspace(absRoot);
   const db = getWorkspaceDatabase(absRoot);
@@ -456,10 +459,17 @@ export async function queryStateImpact(
     identifier: r.identifier,
   }));
 
+  const durationMs = Math.round(performance.now() - startTime);
+
   return {
     identifier,
     totalConsumers: consumers.length,
     consumers,
+    _meta: {
+      engine: 'sqlite-graph-cache',
+      durationMs,
+      cached: true,
+    },
   };
 }
 
@@ -467,8 +477,12 @@ export async function queryStateImpact(
  * Formats a StateImpactResult into a token-efficient human-readable summary.
  */
 export function formatStateImpactAsText(result: StateImpactResult): string {
+  const metaBadge = result._meta
+    ? ` [Engine: ${result._meta.engine} | ${result._meta.durationMs}ms]`
+    : '';
+
   const lines: string[] = [
-    `State Impact Analysis for: ${result.identifier}`,
+    `State Impact Analysis for: ${result.identifier}${metaBadge}`,
     `Total Dependent Components/Pages: ${result.totalConsumers}`,
   ];
 
@@ -482,6 +496,169 @@ export function formatStateImpactAsText(result: StateImpactResult): string {
     const pageBadge = c.isPage ? ' [Page]' : '';
     const boundaryBadge = c.renderBoundary ? ` (${c.renderBoundary})` : '';
     lines.push(`  - ${c.path}${pageBadge}${boundaryBadge}`);
+  }
+
+  return lines.join('\n');
+}
+
+/**
+ * Discovers dead or unreferenced state, composables, and stores across the workspace.
+ */
+export async function findUnusedState(
+  workspaceRoot: string
+): Promise<UnusedStateResult> {
+  const startTime = performance.now();
+  const absRoot = resolve(workspaceRoot);
+  await syncWorkspace(absRoot);
+  const db = getWorkspaceDatabase(absRoot);
+
+  // 1. Identify all state candidate files in the workspace (composables, stores, hooks, utils)
+  const allFiles = await collectFiles(absRoot);
+  const stateCandidates = allFiles.filter((f) => {
+    const norm = f.replace(/\\/g, '/').toLowerCase();
+    const ext = extname(f).toLowerCase();
+    if (!['.ts', '.js', '.vue', '.tsx', '.jsx'].includes(ext)) return false;
+    if (
+      norm.includes('/node_modules/') ||
+      norm.includes('/vendor/') ||
+      norm.includes('/dist/') ||
+      norm.includes('/.strata/')
+    ) {
+      return false;
+    }
+    return (
+      norm.includes('/composables/') ||
+      norm.includes('/hooks/') ||
+      norm.includes('/stores/') ||
+      norm.includes('/store/') ||
+      norm.includes('/utils/state') ||
+      norm.includes('/utils/composables') ||
+      basename(norm).startsWith('use') ||
+      basename(norm).endsWith('store.ts') ||
+      basename(norm).endsWith('store.js')
+    );
+  });
+
+  // 2. Extract declared identifiers (function names / store names) from each state candidate
+  const declaredState: Array<{
+    identifier: string;
+    kind: 'store' | 'context' | 'composable';
+    filePath: string;
+  }> = [];
+
+  for (const f of stateCandidates) {
+    const norm = normalize(f);
+    const base = basename(f, extname(f));
+    try {
+      const content = await fs.readFile(norm, 'utf8');
+      const exportFuncMatches = content.matchAll(
+        /export\s+(?:async\s+)?(?:function|const)\s+([A-Za-z0-9_$]+)/g
+      );
+      const foundIdents = new Set<string>();
+      for (const m of exportFuncMatches) {
+        const ident = m[1];
+        if (
+          ident.startsWith('use') ||
+          ident.endsWith('Store') ||
+          ident.endsWith('Context') ||
+          ident === base
+        ) {
+          foundIdents.add(ident);
+        }
+      }
+      if (foundIdents.size === 0 && (base.startsWith('use') || base.endsWith('Store'))) {
+        foundIdents.add(base);
+      }
+
+      for (const ident of foundIdents) {
+        let kind: 'store' | 'context' | 'composable' = 'composable';
+        if (ident.endsWith('Store') || norm.toLowerCase().includes('/stores/')) {
+          kind = 'store';
+        } else if (ident.endsWith('Context')) {
+          kind = 'context';
+        }
+
+        declaredState.push({
+          identifier: ident,
+          kind,
+          filePath: norm,
+        });
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  // 3. For each declared state, query consumer count using SQLite state_deps
+  const unusedState: UnusedStateItem[] = [];
+
+  for (const item of declaredState) {
+    const consumers = db
+      .query(
+        `
+      SELECT DISTINCT f.path
+      FROM state_deps s
+      JOIN files f ON s.file_id = f.id
+      WHERE s.identifier = ? AND f.path != ?;
+    `
+      )
+      .all(item.identifier, item.filePath) as Array<{ path: string }>;
+
+    if (consumers.length === 0) {
+      unusedState.push({
+        identifier: item.identifier,
+        kind: item.kind,
+        filePath: item.filePath,
+      });
+    }
+  }
+
+  // Deduplicate by filePath + identifier
+  const uniqueUnused = Array.from(
+    new Map(unusedState.map((u) => [`${u.filePath}::${u.identifier}`, u])).values()
+  );
+
+  const durationMs = Math.round(performance.now() - startTime);
+
+  return {
+    workspaceRoot: absRoot,
+    totalScanned: declaredState.length,
+    unusedCount: uniqueUnused.length,
+    unusedState: uniqueUnused,
+    _meta: {
+      engine: 'sqlite-graph-cache',
+      durationMs,
+      cached: true,
+    },
+  };
+}
+
+/**
+ * Formats an UnusedStateResult into a token-efficient, human-readable summary.
+ */
+export function formatUnusedStateAsText(result: UnusedStateResult): string {
+  const metaBadge = result._meta
+    ? ` [Engine: ${result._meta.engine} | ${result._meta.durationMs}ms]`
+    : '';
+
+  const lines: string[] = [
+    `Unused State & Composables Audit${metaBadge}`,
+    `Workspace: ${result.workspaceRoot}`,
+    `Total State Declarations Scanned: ${result.totalScanned}`,
+    `Unused / Orphan State Found: ${result.unusedCount}`,
+  ];
+
+  if (result.unusedCount === 0) {
+    lines.push('');
+    lines.push('Result: All declared composables and state stores have active consumer imports.');
+    return lines.join('\n');
+  }
+
+  lines.push('');
+  lines.push('Dead / Orphan State (0 external consumers):');
+  for (const u of result.unusedState) {
+    lines.push(`  - ${u.identifier} [${u.kind}]`);
+    lines.push(`    File: ${u.filePath}`);
   }
 
   return lines.join('\n');
