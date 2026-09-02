@@ -1,9 +1,10 @@
-﻿name: Publish to npm
+name: Publish to npm
 
 on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch: # Enables manual "Run workflow" button in GitHub Actions UI
 
 concurrency:
   group: publish-${{ github.ref }}
