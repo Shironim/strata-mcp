@@ -6,10 +6,13 @@ import { parseSfc } from './splitter';
 import { parseAstro } from './astro-sfc';
 import { stripQuotes } from './patterns';
 import type {
+  BoundaryViolation,
   ComponentContract,
   ComponentEmitContract,
   ComponentPropContract,
+  ComponentVariantsInfo,
   ContractOptions,
+  DataDependencyInfo,
   RenderBoundaryInfo,
   StateDependencyInfo,
 } from '../types';
@@ -711,6 +714,7 @@ export function extractRenderBoundary(
   framework: 'vue' | 'react' | 'astro' | 'unknown'
 ): RenderBoundaryInfo {
   const normPath = filePath.replace(/\\/g, '/');
+  const violations: BoundaryViolation[] = [];
 
   if (framework === 'react') {
     // 1. Check for 'use client' directive
@@ -733,9 +737,50 @@ export function extractRenderBoundary(
 
     // 3. Next.js App router defaults to React Server Component (RSC)
     if (normPath.startsWith('app/') || normPath.includes('/app/')) {
+      // Check for client-only hooks in RSC
+      const clientHooks = Array.from(
+        new Set(
+          Array.from(
+            content.matchAll(
+              /\b(useState|useEffect|useReducer|useRef|useLayoutEffect|useTransition|useDeferredValue|useActionState|useOptimistic|createContext|useContext)\b/g
+            )
+          ).map((m) => m[1])
+        )
+      );
+
+      if (clientHooks.length > 0) {
+        violations.push({
+          code: 'RSC_CLIENT_HOOK_IN_SERVER_COMPONENT',
+          severity: 'error',
+          message: `React Server Component uses client-only hook(s): ${clientHooks.join(', ')}.`,
+          hint: "Add 'use client' directive at the top of the file to mark it as a Client Component.",
+        });
+      }
+
+      // Check for DOM event handlers attached in JSX
+      const eventHandlers = Array.from(
+        new Set(
+          Array.from(
+            content.matchAll(
+              /\b(onClick|onChange|onSubmit|onKeyDown|onKeyUp|onMouseEnter|onMouseLeave|onFocus|onBlur)\s*=/g
+            )
+          ).map((m) => m[1])
+        )
+      );
+
+      if (eventHandlers.length > 0) {
+        violations.push({
+          code: 'RSC_EVENT_HANDLER_IN_SERVER_COMPONENT',
+          severity: 'error',
+          message: `React Server Component attaches client DOM event handler(s): ${eventHandlers.join(', ')}.`,
+          hint: "Event handlers cannot be passed in Server Components. Add 'use client' or move the handler into a Client Component leaf.",
+        });
+      }
+
       return {
         boundary: 'server-component',
         isClientHydrated: false,
+        violations: violations.length > 0 ? violations : undefined,
       };
     }
 
@@ -786,9 +831,30 @@ export function extractRenderBoundary(
       };
     }
 
+    // Check for interactive components rendered in Astro without client directives
+    const interactiveMatch = Array.from(
+      new Set(
+        Array.from(
+          content.matchAll(
+            /<([A-Z][A-Za-z0-9_$]*(?:Modal|Dialog|Dropdown|Drawer|Menu|Select|Button|Tabs|Form|Input|Counter|Carousel|Accordion))\b(?![^>]*\bclient:)/g
+          )
+        ).map((m) => m[1])
+      )
+    );
+
+    if (interactiveMatch.length > 0 && !content.includes('client:')) {
+      violations.push({
+        code: 'ASTRO_UNHYDRATED_INTERACTIVE_ISLAND',
+        severity: 'warning',
+        message: `Interactive component(s) (${interactiveMatch.slice(0, 3).join(', ')}) rendered without hydration directive.`,
+        hint: "Add client:load or client:visible if this component requires client-side interactivity, otherwise it will render as inert static HTML.",
+      });
+    }
+
     return {
       boundary: 'astro-static',
       isClientHydrated: false,
+      violations: violations.length > 0 ? violations : undefined,
     };
   }
 
@@ -817,6 +883,192 @@ const COMMON_HOOKS_IGNORE = new Set([
   'useAttrs',
   'useModel',
 ]);
+
+/**
+ * Extracts a balanced curly-brace object string starting at the specified index or first '{' after it.
+ */
+function extractBalancedObject(text: string, startIndex: number): string | null {
+  let depth = 0;
+  let inString: string | null = null;
+  let started = false;
+  let startPos = -1;
+
+  for (let i = startIndex; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (ch === '\\') {
+        i++;
+        continue;
+      }
+      if (ch === inString) inString = null;
+      continue;
+    }
+
+    if (ch === "'" || ch === '"' || ch === '`') {
+      inString = ch;
+      continue;
+    }
+
+    if (ch === '{') {
+      if (!started) {
+        started = true;
+        startPos = i;
+      }
+      depth++;
+    } else if (ch === '}') {
+      depth--;
+      if (started && depth === 0) {
+        return text.slice(startPos, i + 1);
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Extracts top-level keys from an object literal code snippet while ignoring string literals and nested values.
+ */
+function extractObjectKeys(objCode: string): string[] {
+  const keys: string[] = [];
+  const inner = objCode.trim().slice(1, -1);
+  let inString: string | null = null;
+  let currentKey = '';
+  let collectingKey = true;
+  let depth = 0;
+
+  for (let i = 0; i < inner.length; i++) {
+    const ch = inner[i];
+    if (inString) {
+      if (ch === '\\') {
+        i++;
+        continue;
+      }
+      if (ch === inString) inString = null;
+      continue;
+    }
+
+    if (ch === "'" || ch === '"' || ch === '`') {
+      inString = ch;
+      continue;
+    }
+
+    if (ch === '{' || ch === '[' || ch === '(') {
+      depth++;
+      continue;
+    }
+    if (ch === '}' || ch === ']' || ch === ')') {
+      depth--;
+      continue;
+    }
+
+    if (depth === 0) {
+      if (ch === ':') {
+        const trimmed = stripQuotes(currentKey.trim());
+        if (trimmed && !trimmed.includes('\n') && !trimmed.includes(' ')) {
+          keys.push(trimmed);
+        }
+        collectingKey = false;
+        currentKey = '';
+      } else if (ch === ',') {
+        collectingKey = true;
+        currentKey = '';
+      } else if (collectingKey) {
+        currentKey += ch;
+      }
+    }
+  }
+
+  return keys;
+}
+
+/**
+ * Extracts Design System variants defined via CVA (Class Variance Authority) or TypeScript prop unions.
+ */
+export function extractComponentVariants(
+  content: string,
+  props: ComponentPropContract[] = []
+): ComponentVariantsInfo | undefined {
+  // 1. Try CVA pattern: look for cva( ... )
+  const cvaIndex = content.indexOf('cva(');
+  if (cvaIndex !== -1) {
+    const firstBrace = content.indexOf('{', cvaIndex);
+    if (firstBrace !== -1) {
+      const configObj = extractBalancedObject(content, firstBrace);
+      if (configObj) {
+        const variants: Record<string, string[]> = {};
+        let defaultVariants: Record<string, string> | undefined;
+
+        // Look for variants: { ... } inside configObj
+        const variantsKeyword = configObj.match(/\bvariants\s*:\s*\{/);
+        if (variantsKeyword && variantsKeyword.index !== undefined) {
+          const variantsBrace = configObj.indexOf('{', variantsKeyword.index);
+          const variantsObj = extractBalancedObject(configObj, variantsBrace);
+          if (variantsObj) {
+            // Match groupName: { ... }
+            const groupHeaderRegex = /\b([A-Za-z0-9_$]+)\s*:\s*\{/g;
+            for (const gm of variantsObj.matchAll(groupHeaderRegex)) {
+              const groupName = gm[1];
+              if (groupName === 'defaultVariants' || groupName === 'compoundVariants') continue;
+              const groupBrace = variantsObj.indexOf('{', gm.index);
+              const groupBody = extractBalancedObject(variantsObj, groupBrace);
+              if (groupBody) {
+                const optKeys = extractObjectKeys(groupBody);
+                if (optKeys.length > 0) {
+                  variants[groupName] = optKeys;
+                }
+              }
+            }
+          }
+        }
+
+        // Look for defaultVariants: { ... } inside configObj
+        const defKeyword = configObj.match(/\bdefaultVariants\s*:\s*\{/);
+        if (defKeyword && defKeyword.index !== undefined) {
+          const defBrace = configObj.indexOf('{', defKeyword.index);
+          const defObj = extractBalancedObject(configObj, defBrace);
+          if (defObj) {
+            const defMap: Record<string, string> = {};
+            const defPairs = defObj
+              .slice(1, -1)
+              .matchAll(/([A-Za-z0-9_$]+)\s*:\s*['"]?([A-Za-z0-9_$-]+)['"]?/g);
+            for (const dm of defPairs) {
+              defMap[dm[1]] = stripQuotes(dm[2].trim());
+            }
+            if (Object.keys(defMap).length > 0) {
+              defaultVariants = defMap;
+            }
+          }
+        }
+
+        if (Object.keys(variants).length > 0) {
+          return { variants, defaultVariants };
+        }
+      }
+    }
+  }
+
+  // 2. Fallback: inspect props with union string literals (e.g. variant: 'primary' | 'secondary' | 'outline')
+  const unionVariants: Record<string, string[]> = {};
+  for (const prop of props) {
+    if (prop.name === 'variant' || prop.name === 'size' || prop.name === 'intent' || prop.name === 'color') {
+      if (prop.type && prop.type.includes('|')) {
+        const parts = prop.type
+          .split('|')
+          .map((p) => stripQuotes(p.trim()))
+          .filter((p) => p && !['undefined', 'null', 'string', 'boolean', 'number', 'any'].includes(p));
+        if (parts.length > 1) {
+          unionVariants[prop.name] = parts;
+        }
+      }
+    }
+  }
+
+  if (Object.keys(unionVariants).length > 0) {
+    return { variants: unionVariants };
+  }
+
+  return undefined;
+}
 
 /**
  * Extracts out-of-band state and store dependencies (Pinia, Zustand, Redux, Context, inject).
@@ -868,6 +1120,88 @@ export function extractStateDependencies(
 }
 
 /**
+ * Extracts data lineage dependencies (Server Actions, TanStack Query keys, API endpoints, and mutations).
+ */
+export function extractDataDependencies(
+  content: string,
+  _framework: 'vue' | 'react' | 'astro' | 'unknown'
+): DataDependencyInfo | undefined {
+  const serverActions = new Set<string>();
+  const queryKeys = new Set<string>();
+  const endpoints = new Set<string>();
+  const mutations = new Set<string>();
+
+  // 1. Server Actions ('use server' functions or action imports)
+  const inlineServerActionRegex = /async\s+function\s+([A-Za-z0-9_$]+)\s*\([^)]*\)\s*\{\s*['"]use server['"]/g;
+  for (const m of content.matchAll(inlineServerActionRegex)) {
+    serverActions.add(m[1]);
+  }
+
+  const actionImportRegex = /import\s+\{([^}]+)\}\s+from\s+['"][^'"]*(?:actions|server|mutations)[^'"]*['"]/g;
+  for (const m of content.matchAll(actionImportRegex)) {
+    const names = m[1].split(',').map((s) => s.trim().split(/\s+as\s+/)[0].trim()).filter(Boolean);
+    names.forEach((n) => serverActions.add(n));
+  }
+
+  const actionFunctionCallRegex = /\b([A-Za-z0-9_$]+Action)\s*\(/g;
+  for (const m of content.matchAll(actionFunctionCallRegex)) {
+    serverActions.add(m[1]);
+  }
+
+  // 2. TanStack Query / SWR / Vue Query
+  const tanstackObjectRegex = /useQuery\s*\(\s*\{[\s\S]*?queryKey\s*:\s*(\[[^\]]+\])/g;
+  for (const m of content.matchAll(tanstackObjectRegex)) {
+    queryKeys.add(m[1].replace(/\s+/g, ' ').trim());
+  }
+
+  const tanstackArrayRegex = /useQuery\s*\(\s*(\[[^\]]+\])/g;
+  for (const m of content.matchAll(tanstackArrayRegex)) {
+    queryKeys.add(m[1].replace(/\s+/g, ' ').trim());
+  }
+
+  const swrRegex = /useSWR\s*(?:<[^>]+>)?\s*\(\s*['"]([^'"]+)['"]/g;
+  for (const m of content.matchAll(swrRegex)) {
+    queryKeys.add(`"${m[1]}"`);
+    if (m[1].startsWith('/') || m[1].startsWith('http')) {
+      endpoints.add(m[1]);
+    }
+  }
+
+  // 3. HTTP Endpoints ($fetch, fetch, axios, api)
+  const fetchRegex = /(?:\$fetch|fetch|axios\.(?:get|post|put|delete|patch)|api\.(?:get|post|put|delete|patch))\s*(?:<[^>]+>)?\s*\(\s*['"`]([^'"`]+)['"`]/g;
+  for (const m of content.matchAll(fetchRegex)) {
+    const url = m[1].trim();
+    if (url && (url.startsWith('/') || url.startsWith('http') || url.startsWith('api/'))) {
+      endpoints.add(url);
+    }
+  }
+
+  const useAsyncDataRegex = /useAsyncData\s*\(\s*['"]([^'"]+)['"]/g;
+  for (const m of content.matchAll(useAsyncDataRegex)) {
+    queryKeys.add(`"${m[1]}"`);
+  }
+
+  // 4. Inertia.js Form & Router Mutations
+  const inertiaMutationRegex = /(?:form|router)\.(post|put|patch|delete)\s*\(\s*['"`]([^'"`]+)['"`]/g;
+  for (const m of content.matchAll(inertiaMutationRegex)) {
+    const method = m[1].toUpperCase();
+    const target = m[2].trim();
+    mutations.add(`${method} ${target}`);
+    if (target.startsWith('/') || target.startsWith('http')) {
+      endpoints.add(target);
+    }
+  }
+
+  const result: DataDependencyInfo = {};
+  if (serverActions.size > 0) result.serverActions = Array.from(serverActions);
+  if (queryKeys.size > 0) result.queryKeys = Array.from(queryKeys);
+  if (endpoints.size > 0) result.endpoints = Array.from(endpoints);
+  if (mutations.size > 0) result.mutations = Array.from(mutations);
+
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
+/**
  * Public facade: extracts the public contract of a component (.vue, .tsx, .jsx, .astro).
  */
 export async function extractComponentContract(
@@ -905,11 +1239,15 @@ export async function extractComponentContract(
 
   const renderBoundary = extractRenderBoundary(resolvedPath, content, framework);
   const stateDependencies = extractStateDependencies(content, framework);
+  const dataDependencies = extractDataDependencies(content, framework);
+  const variants = extractComponentVariants(content, baseContract.props);
 
   return {
     ...baseContract,
+    variants,
     renderBoundary,
     stateDependencies,
+    dataDependencies,
   };
 }
 
@@ -938,6 +1276,16 @@ export function formatContractAsText(contract: ComponentContract): string {
       const reqStr = p.required ? 'required' : 'optional';
       const defStr = p.default ? `, default: ${p.default}` : '';
       lines.push(`  - ${p.name}: ${p.type} (${reqStr}${defStr})`);
+    }
+  }
+
+  if (contract.variants) {
+    lines.push('');
+    lines.push('Variants:');
+    for (const [vName, vOptions] of Object.entries(contract.variants.variants)) {
+      const defValue = contract.variants.defaultVariants?.[vName];
+      const defStr = defValue ? ` (default: "${defValue}")` : '';
+      lines.push(`  - ${vName}: [${vOptions.map((o) => `"${o}"`).join(', ')}]${defStr}`);
     }
   }
 
@@ -983,6 +1331,42 @@ export function formatContractAsText(contract: ComponentContract): string {
       }
       if (composables.length > 0) {
         lines.push(`  - Composables: ${composables.join(', ')}`);
+      }
+    }
+  }
+
+  if (contract.dataDependencies) {
+    const { serverActions, queryKeys, endpoints, mutations } = contract.dataDependencies;
+    if (
+      (serverActions && serverActions.length > 0) ||
+      (queryKeys && queryKeys.length > 0) ||
+      (endpoints && endpoints.length > 0) ||
+      (mutations && mutations.length > 0)
+    ) {
+      lines.push('');
+      lines.push('Data Lineage & Fetching:');
+      if (serverActions && serverActions.length > 0) {
+        lines.push(`  - Server Actions: ${serverActions.join(', ')}`);
+      }
+      if (queryKeys && queryKeys.length > 0) {
+        lines.push(`  - Query Keys: ${queryKeys.join(', ')}`);
+      }
+      if (endpoints && endpoints.length > 0) {
+        lines.push(`  - API Endpoints: ${endpoints.join(', ')}`);
+      }
+      if (mutations && mutations.length > 0) {
+        lines.push(`  - Form Mutations: ${mutations.join(', ')}`);
+      }
+    }
+  }
+
+  if (contract.renderBoundary?.violations && contract.renderBoundary.violations.length > 0) {
+    lines.push('');
+    lines.push('Boundary Warnings / Violations:');
+    for (const v of contract.renderBoundary.violations) {
+      lines.push(`  - [${v.severity.toUpperCase()}] ${v.code}: ${v.message}`);
+      if (v.hint) {
+        lines.push(`    Hint: ${v.hint}`);
       }
     }
   }

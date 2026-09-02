@@ -9,6 +9,7 @@ import {
   mergeAliasConfigs,
   type AliasConfig,
 } from './resolver';
+import { resolveRouteEntry } from './routes';
 import type {
   ComponentTreeNode,
   ComponentTreeOptions,
@@ -291,14 +292,27 @@ export function isRenderedInContent(content: string, identifier: string): boolea
   return getCandidateNames(identifier).some((candidate) => isCandidateRendered(content, candidate));
 }
 
+function normalizeScopeFilters(filter?: string | string[]): string[] {
+  if (!filter) return [];
+  const arr = Array.isArray(filter) ? filter : [filter];
+  return arr.map((f) => f.trim().replace(/\\/g, '/')).filter(Boolean);
+}
+
+function isPathInScope(filePath: string, scopeFilters: string[]): boolean {
+  if (scopeFilters.length === 0) return true;
+  const norm = filePath.replace(/\\/g, '/');
+  return scopeFilters.some((f) => norm.includes(f) || norm.startsWith(f));
+}
+
 /**
  * Resolves downward component hierarchy tree starting from a root page or layout.
  */
 async function getDownwardComponentTree(
-  options: ComponentTreeOptions
+  options: ComponentTreeOptions & { entryPath: string }
 ): Promise<ComponentTreeResult> {
   const entryPath = resolve(options.entryPath);
   const maxDepth = options.maxDepth !== undefined ? options.maxDepth : 3;
+  const scopeFilters = normalizeScopeFilters(options.scopeFilter);
 
   // Discover aliases
   const autoDetectedAliases = await loadAliasConfig(entryPath);
@@ -326,15 +340,18 @@ async function getDownwardComponentTree(
 
     visitedInBranch.add(normPath);
 
+    const isInDomain = isPathInScope(normPath, scopeFilters);
+
     const node: ComponentTreeNode = {
       component: componentName,
       filePath: normPath,
       depth,
       isPage: isPageFile(normPath),
+      isExternalScope: !isInDomain ? true : undefined,
       children: [],
     };
 
-    if (depth >= maxDepth) return node;
+    if (depth >= maxDepth || !isInDomain) return node;
 
     let content = '';
     try {
@@ -422,7 +439,7 @@ async function getDownwardComponentTree(
  * starting from a leaf or shared component up to top-level pages and layouts.
  */
 export async function getUpwardComponentTree(
-  options: ComponentTreeOptions
+  options: ComponentTreeOptions & { entryPath: string }
 ): Promise<ComponentTreeResult> {
   const entryPath = normalize(resolve(options.entryPath));
   if (!existsSync(entryPath)) {
@@ -505,6 +522,8 @@ export async function getUpwardComponentTree(
   const allConsumers = new Set<string>();
   let maxDepthReached = 0;
 
+  const scopeFilters = normalizeScopeFilters(options.scopeFilter);
+
   async function buildUpwardSubTree(
     currentPath: string,
     depth: number,
@@ -517,15 +536,18 @@ export async function getUpwardComponentTree(
 
     visitedInBranch.add(normPath);
 
+    const isInDomain = isPathInScope(normPath, scopeFilters);
+
     const node: ComponentTreeNode = {
       component: componentName,
       filePath: normPath,
       depth,
       isPage: isPageFile(normPath),
+      isExternalScope: !isInDomain ? true : undefined,
       children: [],
     };
 
-    if (depth >= maxDepth) return node;
+    if (depth >= maxDepth || !isInDomain) return node;
 
     for (const [sourceFile, sourceContent] of fileContents) {
       if (visitedInBranch.has(sourceFile)) continue;
@@ -554,22 +576,61 @@ export async function getUpwardComponentTree(
 }
 
 /**
- * Resolves the component hierarchy tree starting from a root or target file.
+ * Resolves the component hierarchy tree starting from a root/target file or route path.
  * Supports both downward (root -> children) and upward (leaf -> consumers) directions.
  */
 export async function getComponentTree(
   options: ComponentTreeOptions
 ): Promise<ComponentTreeResult> {
-  const entryPath = resolve(options.entryPath);
+  let entryPath: string;
+  let resolvedRouteInfo: ComponentTreeResult['resolvedRoute'] | undefined;
+
+  if (options.routePath) {
+    const targetPath = options.targetPath || process.cwd();
+    const routeResolution = await resolveRouteEntry(targetPath, options.routePath);
+    if (!routeResolution.matched || !routeResolution.filePath) {
+      const avail =
+        routeResolution.availableRoutes && routeResolution.availableRoutes.length > 0
+          ? `\nAvailable routes:\n  ${routeResolution.availableRoutes.slice(0, 20).join('\n  ')}`
+          : '';
+      throw new Error(
+        `Route "${options.routePath}" could not be resolved in "${targetPath}".${avail}`
+      );
+    }
+
+    entryPath = resolve(routeResolution.filePath);
+    resolvedRouteInfo = {
+      routePath: options.routePath,
+      matchedRoute: routeResolution.matchedPattern || options.routePath,
+      filePath: routeResolution.filePath,
+      framework: routeResolution.framework || 'unknown',
+      layouts: routeResolution.layouts,
+    };
+  } else if (options.entryPath) {
+    entryPath = resolve(options.entryPath);
+  } else {
+    throw new Error('Either "entryPath" or "routePath" must be provided to getComponentTree.');
+  }
+
   if (!existsSync(entryPath)) {
     throw new Error(`Entry component file not found: ${entryPath}`);
   }
 
-  if (options.direction === 'upward') {
-    return getUpwardComponentTree(options);
+  const effectiveOptions: ComponentTreeOptions & { entryPath: string } = {
+    ...options,
+    entryPath,
+  };
+
+  const result =
+    options.direction === 'upward'
+      ? await getUpwardComponentTree(effectiveOptions)
+      : await getDownwardComponentTree(effectiveOptions);
+
+  if (resolvedRouteInfo) {
+    result.resolvedRoute = resolvedRouteInfo;
   }
 
-  return getDownwardComponentTree(options);
+  return result;
 }
 
 /**
@@ -577,6 +638,17 @@ export async function getComponentTree(
  */
 export function formatTreeAsText(result: ComponentTreeResult): string {
   const isUpward = result.direction === 'upward';
+  let header = '';
+
+  if (result.resolvedRoute) {
+    header += `Route: ${result.resolvedRoute.routePath} (Matched: ${result.resolvedRoute.matchedRoute})\n`;
+    header += `File: ${result.resolvedRoute.filePath}\n`;
+    header += `Framework: ${result.resolvedRoute.framework}\n`;
+    if (result.resolvedRoute.layouts && result.resolvedRoute.layouts.length > 0) {
+      header += `Layouts: ${result.resolvedRoute.layouts.join(', ')}\n`;
+    }
+    header += '\n';
+  }
 
   function renderNode(
     node: ComponentTreeNode,
@@ -596,6 +668,7 @@ export function formatTreeAsText(result: ComponentTreeResult): string {
       if (node.isDynamic) label += ` [dynamic/lazy]`;
       if (node.isAutoImported) label += ` [auto-imported]`;
       if (node.isPage) label += ` [Page]`;
+      if (node.isExternalScope) label += ` [external-domain/package]`;
       text += `${prefix}${branch}${label}\n`;
     }
 
@@ -612,6 +685,6 @@ export function formatTreeAsText(result: ComponentTreeResult): string {
   const treeText = renderNode(result.root);
   const summaryType = isUpward ? 'consumers' : 'components';
   const summary = `\nSummary: ${result.totalComponents} ${summaryType} explored, max depth: ${result.maxDepthReached}`;
-  return treeText + summary;
+  return header + treeText + summary;
 }
 
