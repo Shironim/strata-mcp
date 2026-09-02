@@ -2,6 +2,8 @@ import { existsSync, promises as fs } from 'node:fs';
 import { basename, dirname, extname, join, normalize, relative, resolve } from 'node:path';
 import { collectFiles } from './collector';
 import type {
+  ResolveRouteEntryOptions,
+  ResolveRouteEntryResult,
   RouteFramework,
   RouteInfo,
   RouteManifestResult,
@@ -338,9 +340,23 @@ async function scanInertiaPages(baseDir: string): Promise<RouteInfo[]> {
 }
 
 /**
+ * Computes top-level namespace summaries for a list of routes.
+ */
+export function computeRouteSummaries(routes: RouteInfo[]): Record<string, number> {
+  const summaries: Record<string, number> = {};
+  for (const r of routes) {
+    const segments = r.path.split('/').filter(Boolean);
+    const topLevel = segments.length > 0 ? `/${segments[0]}` : '/';
+    summaries[topLevel] = (summaries[topLevel] || 0) + 1;
+  }
+  return summaries;
+}
+
+/**
  * Public facade: scans a project directory to discover its file-based route topology.
  */
 export async function scanRoutes(options: ScanRoutesOptions): Promise<RouteManifestResult> {
+  const startTime = performance.now();
   const targetPath = resolve(options.targetPath);
   const detection = await detectRouteFramework(targetPath);
   const framework = options.frameworkHint || detection.framework;
@@ -387,14 +403,30 @@ export async function scanRoutes(options: ScanRoutesOptions): Promise<RouteManif
     }
   }
 
+  // Filter by prefix if provided
+  if (options.prefix) {
+    const normPrefix = options.prefix.startsWith('/') ? options.prefix : `/${options.prefix}`;
+    routes = routes.filter((r) => r.path === normPrefix || r.path.startsWith(normPrefix.endsWith('/') ? normPrefix : `${normPrefix}/`));
+  }
+
   // Sort routes alphabetically by path
   routes.sort((a, b) => a.path.localeCompare(b.path));
+
+  const summaries = computeRouteSummaries(routes);
+  const viewMode = options.view || (routes.length > 40 && !options.prefix ? 'summary' : 'full');
+  const durationMs = Math.round(performance.now() - startTime);
 
   return {
     framework,
     baseDirectory: normalize(baseDir),
     totalRoutes: routes.length,
     routes,
+    viewMode,
+    summaries,
+    _meta: {
+      engine: 'in-memory-ast',
+      durationMs,
+    },
   };
 }
 
@@ -402,14 +434,29 @@ export async function scanRoutes(options: ScanRoutesOptions): Promise<RouteManif
  * Formats a RouteManifestResult into a token-efficient, human-readable summary.
  */
 export function formatRoutesAsText(result: RouteManifestResult): string {
+  const metaBadge = result._meta
+    ? ` [Engine: ${result._meta.engine} | ${result._meta.durationMs}ms]`
+    : '';
+
   const lines: string[] = [
-    `Route Manifest (${result.framework})`,
+    `Route Manifest (${result.framework})${metaBadge}`,
     `Base Directory: ${result.baseDirectory}`,
     `Total Routes: ${result.totalRoutes}`,
   ];
 
   if (result.routes.length === 0) {
-    lines.push('\n(No routes found)');
+    lines.push('\n(No routes found matching query)');
+    return lines.join('\n');
+  }
+
+  if (result.viewMode === 'summary' && result.summaries) {
+    lines.push('\nModule & Domain Breakdown (Summary Mode):');
+    const sortedEntries = Object.entries(result.summaries).sort((a, b) => b[1] - a[1]);
+    for (const [prefix, count] of sortedEntries) {
+      lines.push(`  • ${prefix.padEnd(16)} : ${count} routes`);
+    }
+    lines.push('');
+    lines.push('(Tip: Use prefix="/domain" to drill down, or view="full" to expand all routes)');
     return lines.join('\n');
   }
 
@@ -426,4 +473,150 @@ export function formatRoutesAsText(result: RouteManifestResult): string {
   }
 
   return lines.join('\n');
+}
+
+/**
+ * Normalizes a user-provided route path string.
+ */
+export function normalizeRoutePath(input: string): string {
+  let p = input.trim().replace(/\/+/g, '/');
+  if (!p.startsWith('/')) p = '/' + p;
+  if (p.length > 1 && p.endsWith('/')) p = p.slice(0, -1);
+  return p;
+}
+
+/**
+ * Converts a framework route pattern (e.g. /products/[id], /blog/[...slug]) to a RegExp with named capture groups.
+ */
+function routePatternToRegex(pattern: string): { regex: RegExp; paramNames: string[] } {
+  const paramNames: string[] = [];
+  const segments = pattern.split('/');
+
+  const regexSegments = segments.map((seg) => {
+    if (!seg) return '';
+
+    // 1. Optional catch-all [[...param]]
+    const optCatchAll = seg.match(/^\[\[\.\.\.([A-Za-z0-9_$]+)\]\]$/);
+    if (optCatchAll) {
+      paramNames.push(optCatchAll[1]);
+      return '(?:/(.*))?';
+    }
+
+    // 2. Catch-all [...param]
+    const catchAll = seg.match(/^\[\.\.\.([A-Za-z0-9_$]+)\]$/);
+    if (catchAll) {
+      paramNames.push(catchAll[1]);
+      return '(.+)';
+    }
+
+    // 3. Dynamic param [param]
+    const dynamic = seg.match(/^\[([A-Za-z0-9_$]+)\]$/);
+    if (dynamic) {
+      paramNames.push(dynamic[1]);
+      return '([^/]+)';
+    }
+
+    // 4. Nuxt 2 style dynamic param _param
+    const nuxt2Dynamic = seg.match(/^_([A-Za-z0-9_$]+)$/);
+    if (nuxt2Dynamic) {
+      paramNames.push(nuxt2Dynamic[1]);
+      return '([^/]+)';
+    }
+
+    return seg.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  });
+
+  // Handle leading slash
+  let regexStr = '^' + regexSegments.join('/');
+  // If pattern has optional catch-all at end, adjust slash handling
+  if (pattern.includes('[[...')) {
+    regexStr = '^' + regexSegments.filter(Boolean).join('/');
+  }
+  regexStr += '$';
+
+  return {
+    regex: new RegExp(regexStr),
+    paramNames,
+  };
+}
+
+/**
+ * Resolves a given URL route path to its corresponding page component file, framework, and layout wrappers.
+ */
+export async function resolveRouteEntry(
+  targetPath: string,
+  routePath: string,
+  frameworkHint?: RouteFramework
+): Promise<ResolveRouteEntryResult> {
+  const normalizedInput = normalizeRoutePath(routePath);
+  const manifest = await scanRoutes({ targetPath, frameworkHint });
+
+  if (manifest.routes.length === 0) {
+    return {
+      matched: false,
+      routePath: normalizedInput,
+      availableRoutes: [],
+    };
+  }
+
+  // Filter page routes first, fallback to all routes
+  const pageRoutes = manifest.routes.filter((r) => r.type === 'page');
+  const candidateRoutes = pageRoutes.length > 0 ? pageRoutes : manifest.routes;
+
+  // 1. Exact string match
+  const exactMatch = candidateRoutes.find(
+    (r) => normalizeRoutePath(r.path) === normalizedInput
+  );
+  if (exactMatch) {
+    return {
+      matched: true,
+      routePath: normalizedInput,
+      matchedPattern: exactMatch.path,
+      filePath: exactMatch.filePath,
+      framework: exactMatch.framework,
+      layouts: exactMatch.layouts,
+      params: {},
+      availableRoutes: manifest.routes.map((r) => r.path),
+    };
+  }
+
+  // 2. Pattern match (ordered by specificity: fixed segments -> single dynamic -> catch-all)
+  const sortedCandidates = [...candidateRoutes].sort((a, b) => {
+    const aParams = a.params.length;
+    const bParams = b.params.length;
+    if (aParams !== bParams) return aParams - bParams;
+    return b.path.length - a.path.length;
+  });
+
+  for (const candidate of sortedCandidates) {
+    if (candidate.params.length === 0) continue;
+
+    const { regex, paramNames } = routePatternToRegex(candidate.path);
+    const match = normalizedInput.match(regex);
+    if (match) {
+      const params: Record<string, string> = {};
+      paramNames.forEach((name, idx) => {
+        if (match[idx + 1] !== undefined) {
+          params[name] = match[idx + 1];
+        }
+      });
+
+      return {
+        matched: true,
+        routePath: normalizedInput,
+        matchedPattern: candidate.path,
+        filePath: candidate.filePath,
+        framework: candidate.framework,
+        layouts: candidate.layouts,
+        params,
+        availableRoutes: manifest.routes.map((r) => r.path),
+      };
+    }
+  }
+
+  return {
+    matched: false,
+    routePath: normalizedInput,
+    availableRoutes: manifest.routes.map((r) => r.path),
+  };
 }
