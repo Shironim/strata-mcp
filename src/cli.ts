@@ -8,6 +8,8 @@ import { findUnusedComponents, formatUnusedAsText } from './engine/audit';
 import { scanRoutes, formatRoutesAsText } from './engine/routes';
 import {
   formatStateImpactAsText,
+  formatUnusedStateAsText,
+  findUnusedState,
   queryStateImpact,
   syncWorkspace,
 } from './engine/database';
@@ -21,9 +23,10 @@ Usage:
   strata search <pattern> [options]
   strata find-component-usage <component-name> [options]
   strata contract <component-file> [options]
-  strata tree <entry-file> [options]
+  strata tree [entry-file] [--route <path>] [options]
   strata routes [target-dir] [options]
   strata impact <state-identifier> [options]
+  strata unused-state [target-dir] [options]
   strata sync [target-dir]
   strata unused [target-dir] [options]
   strata rule <rule-file-or-yaml> [options]
@@ -31,11 +34,16 @@ Usage:
 
 Options:
   --path <dir|file>       Target directory or file (default: .)
+  --route <route-path>    URL route path to resolve for tree command (e.g. "/catalog")
+  --prefix <prefix>       Filter routes by URL prefix (e.g. "/services", "/auth")
+  --view <mode>           Route view mode: summary | full | tree (default: auto)
   --depth <number>        Max tree depth for tree command (default: 3)
   --direction <dir>       Tree traversal direction: downward | upward (default: downward)
   --framework <hint>      Framework hint for routes command (next-app, nuxt, astro, inertia)
   --alias <prefix=path>   Alias map for tree command, comma-separated (e.g. "@/=resources/js/")
+  --scope-filter <scope>  Domain or package filter for tree command (e.g. "apps/web")
   --ignore <pattern>      Glob pattern to ignore (can repeat or comma-separated)
+  --include-pages         Include file-based page views in unused component audit
   --lang <lang>           Language hint (default: ts)
   --scope <scope>         Component scope: template | script | both (default: both)
   --json                  Output raw JSON instead of text
@@ -199,16 +207,22 @@ export async function main(argv: string[] = process.argv.slice(2)) {
 
     if (command === 'tree' || command === 'component-tree') {
       const entryFile = positional[1];
-      if (!entryFile) {
-        console.error('Error: Entry component/page file path is required.');
+      const routePath = flags.route ? String(flags.route) : undefined;
+
+      if (!entryFile && !routePath) {
+        console.error('Error: Either an entry file path or --route <path> is required.');
         process.exit(1);
       }
 
       const maxDepth = flags.depth ? Number(flags.depth) : 3;
       const direction = flags.direction === 'upward' ? 'upward' : 'downward';
       const aliasMap = parseAliasMap(flags.alias);
+      const scopeFilter = (flags['scope-filter'] || flags.scopeFilter) as string | undefined;
       const result = await getComponentTree({
         entryPath: entryFile,
+        routePath,
+        targetPath,
+        scopeFilter,
         maxDepth,
         direction,
         aliasMap,
@@ -227,6 +241,8 @@ export async function main(argv: string[] = process.argv.slice(2)) {
       const result = await scanRoutes({
         targetPath: scanPath,
         frameworkHint: flags.framework as RouteFramework | undefined,
+        prefix: (flags.prefix as string) || undefined,
+        view: (flags.view as 'summary' | 'full' | 'tree') || undefined,
       });
 
       if (isJson) {
@@ -240,16 +256,30 @@ export async function main(argv: string[] = process.argv.slice(2)) {
     if (command === 'unused' || command === 'find-unused' || command === 'audit') {
       const auditPath = positional[1] || targetPath;
       const ignoreArg = flags.ignore ? String(flags.ignore).split(',') : undefined;
+      const excludePages = flags['include-pages'] ? false : true;
 
       const result = await findUnusedComponents({
         targetPath: auditPath,
         ignorePatterns: ignoreArg,
+        excludePages,
       });
 
       if (isJson) {
         console.log(JSON.stringify(result, null, 2));
       } else {
         console.log(formatUnusedAsText(result));
+      }
+      return;
+    }
+
+    if (command === 'unused-state' || command === 'find-unused-state' || command === 'dead-state') {
+      const auditPath = positional[1] || targetPath;
+      const result = await findUnusedState(auditPath);
+
+      if (isJson) {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        console.log(formatUnusedStateAsText(result));
       }
       return;
     }
