@@ -15,7 +15,7 @@ describe('MCP Server & Tools (Task 5 DoD)', () => {
     expect(listHandler).toBeDefined();
 
     const toolsResult = await listHandler({ method: 'tools/list', params: {} });
-    expect(toolsResult.tools.length).toBe(10);
+    expect(toolsResult.tools.length).toBe(12);
 
     const toolNames = toolsResult.tools.map((t: any) => t.name);
     expect(toolNames).toContain('find_code');
@@ -25,8 +25,10 @@ describe('MCP Server & Tools (Task 5 DoD)', () => {
     expect(toolNames).toContain('test_match_code_rule');
     expect(toolNames).toContain('extract_component_contract');
     expect(toolNames).toContain('get_component_tree');
+    expect(toolNames).toContain('resolve_page_tree');
     expect(toolNames).toContain('find_unused_components');
     expect(toolNames).toContain('scan_routes');
+    expect(toolNames).toContain('find_unused_state');
     expect(toolNames).toContain('query_state_impact');
   });
 
@@ -296,5 +298,45 @@ rule:
 
     expect(response.isError).toBeFalsy();
     expect(response.content[0].text).toContain('State Impact Analysis for: useRouter');
+  });
+
+  it('invokes resolve_page_tree via MCP call tool handler', async () => {
+    const server = createMcpServer();
+    const callHandler = (server as any)._requestHandlers?.get('tools/call');
+
+    const response = await callHandler({
+      method: 'tools/call',
+      params: {
+        name: 'resolve_page_tree',
+        arguments: {
+          route_path: '/dashboard',
+          target_path: join(import.meta.dir, '../mock-projects/inertia-app'),
+        },
+      },
+    });
+
+    expect(response.isError).toBeFalsy();
+    expect(response.content[0].text).toContain('Route: /dashboard');
+    expect(response.content[0].text).toContain('Dashboard.vue');
+  });
+
+  it('invokes get_component_tree with route_path via MCP call tool handler', async () => {
+    const server = createMcpServer();
+    const callHandler = (server as any)._requestHandlers?.get('tools/call');
+
+    const response = await callHandler({
+      method: 'tools/call',
+      params: {
+        name: 'get_component_tree',
+        arguments: {
+          route_path: '/dashboard',
+          target_path: join(import.meta.dir, '../mock-projects/inertia-app'),
+        },
+      },
+    });
+
+    expect(response.isError).toBeFalsy();
+    expect(response.content[0].text).toContain('Route: /dashboard');
+    expect(response.content[0].text).toContain('Dashboard.vue');
   });
 });

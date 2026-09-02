@@ -13,6 +13,7 @@ const VUE_APP_DIR = join(import.meta.dir, '../mock-projects/vue-app');
 describe('Unused Components Audit Engine (Phase 4 RFC)', () => {
   it('evaluates glob patterns accurately with matchesGlob', () => {
     expect(matchesGlob('src/pages/Home.vue', '**/pages/**')).toBe(true);
+    expect(matchesGlob('resources/js/Pages/Auth/ForgotPassword.vue', '**/pages/**')).toBe(true);
     expect(matchesGlob('src/views/CatalogView.vue', '**/views/**')).toBe(true);
     expect(matchesGlob('src/components/Card.stories.tsx', '**/*.stories.*')).toBe(true);
     expect(matchesGlob('src/components/Card.test.ts', '**/*.test.*')).toBe(true);

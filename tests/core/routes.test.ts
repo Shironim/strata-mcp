@@ -50,6 +50,28 @@ describe('File-Based Route Topology Engine (Phase 4)', () => {
       expect(formatted).toContain('/dashboard [page]');
       expect(formatted).toContain('/products/[id] [page]');
     });
+
+    it('filters routes by prefix and formats summary mode accurately', async () => {
+      const authResult = await scanRoutes({
+        targetPath: INERTIA_APP_DIR,
+        prefix: '/auth',
+      });
+
+      expect(authResult.totalRoutes).toBe(1);
+      expect(authResult.routes[0].path).toBe('/auth/login');
+
+      const summaryResult = await scanRoutes({
+        targetPath: INERTIA_APP_DIR,
+        view: 'summary',
+      });
+
+      expect(summaryResult.viewMode).toBe('summary');
+      expect(summaryResult.summaries).toBeDefined();
+      expect(summaryResult.summaries!['/auth']).toBe(1);
+
+      const summaryText = formatRoutesAsText(summaryResult);
+      expect(summaryText).toContain('Module & Domain Breakdown (Summary Mode)');
+    });
   });
 
   describe('formatRoutesAsText', () => {

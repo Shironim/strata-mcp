@@ -16,7 +16,11 @@ describe('Persistent SQLite Codebase Graph Cache Engine (bun:sqlite)', () => {
   beforeAll(() => {
     const dbDir = join(FIXTURES_DIR, '.strata');
     if (existsSync(dbDir)) {
-      rmSync(dbDir, { recursive: true, force: true });
+      try {
+        rmSync(dbDir, { recursive: true, force: true });
+      } catch {
+        // Ignore file lock on Windows parallel runs
+      }
     }
   });
 
@@ -81,5 +85,17 @@ describe('Persistent SQLite Codebase Graph Cache Engine (bun:sqlite)', () => {
 
     const formatted = formatStateImpactAsText(result);
     expect(formatted).toContain('State Impact Analysis for: useRouter');
+  });
+
+  it('audits unused state and composables across the workspace', async () => {
+    const { findUnusedState, formatUnusedStateAsText } = await import('../../src/engine/database');
+    const result = await findUnusedState(FIXTURES_DIR);
+
+    expect(result.workspaceRoot).toBeDefined();
+    expect(result.totalScanned).toBeGreaterThanOrEqual(0);
+    expect(result._meta?.engine).toBe('sqlite-graph-cache');
+
+    const formatted = formatUnusedStateAsText(result);
+    expect(formatted).toContain('Unused State & Composables Audit');
   });
 });
