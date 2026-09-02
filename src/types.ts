@@ -88,16 +88,38 @@ export type RenderBoundaryType =
   | 'astro-island'
   | 'unknown';
 
+export type BoundaryViolationSeverity = 'warning' | 'error';
+
+export interface BoundaryViolation {
+  code: string;
+  severity: BoundaryViolationSeverity;
+  message: string;
+  hint?: string;
+}
+
 export interface RenderBoundaryInfo {
   boundary: RenderBoundaryType;
   directive?: string;
   isClientHydrated: boolean;
+  violations?: BoundaryViolation[];
+}
+
+export interface ComponentVariantsInfo {
+  variants: Record<string, string[]>;
+  defaultVariants?: Record<string, string>;
 }
 
 export interface StateDependencyInfo {
   stores: string[];
   contexts: string[];
   composables: string[];
+}
+
+export interface DataDependencyInfo {
+  serverActions?: string[];
+  queryKeys?: string[];
+  endpoints?: string[];
+  mutations?: string[];
 }
 
 export interface ComponentContract {
@@ -108,8 +130,10 @@ export interface ComponentContract {
   emits: ComponentEmitContract[];
   slots: string[];
   exposed?: string[];
+  variants?: ComponentVariantsInfo;
   renderBoundary?: RenderBoundaryInfo;
   stateDependencies?: StateDependencyInfo;
+  dataDependencies?: DataDependencyInfo;
 }
 
 export interface ContractOptions {
@@ -124,6 +148,7 @@ export interface ComponentTreeNode {
   isDynamic?: boolean;
   isAutoImported?: boolean;
   isPage?: boolean;
+  isExternalScope?: boolean;
   depth: number;
   children: ComponentTreeNode[];
 }
@@ -133,14 +158,48 @@ export interface ComponentTreeResult {
   totalComponents: number;
   maxDepthReached: number;
   direction?: 'downward' | 'upward';
+  resolvedRoute?: {
+    routePath: string;
+    matchedRoute: string;
+    filePath: string;
+    framework: RouteFramework;
+    layouts?: string[];
+  };
 }
 
 export interface ComponentTreeOptions {
-  entryPath: string;
+  entryPath?: string;
+  routePath?: string;
+  targetPath?: string;
+  scopeFilter?: string | string[];
   maxDepth?: number;
   direction?: 'downward' | 'upward';
   outputFormat?: 'text' | 'json';
   aliasMap?: Record<string, string>;
+  includeLayouts?: boolean;
+}
+
+export interface ResolveRouteEntryOptions {
+  targetPath: string;
+  routePath: string;
+  frameworkHint?: RouteFramework;
+}
+
+export interface ResolveRouteEntryResult {
+  matched: boolean;
+  routePath: string;
+  matchedPattern?: string;
+  filePath?: string;
+  framework?: RouteFramework;
+  layouts?: string[];
+  params?: Record<string, string>;
+  availableRoutes?: string[];
+}
+
+export interface EngineMetadata {
+  engine: 'in-memory-ast' | 'sqlite-graph-cache' | 'ast-grep';
+  durationMs: number;
+  cached?: boolean;
 }
 
 export interface UnusedComponentInfo {
@@ -148,6 +207,7 @@ export interface UnusedComponentInfo {
   fileName: string;
   filePath: string;
   framework: 'vue' | 'react' | 'astro' | 'unknown';
+  isPage?: boolean;
 }
 
 export interface UnusedComponentsResult {
@@ -155,11 +215,15 @@ export interface UnusedComponentsResult {
   totalScanned: number;
   unusedCount: number;
   unusedComponents: UnusedComponentInfo[];
+  orphanComponents?: UnusedComponentInfo[];
+  unreferencedPages?: UnusedComponentInfo[];
+  _meta?: EngineMetadata;
 }
 
 export interface UnusedComponentsOptions {
   targetPath: string;
   ignorePatterns?: string[];
+  excludePages?: boolean;
   outputFormat?: 'text' | 'json';
 }
 
@@ -189,16 +253,26 @@ export interface RouteInfo {
   handlers?: string[];
 }
 
+export interface RouteModuleSummary {
+  prefix: string;
+  count: number;
+}
+
 export interface RouteManifestResult {
   framework: RouteFramework;
   baseDirectory: string;
   totalRoutes: number;
   routes: RouteInfo[];
+  viewMode?: 'summary' | 'full' | 'tree';
+  summaries?: Record<string, number>;
+  _meta?: EngineMetadata;
 }
 
 export interface ScanRoutesOptions {
   targetPath: string;
   frameworkHint?: RouteFramework;
+  prefix?: string;
+  view?: 'summary' | 'full' | 'tree';
   outputFormat?: 'text' | 'json';
 }
 
@@ -223,6 +297,7 @@ export interface StateImpactResult {
   identifier: string;
   totalConsumers: number;
   consumers: StateImpactConsumer[];
+  _meta?: EngineMetadata;
 }
 
 export interface QueryStateImpactOptions {
@@ -230,4 +305,24 @@ export interface QueryStateImpactOptions {
   targetPath?: string;
   outputFormat?: 'text' | 'json';
 }
+
+export interface UnusedStateItem {
+  identifier: string;
+  kind: 'store' | 'context' | 'composable';
+  filePath: string;
+}
+
+export interface UnusedStateResult {
+  workspaceRoot: string;
+  totalScanned: number;
+  unusedCount: number;
+  unusedState: UnusedStateItem[];
+  _meta?: EngineMetadata;
+}
+
+export interface UnusedStateOptions {
+  targetPath?: string;
+  outputFormat?: 'text' | 'json';
+}
+
 

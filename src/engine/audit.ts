@@ -11,11 +11,11 @@ import type {
 } from '../types';
 
 /**
- * Checks if a file path matches a glob pattern (supports **, *, and ?).
+ * Checks if a file path matches a glob pattern (supports **, *, and ?; case-insensitive).
  */
 export function matchesGlob(filePath: string, glob: string): boolean {
-  const normPath = filePath.replace(/\\/g, '/').replace(/^\.\//, '');
-  const normGlob = glob.replace(/\\/g, '/').replace(/^\.\//, '');
+  const normPath = filePath.replace(/\\/g, '/').replace(/^\.\//, '').toLowerCase();
+  const normGlob = glob.replace(/\\/g, '/').replace(/^\.\//, '').toLowerCase();
 
   const tokens = normGlob.split(/(\/\*\*\/?|\*\*\/?|\*|\?)/);
   const regexStr = tokens
@@ -30,6 +30,23 @@ export function matchesGlob(filePath: string, glob: string): boolean {
 
   const regex = new RegExp(`(?:^|/)${regexStr}(?:$|/)`);
   return regex.test(normPath);
+}
+
+/**
+ * Determines whether a file path belongs to a page/route/view directory.
+ */
+export function isPagePath(filePath: string): boolean {
+  const norm = filePath.replace(/\\/g, '/').toLowerCase();
+  return (
+    norm.includes('/pages/') ||
+    norm.includes('/views/') ||
+    norm.includes('/routes/') ||
+    norm.includes('/app/') ||
+    norm.startsWith('pages/') ||
+    norm.startsWith('views/') ||
+    norm.startsWith('routes/') ||
+    norm.startsWith('app/')
+  );
 }
 
 /**
@@ -50,6 +67,7 @@ function isComponentReferencedInContent(content: string, candidateNames: string[
 export async function findUnusedComponents(
   options: UnusedComponentsOptions
 ): Promise<UnusedComponentsResult> {
+  const startTime = performance.now();
   const targetDir = resolve(options.targetPath);
   const allFiles = await collectFiles(targetDir);
 
@@ -90,6 +108,7 @@ export async function findUnusedComponents(
     filePath: string;
     framework: 'vue' | 'react' | 'astro' | 'unknown';
     candidates: string[];
+    isPage: boolean;
     usageCount: number;
   }[] = [];
 
@@ -99,12 +118,15 @@ export async function findUnusedComponents(
     if (shouldIgnore(file)) continue;
 
     const base = basename(file, ext);
+    const isPage = isPagePath(file);
+
     declaredComponents.push({
       name: base,
       fileName: basename(file),
       filePath: normalize(file),
       framework: detectFramework(file),
       candidates: getCandidateNames(base),
+      isPage,
       usageCount: 0,
     });
   }
@@ -138,13 +160,29 @@ export async function findUnusedComponents(
       fileName: c.fileName,
       filePath: c.filePath,
       framework: c.framework,
+      isPage: c.isPage,
     }));
+
+  const orphanComponents = unused.filter((c) => !c.isPage);
+  const unreferencedPages = unused.filter((c) => c.isPage);
+
+  // If excludePages is explicitly false, unusedComponents contains both. Otherwise, only pure reusable components.
+  const excludePages = options.excludePages !== false;
+  const finalUnused = excludePages ? orphanComponents : unused;
+
+  const durationMs = Math.round(performance.now() - startTime);
 
   return {
     targetPath: targetDir,
     totalScanned: declaredComponents.length,
-    unusedCount: unused.length,
-    unusedComponents: unused,
+    unusedCount: finalUnused.length,
+    unusedComponents: finalUnused,
+    orphanComponents,
+    unreferencedPages,
+    _meta: {
+      engine: 'in-memory-ast',
+      durationMs,
+    },
   };
 }
 
@@ -152,24 +190,43 @@ export async function findUnusedComponents(
  * Formats UnusedComponentsResult into token-efficient, human-readable text.
  */
 export function formatUnusedAsText(result: UnusedComponentsResult): string {
+  const metaBadge = result._meta
+    ? ` [Engine: ${result._meta.engine} | ${result._meta.durationMs}ms]`
+    : '';
+
   const lines: string[] = [
-    'Unused Components Audit',
+    `Unused Components Audit${metaBadge}`,
     `Target Path: ${result.targetPath}`,
     `Total Components Scanned: ${result.totalScanned}`,
     `Unused Components Found: ${result.unusedCount}`,
   ];
 
-  if (result.unusedCount === 0) {
+  const orphanCount = result.orphanComponents ? result.orphanComponents.length : result.unusedCount;
+  const unreferencedPageCount = result.unreferencedPages ? result.unreferencedPages.length : 0;
+
+  if (result.unusedCount === 0 && unreferencedPageCount === 0) {
     lines.push('');
     lines.push('Result: All scanned components are actively used across the project.');
     return lines.join('\n');
   }
 
-  lines.push('');
-  lines.push('Dead / Orphan Components (0 usages):');
-  for (const comp of result.unusedComponents) {
-    lines.push(`  - ${comp.fileName} (${comp.framework})`);
-    lines.push(`    Path: ${comp.filePath}`);
+  if (orphanCount > 0) {
+    lines.push('');
+    lines.push('Dead / Orphan Components (0 usages):');
+    const list = result.orphanComponents || result.unusedComponents;
+    for (const comp of list) {
+      lines.push(`  - ${comp.fileName} (${comp.framework})`);
+      lines.push(`    Path: ${comp.filePath}`);
+    }
+  }
+
+  if (unreferencedPageCount > 0) {
+    lines.push('');
+    lines.push('Unreferenced Page Views (Direct Route / Controller Renderings):');
+    for (const page of result.unreferencedPages || []) {
+      lines.push(`  - ${page.fileName} (${page.framework}) [Page]`);
+      lines.push(`    Path: ${page.filePath}`);
+    }
   }
 
   return lines.join('\n');
