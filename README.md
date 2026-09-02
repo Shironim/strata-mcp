@@ -55,16 +55,22 @@ Existing AST tools like [ast-grep](https://ast-grep.github.io) are powerful for 
 
 ## Installation
 
-Requires **[Bun](https://bun.sh)** (`>= 1.1.0`) for high-performance AST processing and native `bun:sqlite` graph caching.
+> [!CAUTION]
+> **Bun runtime is required.** This package uses `bun:sqlite` (a Bun built-in) and is compiled with `--target bun`. It **will crash if executed with Node.js**, even if `npm install` succeeds. Always use `bun` or `bunx` to run it.
 
 ```bash
+# Recommended: install globally with Bun
 bun add -g @dimassetoid/strata-mcp
-# or run directly via bunx
+
+# Or run directly without installing
 bunx @dimassetoid/strata-mcp
 ```
 
-> **Lifecycle scripts**: When installing `@ast-grep/cli` with Bun, ensure lifecycle scripts are trusted:
-> `bun pm trust @ast-grep/cli`
+> [!NOTE]
+> **After installing**, trust lifecycle scripts for `@ast-grep/cli`:
+> ```bash
+> bun pm trust @ast-grep/cli
+> ```
 
 ---
 
@@ -76,7 +82,7 @@ Connect `strata-mcp` to your favorite AI agent:
 ```json
 {
   "mcpServers": {
-    "strata": {
+    "strata-mcp": {
       "command": "bunx",
       "args": ["@dimassetoid/strata-mcp"]
     }
@@ -88,7 +94,7 @@ Connect `strata-mcp` to your favorite AI agent:
 ```json
 {
   "mcpServers": {
-    "strata": {
+    "strata-mcp": {
       "command": "bunx",
       "args": ["@dimassetoid/strata-mcp"]
     }
@@ -107,25 +113,28 @@ Connect `strata-mcp` to your favorite AI agent:
 | `find_component_usage(component_name, path, scope?)` | Adoption Audit | Scans component imports in script/frontmatter and tag usages in template/JSX across multi-casing (kebab & Pascal). |
 | `dump_syntax_tree(code, language?)` | AST Helper | Dumps the CST syntax tree of a code snippet for AST pattern debugging. |
 | `test_match_code_rule(rule_yaml, code_snippet)` | Rule Sandbox | Validates a YAML rule against an in-memory code snippet without touching disk (< 20ms). |
-| `extract_component_contract(path, output_format?)` | Token Economy | Extracts component interface (`props`, `emits`, `slots`, `exposed`, render boundary, and state dependencies) with > 94% token savings. |
-| `get_component_tree(entry_path, max_depth?, direction?, output_format?)` | Architecture | Maps downward or upward component hierarchy trees (call graph / blast radius) with auto-import and alias resolution. |
-| `find_unused_components(target_path, ignore_patterns?, output_format?)` | Dead Code Audit | Two-pass in-memory audit to identify orphan/dead components (0 usages) across the entire monorepo. |
-| `scan_routes(target_path, framework?, output_format?)` | Routing | Discovers file-based route topology, dynamic parameters, nested layouts, and API handlers (Next.js, Nuxt 3, Astro, Inertia). |
+| `extract_component_contract(path, output_format?)` | Token Economy | Extracts component interface (`props`, `emits`, `slots`, `exposed`, CVA variants, SSR/RSC boundary violations, and data/state dependencies) with > 94% token savings. |
+| `get_component_tree(entry_path?, route_path?, target_path?, max_depth?, direction?, scope_filter?, output_format?)` | Architecture | Maps downward or upward component hierarchy trees (call graph / blast radius) from a file or route URL (`/catalog`) with domain/package scope filtering. |
+| `resolve_page_tree(route_path, target_path?, max_depth?, output_format?)` | Architecture | Resolves a URL route path directly to its page entrypoint file, layout wrappers, and downward component tree in 1 step. |
+| `find_unused_components(target_path, ignore_patterns?, exclude_pages?, output_format?)` | Dead Code Audit | Two-pass in-memory audit identifying orphan components. Results are partitioned into `orphanComponents` (reusable UI components with zero usages) and `unreferencedPages` (pages with no template callers). Case-insensitive glob matching ensures accuracy on mixed-case directories (e.g. `Pages/`, `Views/`). |
+| `scan_routes(target_path, framework?, prefix?, view?, output_format?)` | Routing | Discovers file-based route topology, dynamic parameters, nested layouts, and API handlers (Next.js, Nuxt 3, Astro, Inertia). Supports `view: "summary"` for domain-level aggregation on large projects and `prefix` filtering for focused sub-module inspection. |
 | `query_state_impact(identifier, target_path?, output_format?)` | State Architecture | Traces all components, layout wrappers, and pages consuming a specific state store (Pinia, Zustand, Redux), Context, or composable. |
+| `find_unused_state(target_path, output_format?)` | Dead Code Audit | Batch scanner detecting composables, stores, hooks, and utility functions with zero external consumers. Uses the SQLite `state_deps` graph for instant cross-file reference counting across `composables/`, `hooks/`, `stores/`, and `utils/`. |
 
 ---
 
 ## High-Performance Architecture & Token Economy
 
 1. **Fast-Path Candidate Pruning (Engine B)**: Keyword-based file pre-filtering bypasses expensive AST subprocess spawning for non-matching files, dropping search execution times by **97%** (from ~1,150ms to < 30ms, and < 2ms for non-existent symbols).
-2. **Persistent SQLite Codebase Graph Cache (Engine A)**: Uses native `bun:sqlite` with WAL mode in `.vue-ast/graph.db` to index components, edges, state dependencies, and routes with smart `mtime` delta synchronization (< 10ms warm sync) and instant SQL Recursive CTE blast radius queries.
+2. **Persistent SQLite Codebase Graph Cache (Engine A)**: Uses native `bun:sqlite` with WAL mode in `.strata/graph.db` to index components, edges, state dependencies, and routes with smart `mtime` delta synchronization (< 10ms warm sync) and instant SQL Recursive CTE blast radius queries.
 3. **Strict Token Economy**: Instead of dumping full 1,500-line components into the LLM context window, `extract_component_contract` delivers high-density interface summaries (< 80 tokens), preserving context window limits.
+4. **Engine Observability Metadata**: Every audit result surfaces its execution engine and duration. Text output shows a badge (e.g. `[Engine: in-memory-ast | 32ms]` or `[Engine: sqlite-graph-cache | 6ms]`); JSON output includes a `_meta: { engine, durationMs, cached }` payload for programmatic inspection.
 
 ---
 
 ## CLI Companion Usage
 
-You can also run `strata` directly from the terminal without an MCP client (`vue-ast` is also supported as a backward-compatible alias):
+You can run `strata` directly from the terminal without an MCP client:
 
 ### 1. Audit Component Adoption (Vue, React, Astro)
 ```bash
@@ -164,6 +173,13 @@ strata routes ./src
 
 # Scan with explicit framework hint and JSON output
 strata routes . --framework inertia --json
+
+# Aggregate routes by domain/module (useful for projects with 40+ routes)
+strata routes ./src --view summary
+
+# Filter routes by path prefix for focused inspection
+strata routes ./src --prefix /admin
+strata routes ./src --prefix /auth --json
 ```
 
 ### 5. Query State & Composable Impact (SQLite Graph)
@@ -186,11 +202,26 @@ strata sync ./src
 # Scan project for components with 0 usages (ignoring pages and stories)
 strata unused ./src --ignore "**/pages/**,**/*.stories.*"
 
-# Output dead components as JSON
+# Include page files in the dead-code scan (alongside orphan components)
+strata unused ./src --include-pages
+
+# Output dead components as JSON (partitioned into orphanComponents + unreferencedPages)
 strata unused ./src --json
 ```
 
-### 8. Search AST Patterns Across Frameworks
+### 8. Audit Unused State — Composables, Stores & Hooks
+```bash
+# Scan for composables, stores, hooks, and utils with zero external consumers
+strata unused-state ./src
+
+# Target a specific directory (e.g. Inertia composables)
+strata unused-state ./resources/js/composables
+
+# Output as structured JSON
+strata unused-state ./src --json
+```
+
+### 9. Search AST Patterns Across Frameworks
 ```bash
 # Search for Vue composables or functions
 strata search "const $NAME = ref($$$)" --path ./src
@@ -202,12 +233,12 @@ strata search "useEffect($$$, $$$)" --path ./src --lang tsx
 strata search "import $$$ from '$$$'" --path ./src
 ```
 
-### 9. Test AST Rule in Memory Sandbox
+### 10. Test AST Rule in Memory Sandbox
 ```bash
 strata rule ./rules/my-rule.yaml --path ./src
 ```
 
-### 10. Dump CST Syntax Tree
+### 11. Dump CST Syntax Tree
 ```bash
 strata dump "const count = ref(0);" --lang ts
 ```

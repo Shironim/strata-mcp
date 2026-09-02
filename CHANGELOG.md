@@ -5,20 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-09-02
+
+### Added
+
+- **New Tool — `find_unused_state`**: Batch dead-code auditor for composables, stores, hooks, and utility functions. Scans `composables/`, `hooks/`, `stores/`, and `utils/` directories using the SQLite graph engine (`state_deps`) to detect functions and stores with zero external consumers. Exposed as both an MCP tool (`find_unused_state(target_path, output_format)`) and a CLI command (`strata unused-state [target-dir]`).
+- **Engine Observability Metadata (`_meta`)**: All audit results now include execution transparency metadata. Text output surfaces a badge (e.g. `[Engine: sqlite-graph-cache | 6ms]`); JSON output includes a structured `_meta: { engine, durationMs, cached }` payload. Applies consistently across all tools.
+- **`scan_routes` Summary Mode (`view: "summary"`)**: Projects with more than 40 routes (or any project using `view: "summary"`) now receive aggregated output grouped by domain/module (e.g. `/admin/*: 42 routes`, `/auth/*: 6 routes`), significantly reducing token consumption for large codebases.
+- **`scan_routes` Prefix Filter**: New `prefix` parameter enables focused inspection of specific sub-modules (e.g. `prefix: "/services"`, `prefix: "/auth"`), returning only routes matching the given path prefix.
+- **CLI Flags Expansion**: New flags added to the `strata` binary: `--prefix <prefix>` and `--view <mode>` for `strata routes`, and `--include-pages` for `strata unused`.
+
+### Fixed
+
+- **Case-Insensitive Glob Matching in `find_unused_components`**: `matchesGlob()` now normalizes paths to lowercase before matching, resolving false negatives on directories with capital letters (e.g. `resources/js/Pages/**` in Inertia/Nuxt projects).
+- **Structured Output Partition in `find_unused_components`**: Results are now explicitly partitioned into two distinct categories — `orphanComponents` (reusable UI components in `Components/**` with zero usages) and `unreferencedPages` (page-level files in `Pages/**` with no template callers). The `exclude_pages: true` option (enabled by default) eliminates false positives from router-managed page files.
+
 ## [0.4.0] - 2026-09-02
 
 ### Added
-- **Project Rebranding (`strata-mcp`)**: Rebranded package to `strata-mcp` with CLI binary `strata` (with `vue-ast` preserved as backward-compatible alias), reflecting full multi-framework intelligence across Vue, React, Next.js, Nuxt 3, Astro, and Inertia.js.
+- **Project Rebranding (`strata-mcp`)**: Rebranded package to `strata-mcp` with CLI binary `strata`, reflecting full multi-framework intelligence across Vue, React, Next.js, Nuxt 3, Astro, and Inertia.js.
+- **Route-to-Component Tree Resolver (`resolve_page_tree` & `get_component_tree(route_path)`)**: 1-step direct resolution from URL paths (e.g. `/catalog`, `/products/[id]`) directly to page entrypoint files, nested layout chains, and downward component hierarchy trees.
+- **RSC / SSR & Hydration Boundary Violation Auditor**: Automatic detection and actionable error hints for client-only hook leaks (`useState`, `useEffect`, etc.) or DOM event handlers in Next.js Server Components without `'use client'`, plus unhydrated interactive island warnings in Astro.
+- **CVA & Design System Variant Schema Slicing**: Structured extraction of Class Variance Authority (`cva()`) and TypeScript prop union variant configurations (`variants` and `defaultVariants`) on `extract_component_contract`.
+- **Data-Fetching & Server Action Lineage Slicing**: Extraction of Next.js Server Actions (`'use server'`), TanStack Query keys (`['cart', userId]`), API endpoints (`$fetch`, `fetch`, `axios`), and Inertia form mutations (`POST /auth/login`).
+- **Monorepo & Domain Boundary Scoping (`scope_filter`)**: Scoped component tree traversal with `--scope-filter` / `scope_filter`, preventing context flooding across multi-package monorepos and annotating boundary crossings with `[external-domain/package]`.
 - **Persistent SQLite Codebase Graph Cache**: High-performance local graph cache (`.strata/graph.db`) powered by native `bun:sqlite` with WAL mode. Replaces repeated per-request disk scanning with smart `mtime` delta synchronization (< 10ms warm sync).
 - **Recursive CTE Blast Radius & Anti-Join Audits**: Enables instant SQL-level transitive closure queries for upward component blast radiuses, layout chains, and zero-overhead dead component detection.
 - **State Impact Analysis (`query_state_impact`)**: Traces all components, layout wrappers, and pages consuming a specific state store (Pinia/Zustand/Redux), Context, or custom composable.
 - **File-Based Route Topology Scanner (`scan_routes`)**: Automated discovery of routing manifests across Next.js (App Router & Pages Router), Nuxt 3, Astro, and Inertia.js. Resolves URL routes, dynamic parameters (`[id]`, `[...slug]`, `[[...optional]]`), layout nesting chains, and HTTP API handlers.
 - **Auto-Import Component Resolution**: Native component discovery for Nuxt 3 and modern Vite (`unplugin-vue-components`) setups, resolving template tags without explicit script setup imports.
 - **Upward Blast Radius Component Tree**: Bidirectional tree traversal (`direction: "upward"`) tracking component impact from leaf elements up to parent consumers, layouts, and top-level pages.
-- **Isomorphic Render Boundary Detection**: Automatic classification of React Server Components (RSC), `'use client'`, `'use server'`, Astro hydrated islands (`client:*`), and Nuxt `.client.vue` / `.server.vue`.
-- **Out-of-Band State & Store Dependency Extraction**: Extracts global state dependencies (Pinia, Zustand, Redux) and context/composable injections (`useContext`, `inject`, custom `use*` composables) directly into component contracts.
-- **Unified Parameter Aliases**: Seamless support for `path` and `target_path` aliases across all MCP tools, with informative error guarding for missing arguments.
-- **CLI Commands Expansion**: Added `strata routes`, `strata impact <state-id>`, `strata sync`, and `--direction <downward|upward>` option for `strata tree`.
+- **Unified Parameter Aliases**: Seamless support for `path` and `target_path` aliases across all 11 MCP tools, with informative error guarding for missing arguments.
+- **CLI Commands Expansion**: Added `strata routes`, `strata impact <state-id>`, `strata sync`, `--route <path>`, `--scope-filter <scope>`, and `--direction <downward|upward>` option for `strata tree`.
 
 ## [0.3.0] - 2026-09-01
 
