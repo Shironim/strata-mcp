@@ -16,7 +16,12 @@ import { extractComponentContract, formatContractAsText } from './engine/contrac
 import { getComponentTree, formatTreeAsText } from './engine/tree';
 import { findUnusedComponents, formatUnusedAsText } from './engine/audit';
 import { scanRoutes, formatRoutesAsText } from './engine/routes';
-import { queryStateImpact, formatStateImpactAsText } from './engine/database';
+import {
+  queryStateImpact,
+  formatStateImpactAsText,
+  findUnusedState,
+  formatUnusedStateAsText,
+} from './engine/database';
 import type { RouteFramework } from './types';
 
 export function createMcpServer(): Server {
@@ -191,13 +196,21 @@ export function createMcpServer(): Server {
         {
           name: 'get_component_tree',
           description:
-            'Resolves the downward component hierarchy tree (call graph / dependency tree) starting from a root page or layout across Vue, React, and Astro.',
+            'Resolves the downward component hierarchy tree (call graph / dependency tree) starting from a root page file, layout, or route URL path across Vue, React, and Astro.',
           inputSchema: {
             type: 'object',
             properties: {
               entry_path: {
                 type: 'string',
-                description: 'Path to the root component/page file',
+                description: 'Path to the root component/page file (or use route_path + target_path)',
+              },
+              route_path: {
+                type: 'string',
+                description: 'Optional URL route path to resolve (e.g. "/catalog", "/products/[id]")',
+              },
+              target_path: {
+                type: 'string',
+                description: 'Project root or pages directory (used with route_path)',
               },
               max_depth: {
                 type: 'number',
@@ -215,19 +228,51 @@ export function createMcpServer(): Server {
                 description:
                   'Optional alias map that overrides/merges with auto-detected jsconfig/tsconfig paths (e.g. { "@/": "resources/js/" }). Keys may use "*" (wildcard) or end with "/" (prefix).',
               },
+              scope_filter: {
+                type: 'string',
+                description:
+                  'Optional package/domain scope filter (e.g. "apps/web", "features/auth"). Dependencies outside this scope will not be traversed recursively.',
+              },
               output_format: {
                 type: 'string',
                 enum: ['text', 'json'],
                 description: 'Output format: text (indented tree) or json (default: "text")',
               },
             },
-            required: ['entry_path'],
+          },
+        },
+        {
+          name: 'resolve_page_tree',
+          description:
+            'Resolves a URL route path directly to its page entrypoint file and downward component hierarchy tree in 1 step.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              route_path: {
+                type: 'string',
+                description: 'The URL route path to resolve (e.g. "/catalog", "/products/123", "/blog/[slug]")',
+              },
+              target_path: {
+                type: 'string',
+                description: 'Project root directory or pages folder (default: ".")',
+              },
+              max_depth: {
+                type: 'number',
+                description: 'Maximum traversal depth (default: 3)',
+              },
+              output_format: {
+                type: 'string',
+                enum: ['text', 'json'],
+                description: 'Output format: text (indented tree) or json (default: "text")',
+              },
+            },
+            required: ['route_path'],
           },
         },
         {
           name: 'find_unused_components',
           description:
-            'Audits a codebase to find dead or unreferenced components (0 usages across project files).',
+            'Audits a codebase to find dead or unreferenced components (0 usages across project files) with page-vs-reusable component separation.',
           inputSchema: {
             type: 'object',
             properties: {
@@ -235,10 +280,19 @@ export function createMcpServer(): Server {
                 type: 'string',
                 description: 'Project root or components directory to audit',
               },
+              path: {
+                type: 'string',
+                description: 'Alias for target_path',
+              },
               ignore_patterns: {
                 type: 'array',
                 items: { type: 'string' },
                 description: 'Glob patterns to exclude (e.g. ["**/pages/**", "**/*.stories.*"])',
+              },
+              exclude_pages: {
+                type: 'boolean',
+                description:
+                  'When true (default: true), excludes file-based page views (Inertia/Nuxt/Astro Pages) from the orphan components count to eliminate routing false positives.',
               },
               output_format: {
                 type: 'string',
@@ -252,7 +306,7 @@ export function createMcpServer(): Server {
         {
           name: 'scan_routes',
           description:
-            'Discovers file-based route topology (URL routes, dynamic params, layouts, and API handlers) across Next.js (App & Pages), Nuxt 3, Astro, and Inertia.js.',
+            'Discovers file-based route topology (URL routes, dynamic params, layouts, and API handlers) across Next.js (App & Pages), Nuxt 3, Astro, and Inertia.js with module summary support.',
           inputSchema: {
             type: 'object',
             properties: {
@@ -269,6 +323,16 @@ export function createMcpServer(): Server {
                 enum: ['next-app', 'next-pages', 'nuxt', 'astro', 'inertia', 'unknown'],
                 description: 'Optional framework hint if auto-detection should be bypassed',
               },
+              prefix: {
+                type: 'string',
+                description: 'Optional URL prefix filter (e.g. "/services", "/auth", "/api")',
+              },
+              view: {
+                type: 'string',
+                enum: ['summary', 'full', 'tree'],
+                description:
+                  'View mode: "summary" (high-density module breakdown), "full" (detailed list), or "tree" (default: "summary" if >40 routes)',
+              },
               output_format: {
                 type: 'string',
                 enum: ['text', 'json'],
@@ -276,6 +340,29 @@ export function createMcpServer(): Server {
               },
             },
             required: ['target_path'],
+          },
+        },
+        {
+          name: 'find_unused_state',
+          description:
+            'Discovers dead or unreferenced composables, state stores (Pinia/Zustand), contexts, and hooks across the workspace using the SQLite graph cache.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              target_path: {
+                type: 'string',
+                description: 'Project root directory (alias: path, default: ".")',
+              },
+              path: {
+                type: 'string',
+                description: 'Alias for target_path',
+              },
+              output_format: {
+                type: 'string',
+                enum: ['text', 'json'],
+                description: 'Output format: text or json (default: "text")',
+              },
+            },
           },
         },
         {
@@ -477,15 +564,26 @@ export function createMcpServer(): Server {
       }
 
       if (name === 'get_component_tree') {
-        const entryPath = (args.entry_path || args.path || args.target_path)
-          ? String(args.entry_path || args.path || args.target_path)
-          : '';
-        if (!entryPath) {
+        const routePath = args.route_path ? String(args.route_path) : undefined;
+        const entryPath = args.entry_path
+          ? String(args.entry_path)
+          : (!routePath && (args.path || args.target_path))
+          ? String(args.path || args.target_path)
+          : undefined;
+        const targetPath = args.target_path || args.path ? String(args.target_path || args.path) : undefined;
+
+        if (!entryPath && !routePath) {
           return {
             isError: true,
-            content: [{ type: 'text', text: "Missing required argument: 'entry_path' (or 'path')" }],
+            content: [
+              {
+                type: 'text',
+                text: "Missing required argument: either 'entry_path' or 'route_path' must be provided.",
+              },
+            ],
           };
         }
+
         const maxDepth = args.max_depth !== undefined ? Number(args.max_depth) : undefined;
         const direction = args.direction === 'upward' ? 'upward' : 'downward';
         const aliasMap =
@@ -497,22 +595,73 @@ export function createMcpServer(): Server {
                 ])
               )
             : undefined;
-        const result = await getComponentTree({
-          entryPath,
-          maxDepth,
-          direction,
-          aliasMap,
-        });
-        const isJson = args.output_format === 'json';
 
-        return {
-          content: [
-            {
-              type: 'text',
-              text: isJson ? JSON.stringify(result, null, 2) : formatTreeAsText(result),
-            },
-          ],
-        };
+        const scopeFilter = args.scope_filter ? String(args.scope_filter) : undefined;
+
+        try {
+          const result = await getComponentTree({
+            entryPath,
+            routePath,
+            targetPath,
+            scopeFilter,
+            maxDepth,
+            direction,
+            aliasMap,
+          });
+          const isJson = args.output_format === 'json';
+
+          return {
+            content: [
+              {
+                type: 'text',
+                text: isJson ? JSON.stringify(result, null, 2) : formatTreeAsText(result),
+              },
+            ],
+          };
+        } catch (err: any) {
+          return {
+            isError: true,
+            content: [{ type: 'text', text: `Failed to resolve component tree: ${err.message}` }],
+          };
+        }
+      }
+
+      if (name === 'resolve_page_tree') {
+        const routePath = args.route_path ? String(args.route_path) : '';
+        if (!routePath) {
+          return {
+            isError: true,
+            content: [{ type: 'text', text: "Missing required argument: 'route_path'" }],
+          };
+        }
+        const targetPath = (args.target_path || args.path)
+          ? String(args.target_path || args.path)
+          : '.';
+        const maxDepth = args.max_depth !== undefined ? Number(args.max_depth) : undefined;
+
+        try {
+          const result = await getComponentTree({
+            routePath,
+            targetPath,
+            maxDepth,
+            direction: 'downward',
+          });
+          const isJson = args.output_format === 'json';
+
+          return {
+            content: [
+              {
+                type: 'text',
+                text: isJson ? JSON.stringify(result, null, 2) : formatTreeAsText(result),
+              },
+            ],
+          };
+        } catch (err: any) {
+          return {
+            isError: true,
+            content: [{ type: 'text', text: `Failed to resolve page tree: ${err.message}` }],
+          };
+        }
       }
 
       if (name === 'find_unused_components') {
@@ -528,9 +677,11 @@ export function createMcpServer(): Server {
         const ignorePatterns = Array.isArray(args.ignore_patterns)
           ? args.ignore_patterns.map(String)
           : undefined;
+        const excludePages = args.exclude_pages !== undefined ? Boolean(args.exclude_pages) : undefined;
         const result = await findUnusedComponents({
           targetPath,
           ignorePatterns,
+          excludePages,
         });
         const isJson = args.output_format === 'json';
 
@@ -557,6 +708,8 @@ export function createMcpServer(): Server {
         const result = await scanRoutes({
           targetPath,
           frameworkHint: args.framework as RouteFramework | undefined,
+          prefix: args.prefix ? String(args.prefix) : undefined,
+          view: args.view as 'summary' | 'full' | 'tree' | undefined,
         });
         const isJson = args.output_format === 'json';
 
@@ -565,6 +718,23 @@ export function createMcpServer(): Server {
             {
               type: 'text',
               text: isJson ? JSON.stringify(result, null, 2) : formatRoutesAsText(result),
+            },
+          ],
+        };
+      }
+
+      if (name === 'find_unused_state') {
+        const targetPath = (args.target_path || args.path)
+          ? String(args.target_path || args.path)
+          : process.cwd();
+        const result = await findUnusedState(targetPath);
+        const isJson = args.output_format === 'json';
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: isJson ? JSON.stringify(result, null, 2) : formatUnusedStateAsText(result),
             },
           ],
         };
