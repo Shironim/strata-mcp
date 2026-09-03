@@ -40,13 +40,97 @@ export interface AstGrepItemOutput {
 }
 
 /**
+ * Scoped platform packages — prebuilt ast-grep binaries distributed via
+ * optionalDependencies to avoid lifecycle script requirements.
+ */
+const AST_GREP_VERSION = '0.45.3';
+
+interface ScopedPlatform {
+  target: string;
+  packageName: string;
+  binary: string;
+}
+
+/** Scoped platform spec for the current host, or null if unsupported. */
+export function scopedPlatformForCurrent(
+  platform: string = process.platform,
+  arch: string = process.arch
+): ScopedPlatform | null {
+  if (platform === 'linux' && arch === 'x64') {
+    return {
+      target: 'linux-x64-gnu',
+      packageName: '@ast-grep/cli-linux-x64-gnu',
+      binary: 'ast-grep',
+    };
+  }
+  if (platform === 'win32' && arch === 'x64') {
+    return {
+      target: 'win32-x64-msvc',
+      packageName: '@ast-grep/cli-win32-x64-msvc',
+      binary: 'ast-grep.exe',
+    };
+  }
+  if (platform === 'darwin') {
+    if (arch === 'arm64') {
+      return {
+        target: 'darwin-arm64',
+        packageName: '@ast-grep/cli-darwin-arm64',
+        binary: 'ast-grep',
+      };
+    }
+    if (arch === 'x64') {
+      return {
+        target: 'darwin-x64',
+        packageName: '@ast-grep/cli-darwin-x64',
+        binary: 'ast-grep',
+      };
+    }
+  }
+  return null;
+}
+
+/** Resolves an installation hint tailored to the active platform. */
+function installHint(): string {
+  const scoped = scopedPlatformForCurrent();
+  if (scoped) {
+    return (
+      `ast-grep binary not found. It should have been installed automatically via ` +
+      `optionalDependencies ("${scoped.packageName}@${AST_GREP_VERSION}"). Try reinstalling dependencies, ` +
+      `or set AST_GREP_BIN to a working ast-grep binary.`
+    );
+  }
+  return (
+    `ast-grep binary not found. This platform (${process.platform}-${process.arch}) has no bundled binary; ` +
+    `install ast-grep manually (download from https://ast-grep.github.io/) and set AST_GREP_BIN to its path, ` +
+    `or put ast-grep on your PATH.`
+  );
+}
+
+/**
+ * Direct file lookup for the scoped platform binary, walking up from each
+ * root dir. Extracted for testability — resolveAstGrepBinary() calls it with
+ * [getModuleDir(), process.cwd()].
+ */
+export function findScopedBinary(rootDirs: string[], scoped: ScopedPlatform): string | null {
+  const [scope, pkg] = scoped.packageName.split('/');
+  for (const root of rootDirs) {
+    let d = root;
+    while (d && d !== dirname(d)) {
+      const fullPath = join(d, 'node_modules', scope, pkg, scoped.binary);
+      if (existsSync(fullPath)) return fullPath;
+      d = dirname(d);
+    }
+  }
+  return null;
+}
+
+/**
  * Detects the ast-grep binary location.
  * Search priority:
  * 1. AST_GREP_BIN environment variable
- * 2. Package-local node_modules/.bin (resolved relative to this package source/dist)
- * 3. Ancestor directories walking up from this file (monorepo / hoisted dependencies)
- * 4. Current working directory node_modules/.bin (process.cwd())
- * 5. Fallback to system PATH
+ * 2. Scoped platform package (@ast-grep/cli-<target>)
+ * 3. Legacy: node_modules/.bin + upstream @ast-grep/cli-* package files
+ * 4. System PATH fallback
  */
 export function resolveAstGrepBinary(): string {
   if (process.env.AST_GREP_BIN && process.env.AST_GREP_BIN.trim()) {
@@ -54,6 +138,13 @@ export function resolveAstGrepBinary(): string {
   }
 
   const isWin = process.platform === 'win32';
+
+  // Tier 2: scoped platform package
+  const scoped = scopedPlatformForCurrent();
+  if (scoped) {
+    const hit = findScopedBinary([getModuleDir(), process.cwd()], scoped);
+    if (hit) return hit;
+  }
   const candidateNames = isWin
     ? ['ast-grep.exe', 'ast-grep.cmd', 'ast-grep', 'sg.exe', 'sg.cmd', 'sg']
     : ['ast-grep', 'sg', 'ast-grep.exe'];
@@ -89,15 +180,15 @@ export function resolveAstGrepBinary(): string {
     return null;
   }
 
-  // 1. Search walking up from current module file location
+  // Tier 3a. Search walking up from current module file location
   const moduleMatch = searchDirectory(getModuleDir());
   if (moduleMatch) return moduleMatch;
 
-  // 2. Search walking up from current working directory
+  // Tier 3b. Search walking up from current working directory
   const cwdMatch = searchDirectory(process.cwd());
   if (cwdMatch) return cwdMatch;
 
-  // Fallback to system PATH
+  // Tier 4: fallback to system PATH (graceful degradation handled by verify/execute)
   return isWin ? 'ast-grep.exe' : 'ast-grep';
 }
 
@@ -108,30 +199,50 @@ export async function verifyAstGrepBinary(): Promise<{ ok: boolean; path?: strin
   const bin = resolveAstGrepBinary();
   const isCmd = bin.endsWith('.cmd') || bin.endsWith('.bat');
 
-  return new Promise((resolve) => {
-    const proc = spawn(bin, ['--version'], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      shell: isCmd,
-    });
-
-    proc.on('error', (err) => {
-      resolve({
-        ok: false,
-        error: `ast-grep binary was not found or failed to start: ${err.message}. Please run 'bun install' or install '@ast-grep/cli'.`,
-      });
-    });
-
-    proc.on('close', (code) => {
-      if (code === 0) {
-        resolve({ ok: true, path: bin });
-      } else {
+  // NOTE: spawn() can throw synchronously (e.g. ENOEXEC on a dangling
+  // node_modules/.bin symlink when a postinstall binary was blocked).
+  // That must resolve to { ok: false } — never reject —
+  // otherwise runServer() crashes on startup and MCP clients report -32000.
+  try {
+    return await new Promise<{ ok: boolean; path?: string; error?: string }>((resolve) => {
+      let proc;
+      try {
+        proc = spawn(bin, ['--version'], {
+          stdio: ['ignore', 'pipe', 'pipe'],
+          shell: isCmd,
+        });
+      } catch (err) {
         resolve({
           ok: false,
-          error: `ast-grep exited with code ${code}. Please verify your '@ast-grep/cli' installation.`,
+          error: `ast-grep binary was not found or failed to start: ${err instanceof Error ? err.message : String(err)}. ${installHint()}`,
         });
+        return;
       }
+
+      proc.on('error', (err) => {
+        resolve({
+          ok: false,
+          error: `ast-grep binary was not found or failed to start: ${err.message}. ${installHint()}`,
+        });
+      });
+
+      proc.on('close', (code) => {
+        if (code === 0) {
+          resolve({ ok: true, path: bin });
+        } else {
+          resolve({
+            ok: false,
+            error: `ast-grep exited with code ${code}. ${installHint()}`,
+          });
+        }
+      });
     });
-  });
+  } catch (err) {
+    return {
+      ok: false,
+      error: `ast-grep binary check failed: ${err instanceof Error ? err.message : String(err)}. ${installHint()}`,
+    };
+  }
 }
 
 /**
@@ -145,6 +256,7 @@ export function isBinaryExecutionError(err: unknown): boolean {
     msg.includes('Failed to execute ast-grep') ||
     msg.includes('ENOENT') ||
     msg.includes('EACCES') ||
+    msg.includes('ast-grep binary not found') ||
     msg.includes('Make sure @ast-grep/cli is installed')
   );
 }
@@ -187,12 +299,23 @@ export async function executeAstGrep(options: AstGrepQueryOptions): Promise<RawM
       let stdout = '';
       let stderr = '';
 
-      const proc = spawn(bin, args, {
-        stdio: [useStdin ? 'pipe' : 'ignore', 'pipe', 'pipe'],
-        shell: isCmd,
-      });
+      let proc;
+      try {
+        proc = spawn(bin, args, {
+          stdio: [useStdin ? 'pipe' : 'ignore', 'pipe', 'pipe'],
+          shell: isCmd,
+        });
+      } catch (err) {
+        reject(
+          new Error(
+            `Failed to execute ast-grep at "${bin}": ${err instanceof Error ? err.message : String(err)}. ${installHint()}`
+          )
+        );
+        return;
+      }
 
       if (useStdin && proc.stdin) {
+        proc.stdin.on('error', () => {});
         proc.stdin.write(options.code);
         proc.stdin.end();
       }
@@ -208,15 +331,24 @@ export async function executeAstGrep(options: AstGrepQueryOptions): Promise<RawM
       proc.on('error', (err) => {
         reject(
           new Error(
-            `Failed to execute ast-grep at "${bin}": ${err.message}. Make sure @ast-grep/cli is installed.`
+            `Failed to execute ast-grep at "${bin}": ${err.message}. ${installHint()}`
           )
         );
       });
 
       proc.on('close', (code) => {
         if (code !== 0) {
-          const detail = stderr.trim() || `process exited with code ${code}`;
-          let errorMsg = `ast-grep error (exit code ${code}): ${detail}`;
+          const detail = stderr.trim();
+          // Compat: ast-grep >= 0.4x uses grep-like exit codes for `run` —
+          // exit 1 with empty stdout/stderr means "no matches found".
+          // 0.38 exits 0 in that case. Normalize both to an empty result
+          // instead of throwing, so callers (batch fallback, findCode,
+          // CLI) see zero matches rather than a fatal error.
+          if (code === 1 && stdout.trim() === '' && detail === '') {
+            resolve([]);
+            return;
+          }
+          let errorMsg = `ast-grep error (exit code ${code}): ${detail || `process exited with code ${code}`}`;
           if (stderr.includes('mapping values are not allowed')) {
             errorMsg += '\nHint: wrap your pattern with quotes (e.g. pattern: "$NAME?: $$$") when using special characters like ?, :, {, }.';
           }
@@ -288,12 +420,23 @@ export async function dumpSyntaxTree(code: string, language: string = 'ts'): Pro
   return new Promise((resolve, reject) => {
     let stderr = '';
 
-    const proc = spawn(bin, args, {
-      stdio: ['pipe', 'ignore', 'pipe'],
-      shell: isCmd,
-    });
+    let proc;
+    try {
+      proc = spawn(bin, args, {
+        stdio: ['pipe', 'ignore', 'pipe'],
+        shell: isCmd,
+      });
+    } catch (err) {
+      reject(
+        new Error(
+            `Failed to dump syntax tree: ${err instanceof Error ? err.message : String(err)}. ${installHint()}`
+        )
+      );
+      return;
+    }
 
     // Immediately close stdin to prevent ast-grep from scanning the working directory
+    proc.stdin?.on('error', () => {});
     proc.stdin?.end();
 
     proc.stderr?.on('data', (chunk) => {
@@ -306,6 +449,13 @@ export async function dumpSyntaxTree(code: string, language: string = 'ts'): Pro
 
     proc.on('close', (code) => {
       const output = stderr.trim();
+      // Compat: ast-grep >= 0.4x exits 1 for --debug-query (no JSON matches
+      // are produced) while still printing the CST to stderr; 0.38 exits 0
+      // with identical output. Accept either as long as debug output exists.
+      if (/^debug \w+:/im.test(output)) {
+        resolve(output);
+        return;
+      }
       if (code !== 0) {
         reject(new Error(`ast-grep dump failed (exit ${code}): ${output || 'unknown error'}`));
         return;
