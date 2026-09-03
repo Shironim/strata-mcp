@@ -333,6 +333,10 @@ export async function main(argv: string[] = process.argv.slice(2)) {
   }
 }
 
-if (import.meta.main) {
+// Only auto-run when executed as the CLI entry (cli.js/cli.ts).
+// When bundled into mcp.js (single-binary mode, mcp.ts imports main from here),
+// this guard prevents double execution that would corrupt MCP stdio JSON-RPC.
+const cliEntry = process.argv[1] ?? '';
+if (import.meta.main && (cliEntry.endsWith('cli.js') || cliEntry.endsWith('cli.ts'))) {
   main();
 }
