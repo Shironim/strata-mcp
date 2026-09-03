@@ -67,10 +67,11 @@ bunx @dimassetoid/strata-mcp
 ```
 
 > [!NOTE]
-> **After installing**, trust lifecycle scripts for `@ast-grep/cli`:
-> ```bash
-> bun pm trust @ast-grep/cli
-> ```
+> **No extra setup needed on Linux (x64), Windows (x64), and macOS (Apple Silicon & Intel).**
+> The `ast-grep` binary ships automatically via platform-specific optional dependencies
+> (`@ast-grep/cli-*`, ast-grep 0.45.3) — `bun pm trust` is **not**
+> required. On Windows, SmartScreen may prompt on first run; allow it.
+> On other platforms, install ast-grep manually and point `AST_GREP_BIN` at the binary.
 
 ---
 
