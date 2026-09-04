@@ -20,6 +20,8 @@ export * from './engine/resolver';
 export * from './engine/patterns';
 export * from './engine/routes';
 export * from './engine/database';
+export * from './engine/slicer';
+export * from './engine/reactivity';
 export * from './adapters/factory';
 export * from './adapters/types';
 export * from './mcp';

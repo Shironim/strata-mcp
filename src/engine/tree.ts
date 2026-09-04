@@ -586,7 +586,7 @@ export async function getComponentTree(
   let resolvedRouteInfo: ComponentTreeResult['resolvedRoute'] | undefined;
 
   if (options.routePath) {
-    const targetPath = options.targetPath || process.cwd();
+    const targetPath = resolve(options.targetPath || '.');
     const routeResolution = await resolveRouteEntry(targetPath, options.routePath);
     if (!routeResolution.matched || !routeResolution.filePath) {
       const avail =

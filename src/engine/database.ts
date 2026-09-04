@@ -12,9 +12,12 @@ import { extractLocalImports, isPageFile } from './tree';
 import { scanRoutes } from './routes';
 import type {
   QueryStateImpactOptions,
+  StateChainNode,
+  StateChainResult,
   StateImpactConsumer,
   StateImpactResult,
   SyncStats,
+  TraceStateChainOptions,
   UnusedStateItem,
   UnusedStateResult,
 } from '../types';
@@ -129,15 +132,34 @@ function initSchema(db: Database): void {
   `);
 }
 
-/**
- * Synchronizes the workspace disk state with SQLite using file mtime (Smart Delta Sync).
- */
-export async function syncWorkspace(workspaceRoot: string): Promise<SyncStats> {
-  const startTime = performance.now();
-  const absRoot = resolve(workspaceRoot);
-  const db = getWorkspaceDatabase(absRoot);
+export interface WorkspaceDelta {
+  diskMap: Map<string, { fullPath: string; mtime: number; size: number }>;
+  dbMap: Map<string, { id: number; mtime: number; size: number }>;
+  added: string[];
+  modified: string[];
+  deleted: number[];
+  unchanged: number;
+}
 
-  // 1. Gather all project files from disk
+export interface ParsedFilePayload {
+  path: string;
+  framework: string;
+  boundary: { boundary: string; directive?: string };
+  stateDeps: { stores: string[]; contexts: string[]; composables: string[] };
+  compName: string;
+  contract: any;
+  edges: Array<{ targetPath: string; isDynamic: boolean }>;
+}
+
+export interface ParsedWorkspaceBatch {
+  files: Map<string, ParsedFilePayload>;
+  routes: Awaited<ReturnType<typeof scanRoutes>> | null;
+}
+
+/**
+ * 1. Gathers disk candidate files and calculates the delta against SQLite.
+ */
+export async function hashChecker(absRoot: string, db: Database): Promise<WorkspaceDelta> {
   const allDiskFiles = await collectFiles(absRoot);
   const candidateFiles = allDiskFiles.filter((f) => {
     const ext = extname(f).toLowerCase();
@@ -154,7 +176,6 @@ export async function syncWorkspace(workspaceRoot: string): Promise<SyncStats> {
     );
   });
 
-  // Map of normalized path -> disk stat
   const diskMap = new Map<string, { fullPath: string; mtime: number; size: number }>();
   for (const f of candidateFiles) {
     try {
@@ -170,7 +191,6 @@ export async function syncWorkspace(workspaceRoot: string): Promise<SyncStats> {
     }
   }
 
-  // 2. Query all known files from SQLite
   const dbFiles = db.query('SELECT id, path, mtime, size FROM files').all() as Array<{
     id: number;
     path: string;
@@ -183,7 +203,6 @@ export async function syncWorkspace(workspaceRoot: string): Promise<SyncStats> {
     dbMap.set(row.path, { id: row.id, mtime: row.mtime, size: row.size });
   }
 
-  // 3. Compute Delta
   const added: string[] = [];
   const modified: string[] = [];
   const deleted: number[] = [];
@@ -206,19 +225,98 @@ export async function syncWorkspace(workspaceRoot: string): Promise<SyncStats> {
     }
   }
 
-  // If nothing changed, fast return!
-  if (added.length === 0 && modified.length === 0 && deleted.length === 0) {
-    return {
-      added: 0,
-      modified: 0,
-      deleted: 0,
-      unchanged,
-      total: diskMap.size,
-      durationMs: Math.round(performance.now() - startTime),
-    };
+  return {
+    diskMap,
+    dbMap,
+    added,
+    modified,
+    deleted,
+    unchanged,
+  };
+}
+
+/**
+ * 2. Parses changed/added files in-memory for contracts, boundaries, state dependencies, and edges.
+ */
+export async function batchParser(
+  toProcess: string[],
+  absRoot: string,
+  diskMap: Map<string, { fullPath: string; mtime: number; size: number }>
+): Promise<ParsedWorkspaceBatch> {
+  const parsedFiles = new Map<string, ParsedFilePayload>();
+
+  for (const path of toProcess) {
+    try {
+      const content = await fs.readFile(path, 'utf8');
+      const framework = detectFramework(path);
+      const boundary = extractRenderBoundary(path, content, framework);
+      const stateDeps = extractStateDependencies(content, framework);
+      const compName = basename(path, extname(path));
+      const contract = await extractComponentContract(path, content);
+      const allImports = extractLocalImports(content);
+
+      const edges: Array<{ targetPath: string; isDynamic: boolean }> = [];
+      for (const imp of allImports) {
+        if (imp.source.startsWith('.')) {
+          const targetCandidate = resolve(dirname(path), imp.source);
+          let matchedPath: string | undefined;
+
+          for (const ext of ['', '.vue', '.tsx', '.jsx', '.ts', '.js', '/index.ts', '/index.vue']) {
+            const testP = normalize(targetCandidate + ext);
+            if (diskMap.has(testP)) {
+              matchedPath = testP;
+              break;
+            }
+          }
+
+          if (matchedPath) {
+            edges.push({
+              targetPath: matchedPath,
+              isDynamic: imp.isDynamic ?? false,
+            });
+          }
+        }
+      }
+
+      parsedFiles.set(path, {
+        path,
+        framework,
+        boundary,
+        stateDeps,
+        compName,
+        contract,
+        edges,
+      });
+    } catch {
+      // ignore parse failures
+    }
   }
 
-  // 4. Apply Delta within a transaction
+  let routeManifest: Awaited<ReturnType<typeof scanRoutes>> | null = null;
+  try {
+    const manifest = await scanRoutes({ targetPath: absRoot });
+    if (manifest.routes.length > 0) {
+      routeManifest = manifest;
+    }
+  } catch {
+    // ignore route scan failures
+  }
+
+  return {
+    files: parsedFiles,
+    routes: routeManifest,
+  };
+}
+
+/**
+ * 3. Commits file delta, parsed components, edges, state dependencies, and routes in an atomic SQLite transaction.
+ */
+export function transactionCommitter(
+  db: Database,
+  delta: WorkspaceDelta,
+  parsedBatch: ParsedWorkspaceBatch,
+  startTime: number
+): SyncStats {
   const insertFileStmt = db.prepare(`
     INSERT INTO files (path, framework, mtime, size, is_page, is_layout, render_boundary, boundary_directive)
     VALUES ($path, $framework, $mtime, $size, $is_page, $is_layout, $render_boundary, $boundary_directive)
@@ -254,32 +352,34 @@ export async function syncWorkspace(workspaceRoot: string): Promise<SyncStats> {
     DELETE FROM state_deps WHERE file_id = $id;
   `);
 
-  const toProcess = [...added, ...modified];
+  const toProcess = [...delta.added, ...delta.modified];
   const fileIdMap = new Map<string, number>();
 
-  // Populate existing file IDs
-  for (const [path, info] of dbMap.entries()) {
+  for (const [path, info] of delta.dbMap.entries()) {
     fileIdMap.set(path, info.id);
   }
 
   const transaction = db.transaction(() => {
     // A. Delete vanished files
-    for (const delId of deleted) {
+    for (const delId of delta.deleted) {
       deleteFileStmt.run(delId);
     }
 
     // B. Process added and modified files
     for (const path of toProcess) {
-      const diskInfo = diskMap.get(path);
+      const diskInfo = delta.diskMap.get(path);
       if (!diskInfo) continue;
 
-      const framework = detectFramework(path);
+      const parsed = parsedBatch.files.get(path);
+      const framework = parsed?.framework || detectFramework(path);
       const isPage = isPageFile(path) ? 1 : 0;
       const isLayout = isLayoutFile(path) ? 1 : 0;
+      const renderBoundary = parsed?.boundary.boundary || null;
+      const boundaryDirective = parsed?.boundary.directive || null;
 
       let fileId: number;
-      if (modified.includes(path) && dbMap.has(path)) {
-        fileId = dbMap.get(path)!.id;
+      if (delta.modified.includes(path) && delta.dbMap.has(path)) {
+        fileId = delta.dbMap.get(path)!.id;
         updateFileStmt.run({
           $id: fileId,
           $framework: framework,
@@ -287,8 +387,8 @@ export async function syncWorkspace(workspaceRoot: string): Promise<SyncStats> {
           $size: diskInfo.size,
           $is_page: isPage,
           $is_layout: isLayout,
-          $render_boundary: null,
-          $boundary_directive: null,
+          $render_boundary: renderBoundary,
+          $boundary_directive: boundaryDirective,
         });
         cleanRelationsStmt.run({ $id: fileId });
       } else {
@@ -299,101 +399,58 @@ export async function syncWorkspace(workspaceRoot: string): Promise<SyncStats> {
           $size: diskInfo.size,
           $is_page: isPage,
           $is_layout: isLayout,
-          $render_boundary: null,
-          $boundary_directive: null,
+          $render_boundary: renderBoundary,
+          $boundary_directive: boundaryDirective,
         }) as { id: number };
         fileId = res.id;
       }
 
       fileIdMap.set(path, fileId);
     }
-  });
 
-  transaction();
+    // C. Insert parsed components, state deps, and edges
+    for (const parsed of parsedBatch.files.values()) {
+      const fileId = fileIdMap.get(parsed.path);
+      if (!fileId) continue;
 
-  // 5. Asynchronously parse contents for components, state deps, boundaries, and edges
-  for (const path of toProcess) {
-    const fileId = fileIdMap.get(path);
-    if (!fileId) continue;
-
-    try {
-      const content = await fs.readFile(path, 'utf8');
-      const framework = detectFramework(path);
-
-      // Boundaries & State
-      const boundary = extractRenderBoundary(path, content, framework);
-      const stateDeps = extractStateDependencies(content, framework);
-
-      // Update boundary in file record
-      db.prepare(
-        'UPDATE files SET render_boundary = ?, boundary_directive = ? WHERE id = ?'
-      ).run(boundary.boundary, boundary.directive || null, fileId);
-
-      // Components
-      const compName = basename(path, extname(path));
-      const contract = await extractComponentContract(path, content);
       insertComponentStmt.run({
         $file_id: fileId,
-        $name: compName,
-        $contract_json: JSON.stringify(contract),
+        $name: parsed.compName,
+        $contract_json: JSON.stringify(parsed.contract),
       });
 
-      // State Dependencies
-      for (const st of stateDeps.stores) {
+      for (const st of parsed.stateDeps.stores) {
         insertStateDepStmt.run({ $file_id: fileId, $kind: 'store', $identifier: st });
       }
-      for (const ctx of stateDeps.contexts) {
+      for (const ctx of parsed.stateDeps.contexts) {
         insertStateDepStmt.run({ $file_id: fileId, $kind: 'context', $identifier: ctx });
       }
-      for (const cmp of stateDeps.composables) {
+      for (const cmp of parsed.stateDeps.composables) {
         insertStateDepStmt.run({ $file_id: fileId, $kind: 'composable', $identifier: cmp });
       }
 
-      // Static & Dynamic Imports (Edges)
-      const allImports = extractLocalImports(content);
-
-      for (const imp of allImports) {
-        // Resolve relative import
-        if (imp.source.startsWith('.')) {
-          const targetCandidate = resolve(dirname(path), imp.source);
-          let matchedPath: string | undefined;
-
-          // Try common extensions
-          for (const ext of ['', '.vue', '.tsx', '.jsx', '.ts', '.js', '/index.ts', '/index.vue']) {
-            const testP = normalize(targetCandidate + ext);
-            if (diskMap.has(testP)) {
-              matchedPath = testP;
-              break;
-            }
-          }
-
-          if (matchedPath && fileIdMap.has(matchedPath)) {
-            const childId = fileIdMap.get(matchedPath)!;
-            insertEdgeStmt.run({
-              $parent_file_id: fileId,
-              $child_file_id: childId,
-              $import_type: imp.isDynamic ? 'dynamic' : 'static',
-              $is_rendered: 1,
-            });
-          }
+      for (const edge of parsed.edges) {
+        const childId = fileIdMap.get(edge.targetPath);
+        if (childId) {
+          insertEdgeStmt.run({
+            $parent_file_id: fileId,
+            $child_file_id: childId,
+            $import_type: edge.isDynamic ? 'dynamic' : 'static',
+            $is_rendered: 1,
+          });
         }
       }
-    } catch {
-      // ignore parse failures
     }
-  }
 
-  // 6. Sync routes table if routes exist
-  try {
-    const routeManifest = await scanRoutes({ targetPath: absRoot });
-    if (routeManifest.routes.length > 0) {
+    // D. Sync routes table
+    if (parsedBatch.routes && parsedBatch.routes.routes.length > 0) {
       db.run('DELETE FROM routes;');
       const insertRouteStmt = db.prepare(`
         INSERT OR REPLACE INTO routes (url_path, file_id, type, params_json, handlers_json, layout_chain_json)
         VALUES ($url_path, $file_id, $type, $params_json, $handlers_json, $layout_chain_json);
       `);
 
-      for (const r of routeManifest.routes) {
+      for (const r of parsedBatch.routes.routes) {
         const fId = fileIdMap.get(normalize(r.filePath));
         if (fId) {
           insertRouteStmt.run({
@@ -407,19 +464,52 @@ export async function syncWorkspace(workspaceRoot: string): Promise<SyncStats> {
         }
       }
     }
-  } catch {
-    // ignore route scan failures
-  }
+  });
+
+  transaction();
 
   return {
-    added: added.length,
-    modified: modified.length,
-    deleted: deleted.length,
-    unchanged,
-    total: diskMap.size,
+    added: delta.added.length,
+    modified: delta.modified.length,
+    deleted: delta.deleted.length,
+    unchanged: delta.unchanged,
+    total: delta.diskMap.size,
     durationMs: Math.round(performance.now() - startTime),
   };
 }
+
+/**
+ * Synchronizes the workspace disk state with SQLite using file mtime (Smart Delta Sync).
+ * Orchestrates: hashChecker -> batchParser -> transactionCommitter.
+ */
+export async function syncWorkspace(workspaceRoot: string): Promise<SyncStats> {
+  const startTime = performance.now();
+  const absRoot = resolve(workspaceRoot);
+  const db = getWorkspaceDatabase(absRoot);
+
+  // 1. Gather files and detect delta
+  const delta = await hashChecker(absRoot, db);
+
+  // Fast exit if nothing changed
+  if (delta.added.length === 0 && delta.modified.length === 0 && delta.deleted.length === 0) {
+    return {
+      added: 0,
+      modified: 0,
+      deleted: 0,
+      unchanged: delta.unchanged,
+      total: delta.diskMap.size,
+      durationMs: Math.round(performance.now() - startTime),
+    };
+  }
+
+  // 2. Batch parse modified/added files
+  const toProcess = [...delta.added, ...delta.modified];
+  const parsedBatch = await batchParser(toProcess, absRoot, delta.diskMap);
+
+  // 3. Commit all changes inside SQLite transaction
+  return transactionCommitter(db, delta, parsedBatch, startTime);
+}
+
 
 /**
  * Queries the impact of a state dependency (store, context, composable) across all files in SQLite.
@@ -736,5 +826,193 @@ export function queryUnusedComponentsFromDb(
     .all() as Array<{ name: string; path: string; framework: string }>;
 
   return rows;
+}
+
+/**
+ * Traces the multi-hop dependency chain of a composable or store (both consumers and internal dependencies).
+ */
+export async function traceStateChain(
+  workspaceRoot: string,
+  options: TraceStateChainOptions
+): Promise<StateChainResult> {
+  const startTime = performance.now();
+  const absRoot = resolve(workspaceRoot);
+  await syncWorkspace(absRoot);
+  const db = getWorkspaceDatabase(absRoot);
+
+  const identifier = options.identifier;
+  const maxDepth = options.maxDepth || 3;
+  const direction = options.direction || 'both';
+
+  const consumers: StateChainNode[] = [];
+  const dependencies: StateChainNode[] = [];
+
+  // 1. Find the declaring file
+  const allFiles = db.query('SELECT id, path FROM files').all() as Array<{ id: number; path: string }>;
+  let declaringFile: { id: number; path: string } | undefined;
+
+  for (const f of allFiles) {
+    const base = basename(f.path, extname(f.path));
+    if (base === identifier || base.toLowerCase() === identifier.toLowerCase()) {
+      declaringFile = f;
+      break;
+    }
+  }
+
+  // 2. Consumers (Upward): Files consuming this identifier and components consuming them
+  if (direction === 'consumers' || direction === 'both') {
+    const visitedConsumers = new Set<string>();
+    let currentFiles: Array<{ path: string; fileId: number; depth: number }> = [];
+
+    const directRows = db
+      .query(`
+        SELECT DISTINCT f.id, f.path, s.kind
+        FROM state_deps s
+        JOIN files f ON s.file_id = f.id
+        WHERE s.identifier = ?
+      `)
+      .all(identifier) as Array<{ id: number; path: string; kind: string }>;
+
+    for (const row of directRows) {
+      if (!visitedConsumers.has(row.path)) {
+        visitedConsumers.add(row.path);
+        const node: StateChainNode = {
+          identifier: row.path.split(/[/\\]/).pop() || row.path,
+          filePath: row.path,
+          kind: row.kind as any,
+          direction: 'consumer',
+          depth: 1,
+        };
+        consumers.push(node);
+        currentFiles.push({ path: row.path, fileId: row.id, depth: 1 });
+      }
+    }
+
+    // Traverse upwards along edges: who imports these current files?
+    for (let d = 2; d <= maxDepth && currentFiles.length > 0; d++) {
+      const nextFiles: Array<{ path: string; fileId: number; depth: number }> = [];
+      for (const curr of currentFiles) {
+        const parentRows = db
+          .query(`
+            SELECT DISTINCT f.id, f.path
+            FROM edges e
+            JOIN files f ON e.parent_file_id = f.id
+            WHERE e.child_file_id = ?
+          `)
+          .all(curr.fileId) as Array<{ id: number; path: string }>;
+
+        for (const prow of parentRows) {
+          if (!visitedConsumers.has(prow.path)) {
+            visitedConsumers.add(prow.path);
+            const node: StateChainNode = {
+              identifier: prow.path.split(/[/\\]/).pop() || prow.path,
+              filePath: prow.path,
+              kind: prow.path.endsWith('.vue') ? 'component' : 'composable',
+              direction: 'consumer',
+              depth: d,
+            };
+            consumers.push(node);
+            nextFiles.push({ path: prow.path, fileId: prow.id, depth: d });
+          }
+        }
+      }
+      currentFiles = nextFiles;
+    }
+  }
+
+  // 3. Dependencies (Downward): What other composables/helpers does the declaring file consume?
+  if ((direction === 'dependencies' || direction === 'both') && declaringFile) {
+    const visitedDeps = new Set<string>();
+    let currentDepFiles: Array<{ fileId: number; depth: number }> = [{ fileId: declaringFile.id, depth: 1 }];
+
+    for (let d = 1; d <= maxDepth && currentDepFiles.length > 0; d++) {
+      const nextDepFiles: Array<{ fileId: number; depth: number }> = [];
+      for (const curr of currentDepFiles) {
+        const depRows = db
+          .query(`
+            SELECT DISTINCT s.identifier, s.kind
+            FROM state_deps s
+            WHERE s.file_id = ?
+          `)
+          .all(curr.fileId) as Array<{ identifier: string; kind: string }>;
+
+        for (const drow of depRows) {
+          if (drow.identifier !== identifier && !visitedDeps.has(drow.identifier)) {
+            visitedDeps.add(drow.identifier);
+
+            const depFileRow = db
+              .query(`
+                SELECT f.id, f.path
+                FROM files f
+                WHERE f.path LIKE '%' || ? || '%'
+                LIMIT 1
+              `)
+              .get(drow.identifier) as { id: number; path: string } | null;
+
+            dependencies.push({
+              identifier: drow.identifier,
+              filePath: depFileRow ? depFileRow.path : '',
+              kind: drow.kind as any,
+              direction: 'dependency',
+              depth: d,
+            });
+
+            if (depFileRow) {
+              nextDepFiles.push({ fileId: depFileRow.id, depth: d + 1 });
+            }
+          }
+        }
+      }
+      currentDepFiles = nextDepFiles;
+    }
+  }
+
+  const durationMs = Math.round(performance.now() - startTime);
+
+  return {
+    identifier,
+    entryFile: declaringFile?.path,
+    consumers,
+    dependencies,
+    _meta: {
+      engine: 'sqlite-graph-cache',
+      durationMs,
+      cached: true,
+    },
+  };
+}
+
+/**
+ * Formats StateChainResult into readable markdown.
+ */
+export function formatStateChainAsText(result: StateChainResult): string {
+  const lines: string[] = [];
+  lines.push(`### State Dependency Chain: \`${result.identifier}\``);
+  if (result.entryFile) {
+    lines.push(`**Declared in:** \`${result.entryFile}\``);
+  }
+
+  lines.push('\n**Consumers (Upward Blast Radius):**');
+  if (result.consumers.length > 0) {
+    for (const c of result.consumers) {
+      const indent = '  '.repeat(c.depth);
+      lines.push(`${indent}└─ [Depth ${c.depth}] \`${c.filePath}\` (${c.kind})`);
+    }
+  } else {
+    lines.push('  (No consumers found)');
+  }
+
+  lines.push('\n**Internal Dependencies (Downward Call Chain):**');
+  if (result.dependencies.length > 0) {
+    for (const d of result.dependencies) {
+      const indent = '  '.repeat(d.depth);
+      const fileStr = d.filePath ? ` — \`${d.filePath}\`` : '';
+      lines.push(`${indent}└─ [Depth ${d.depth}] \`${d.identifier}\` (${d.kind})${fileStr}`);
+    }
+  } else {
+    lines.push('  (No internal dependencies found)');
+  }
+
+  return lines.join('\n');
 }
 

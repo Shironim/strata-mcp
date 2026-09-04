@@ -69,7 +69,9 @@ export async function findUnusedComponents(
 ): Promise<UnusedComponentsResult> {
   const startTime = performance.now();
   const targetDir = resolve(options.targetPath);
-  const allFiles = await collectFiles(targetDir);
+  const allFiles = await collectFiles(targetDir, {
+    excludeDirs: options.excludeDirs,
+  });
 
   const defaultIgnores = [
     '**/pages/**',

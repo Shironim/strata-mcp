@@ -223,6 +223,7 @@ export interface UnusedComponentsResult {
 export interface UnusedComponentsOptions {
   targetPath: string;
   ignorePatterns?: string[];
+  excludeDirs?: string[];
   excludePages?: boolean;
   outputFormat?: 'text' | 'json';
 }
@@ -251,11 +252,6 @@ export interface RouteInfo {
   params: RouteParam[];
   layouts?: string[];
   handlers?: string[];
-}
-
-export interface RouteModuleSummary {
-  prefix: string;
-  count: number;
 }
 
 export interface RouteManifestResult {
@@ -320,8 +316,91 @@ export interface UnusedStateResult {
   _meta?: EngineMetadata;
 }
 
-export interface UnusedStateOptions {
+export type SymbolKind =
+  | 'function'
+  | 'arrow-function'
+  | 'class'
+  | 'interface'
+  | 'type'
+  | 'variable'
+  | 'unknown';
+
+export interface SymbolSliceResult {
+  symbolName: string;
+  kind: SymbolKind;
+  filePath: string;
+  startLine: number;
+  endLine: number;
+  code: string;
+  signature?: string;
+  blastRadius?: {
+    totalConsumers: number;
+    callers: Array<{ filePath: string; line?: number }>;
+    coveringTests?: string[];
+    internalCalls?: string[];
+  };
+  _meta?: EngineMetadata;
+}
+
+export interface SliceSymbolOptions {
+  path: string;
+  symbolName: string;
+  workspaceRoot?: string;
+  includeBlastRadius?: boolean;
+  outputFormat?: 'text' | 'json';
+}
+
+export interface EventHandlerInfo {
+  event: string;
+  handlerName: string;
+  line: number;
+  status: 'valid' | 'broken' | 'inline-expression';
+  source?: 'local-function' | 'composable-return' | 'prop' | 'import' | 'unresolved';
+}
+
+export interface DeadHandlerInfo {
+  name: string;
+  line: number;
+  kind: 'function' | 'const';
+  hint: string;
+}
+
+export interface EventHandlerAuditResult {
+  filePath: string;
+  totalEventBindings: number;
+  validHandlers: EventHandlerInfo[];
+  brokenHandlers: EventHandlerInfo[];
+  inlineExpressions: EventHandlerInfo[];
+  deadScriptHandlers: DeadHandlerInfo[];
+  _meta?: EngineMetadata;
+}
+
+export interface AuditEventHandlersOptions {
+  path: string;
+  outputFormat?: 'text' | 'json';
+}
+
+export interface StateChainNode {
+  identifier: string;
+  filePath: string;
+  kind: 'store' | 'composable' | 'component' | 'helper';
+  direction: 'consumer' | 'dependency';
+  depth: number;
+}
+
+export interface StateChainResult {
+  identifier: string;
+  entryFile?: string;
+  consumers: StateChainNode[];
+  dependencies: StateChainNode[];
+  _meta?: EngineMetadata;
+}
+
+export interface TraceStateChainOptions {
+  identifier: string;
   targetPath?: string;
+  direction?: 'consumers' | 'dependencies' | 'both';
+  maxDepth?: number;
   outputFormat?: 'text' | 'json';
 }
 

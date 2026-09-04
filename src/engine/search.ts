@@ -25,6 +25,7 @@ export interface SearchOptions {
   language?: string;
   maxResults?: number;
   concurrency?: number;
+  excludeDirs?: string[];
 }
 
 export interface ComponentSearchOptions {
@@ -33,6 +34,7 @@ export interface ComponentSearchOptions {
   scope?: 'template' | 'script' | 'both';
   maxResults?: number;
   concurrency?: number;
+  excludeDirs?: string[];
 }
 
 /**
@@ -182,7 +184,9 @@ rule:
  * Searches code by simple pattern across all supported files concurrently using DocumentAdapters.
  */
 export async function findCode(options: SearchOptions): Promise<ResolvedMatch[]> {
-  const files = await collectFiles(resolve(options.targetPath));
+  const files = await collectFiles(resolve(options.targetPath), {
+    excludeDirs: options.excludeDirs,
+  });
   const limit = options.maxResults || 200;
   const keywords = extractPatternKeywords(options.pattern);
 
@@ -260,7 +264,9 @@ export async function findCodeByRule(options: SearchOptions): Promise<ResolvedMa
     throw new Error('Rule YAML is required for findCodeByRule');
   }
 
-  const files = await collectFiles(resolve(options.targetPath));
+  const files = await collectFiles(resolve(options.targetPath), {
+    excludeDirs: options.excludeDirs,
+  });
   const limit = options.maxResults || 200;
   const keywords = extractRuleKeywords(options.rule);
 
@@ -330,7 +336,9 @@ export async function findCodeByRule(options: SearchOptions): Promise<ResolvedMa
  * Searches component usage across templates (Vue/Astro/JSX) and scripts (imports/lazy/re-exports) concurrently.
  */
 export async function findComponentUsage(options: ComponentSearchOptions): Promise<ResolvedMatch[]> {
-  const files = await collectFiles(resolve(options.targetPath));
+  const files = await collectFiles(resolve(options.targetPath), {
+    excludeDirs: options.excludeDirs,
+  });
   const scope = options.scope || 'both';
   const limit = options.maxResults || 200;
   const candidates = getCandidateNames(options.componentName);

@@ -4,339 +4,365 @@ import { join } from 'node:path';
 
 const FIXTURES_DIR = join(import.meta.dir, '../fixtures');
 
-describe('MCP Server & Tools (Task 5 DoD)', () => {
-  it('registers all required MCP tools in tool definitions', async () => {
+describe('MCP Server & 5 Core Tools', () => {
+  it('registers exactly 5 Core MCP tools in tool definitions', async () => {
     const server = createMcpServer();
-    // Verify server creation
     expect(server).toBeDefined();
 
-    // Check list tools handler
     const listHandler = (server as any)._requestHandlers?.get('tools/list');
     expect(listHandler).toBeDefined();
 
     const toolsResult = await listHandler({ method: 'tools/list', params: {} });
-    expect(toolsResult.tools.length).toBe(12);
+    expect(toolsResult.tools.length).toBe(5);
 
     const toolNames = toolsResult.tools.map((t: any) => t.name);
-    expect(toolNames).toContain('find_code');
-    expect(toolNames).toContain('find_code_by_rule');
-    expect(toolNames).toContain('find_component_usage');
-    expect(toolNames).toContain('dump_syntax_tree');
-    expect(toolNames).toContain('test_match_code_rule');
-    expect(toolNames).toContain('extract_component_contract');
-    expect(toolNames).toContain('get_component_tree');
-    expect(toolNames).toContain('resolve_page_tree');
-    expect(toolNames).toContain('find_unused_components');
-    expect(toolNames).toContain('scan_routes');
-    expect(toolNames).toContain('find_unused_state');
-    expect(toolNames).toContain('query_state_impact');
+    expect(toolNames).toEqual([
+      'find_code',
+      'inspect_component',
+      'get_component_tree',
+      'trace_state',
+      'audit_frontend',
+    ]);
   });
 
-  it('invokes find_component_usage via MCP call tool handler', async () => {
-    const server = createMcpServer();
-    const callHandler = (server as any)._requestHandlers?.get('tools/call');
-    expect(callHandler).toBeDefined();
+  describe('Core Tool 1: find_code', () => {
+    it('searches component usages across templates and script', async () => {
+      const server = createMcpServer();
+      const callHandler = (server as any)._requestHandlers?.get('tools/call');
 
-    const response = await callHandler({
-      method: 'tools/call',
-      params: {
-        name: 'find_component_usage',
-        arguments: {
-          component_name: 'OldButton',
-          path: FIXTURES_DIR,
-          output_format: 'json',
+      const response = await callHandler({
+        method: 'tools/call',
+        params: {
+          name: 'find_code',
+          arguments: {
+            component: 'OldButton',
+            path: FIXTURES_DIR,
+            output_format: 'json',
+          },
         },
-      },
+      });
+
+      expect(response.isError).toBeFalsy();
+      const parsed = JSON.parse(response.content[0].text);
+      expect(Array.isArray(parsed)).toBe(true);
+      expect(parsed.length).toBeGreaterThanOrEqual(4);
     });
 
-    expect(response.isError).toBeFalsy();
-    expect(response.content[0].text).toBeDefined();
+    it('searches ast-grep patterns across codebase', async () => {
+      const server = createMcpServer();
+      const callHandler = (server as any)._requestHandlers?.get('tools/call');
 
-    const parsed = JSON.parse(response.content[0].text);
-    expect(Array.isArray(parsed)).toBe(true);
-    expect(parsed.length).toBeGreaterThanOrEqual(4);
-  });
-
-  it('invokes dump_syntax_tree via MCP call tool handler', async () => {
-    const server = createMcpServer();
-    const callHandler = (server as any)._requestHandlers?.get('tools/call');
-
-    const response = await callHandler({
-      method: 'tools/call',
-      params: {
-        name: 'dump_syntax_tree',
-        arguments: {
-          code: 'const a = 1;',
-          language: 'ts',
+      const response = await callHandler({
+        method: 'tools/call',
+        params: {
+          name: 'find_code',
+          arguments: {
+            pattern: 'ref($$$)',
+            path: FIXTURES_DIR,
+          },
         },
-      },
+      });
+
+      expect(response.isError).toBeFalsy();
+      expect(response.content[0].text).toContain('ref');
     });
 
-    expect(response.isError).toBeFalsy();
-    expect(response.content[0].text).toContain('Debug CST');
+    it('dumps CST syntax tree when action is dump_ast', async () => {
+      const server = createMcpServer();
+      const callHandler = (server as any)._requestHandlers?.get('tools/call');
+
+      const response = await callHandler({
+        method: 'tools/call',
+        params: {
+          name: 'find_code',
+          arguments: {
+            action: 'dump_ast',
+            code: 'const a = 1;',
+            language: 'ts',
+          },
+        },
+      });
+
+      expect(response.isError).toBeFalsy();
+      expect(response.content[0].text).toContain('Debug CST');
+    });
+
+    it('tests in-memory pattern/rule against code snippet', async () => {
+      const server = createMcpServer();
+      const callHandler = (server as any)._requestHandlers?.get('tools/call');
+
+      const response = await callHandler({
+        method: 'tools/call',
+        params: {
+          name: 'find_code',
+          arguments: {
+            code: 'const count = ref(0);',
+            pattern: 'const $NAME = ref($VAL)',
+          },
+        },
+      });
+
+      expect(response.isError).toBeFalsy();
+      const parsed = JSON.parse(response.content[0].text);
+      expect(parsed.matchCount).toBe(1);
+    });
+
+    it('returns error when dump_ast is called with unsupported language', async () => {
+      const server = createMcpServer();
+      const callHandler = (server as any)._requestHandlers?.get('tools/call');
+
+      const response = await callHandler({
+        method: 'tools/call',
+        params: {
+          name: 'find_code',
+          arguments: {
+            action: 'dump_ast',
+            code: 'const a = 1;',
+            language: 'unsupported_lang_xyz',
+          },
+        },
+      });
+
+      expect(response.isError).toBe(true);
+      expect(response.content[0].text).toContain('ast-grep dump failed');
+    });
   });
 
-  it('returns tool error when dump_syntax_tree is called with unsupported language', async () => {
+  describe('Core Tool 2: inspect_component', () => {
+    it('extracts component contract (props/emits/slots) by default', async () => {
+      const server = createMcpServer();
+      const callHandler = (server as any)._requestHandlers?.get('tools/call');
+
+      const response = await callHandler({
+        method: 'tools/call',
+        params: {
+          name: 'inspect_component',
+          arguments: {
+            path: join(FIXTURES_DIR, 'TemplateEmit.vue'),
+          },
+        },
+      });
+
+      expect(response.isError).toBeFalsy();
+      expect(response.content[0].text).toContain('Component: TemplateEmit');
+      expect(response.content[0].text).toContain('add-laptop');
+    });
+
+    it('slices a specific symbol body with line numbers and blast radius', async () => {
+      const server = createMcpServer();
+      const callHandler = (server as any)._requestHandlers?.get('tools/call');
+
+      const response = await callHandler({
+        method: 'tools/call',
+        params: {
+          name: 'inspect_component',
+          arguments: {
+            path: join(FIXTURES_DIR, 'TemplateEmit.vue'),
+            symbol: 'formatPrice',
+          },
+        },
+      });
+
+      expect(response.isError).toBeFalsy();
+      expect(response.content[0].text).toContain('Symbol: `formatPrice`');
+      expect(response.content[0].text).toContain('function formatPrice');
+    });
+
+    it('audits template-to-script event handlers when audit_events is true', async () => {
+      const server = createMcpServer();
+      const callHandler = (server as any)._requestHandlers?.get('tools/call');
+
+      const response = await callHandler({
+        method: 'tools/call',
+        params: {
+          name: 'inspect_component',
+          arguments: {
+            path: join(FIXTURES_DIR, 'TemplateEmit.vue'),
+            audit_events: true,
+          },
+        },
+      });
+
+      expect(response.isError).toBeFalsy();
+      expect(response.content[0].text).toContain('Event Handler Audit');
+      expect(response.content[0].text).toContain('add-laptop');
+    });
+  });
+
+  describe('Core Tool 3: get_component_tree', () => {
+    it('resolves downward component hierarchy tree from entry_path', async () => {
+      const server = createMcpServer();
+      const callHandler = (server as any)._requestHandlers?.get('tools/call');
+
+      const response = await callHandler({
+        method: 'tools/call',
+        params: {
+          name: 'get_component_tree',
+          arguments: {
+            entry_path: join(FIXTURES_DIR, 'PageOne.vue'),
+          },
+        },
+      });
+
+      expect(response.isError).toBeFalsy();
+      expect(response.content[0].text).toContain('PageOne.vue');
+    });
+
+    it('resolves upward blast radius from leaf component', async () => {
+      const server = createMcpServer();
+      const callHandler = (server as any)._requestHandlers?.get('tools/call');
+
+      const response = await callHandler({
+        method: 'tools/call',
+        params: {
+          name: 'get_component_tree',
+          arguments: {
+            entry_path: join(FIXTURES_DIR, 'OldButton.vue'),
+            direction: 'upward',
+            target_path: FIXTURES_DIR,
+          },
+        },
+      });
+
+      expect(response.isError).toBeFalsy();
+      expect(response.content[0].text).toContain('Upward Blast Radius');
+    });
+
+    it('resolves component tree directly from route path', async () => {
+      const server = createMcpServer();
+      const callHandler = (server as any)._requestHandlers?.get('tools/call');
+
+      const response = await callHandler({
+        method: 'tools/call',
+        params: {
+          name: 'get_component_tree',
+          arguments: {
+            route: '/dashboard',
+            target_path: join(import.meta.dir, '../mock-projects/inertia-app'),
+          },
+        },
+      });
+
+      expect(response.isError).toBeFalsy();
+      expect(response.content[0].text).toContain('Route: /dashboard');
+      expect(response.content[0].text).toContain('Dashboard.vue');
+    });
+  });
+
+  describe('Core Tool 4: trace_state', () => {
+    it('queries flat state impact across workspace files', async () => {
+      const server = createMcpServer();
+      const callHandler = (server as any)._requestHandlers?.get('tools/call');
+
+      const response = await callHandler({
+        method: 'tools/call',
+        params: {
+          name: 'trace_state',
+          arguments: {
+            identifier: 'useRouter',
+            target_path: FIXTURES_DIR,
+            depth: 1,
+          },
+        },
+      });
+
+      expect(response.isError).toBeFalsy();
+      expect(response.content[0].text).toContain('State Impact Analysis for: useRouter');
+    });
+
+    it('traces multi-hop dependency chain when depth > 1', async () => {
+      const server = createMcpServer();
+      const callHandler = (server as any)._requestHandlers?.get('tools/call');
+
+      const response = await callHandler({
+        method: 'tools/call',
+        params: {
+          name: 'trace_state',
+          arguments: {
+            identifier: 'useRouter',
+            target_path: FIXTURES_DIR,
+            depth: 3,
+          },
+        },
+      });
+
+      expect(response.isError).toBeFalsy();
+      expect(response.content[0].text).toContain('State Dependency Chain: `useRouter`');
+    });
+  });
+
+  describe('Core Tool 5: audit_frontend', () => {
+    it('scans routes when target is routes', async () => {
+      const server = createMcpServer();
+      const callHandler = (server as any)._requestHandlers?.get('tools/call');
+
+      const response = await callHandler({
+        method: 'tools/call',
+        params: {
+          name: 'audit_frontend',
+          arguments: {
+            target: 'routes',
+            target_path: join(import.meta.dir, '../mock-projects/inertia-app'),
+          },
+        },
+      });
+
+      expect(response.isError).toBeFalsy();
+      expect(response.content[0].text).toContain('Route Manifest');
+    });
+
+    it('audits dead components when target is dead-components', async () => {
+      const server = createMcpServer();
+      const callHandler = (server as any)._requestHandlers?.get('tools/call');
+
+      const response = await callHandler({
+        method: 'tools/call',
+        params: {
+          name: 'audit_frontend',
+          arguments: {
+            target: 'dead-components',
+            target_path: FIXTURES_DIR,
+          },
+        },
+      });
+
+      expect(response.isError).toBeFalsy();
+      expect(response.content[0].text).toContain('Unused Components');
+    });
+
+    it('executes full multi-target audit when target is all', async () => {
+      const server = createMcpServer();
+      const callHandler = (server as any)._requestHandlers?.get('tools/call');
+
+      const response = await callHandler({
+        method: 'tools/call',
+        params: {
+          name: 'audit_frontend',
+          arguments: {
+            target: 'all',
+            target_path: join(import.meta.dir, '../mock-projects/inertia-app'),
+          },
+        },
+      });
+
+      expect(response.isError).toBeFalsy();
+      expect(response.content[0].text).toContain('Frontend Architecture & Health Audit');
+    });
+  });
+
+  it('rejects unknown tool calls cleanly', async () => {
     const server = createMcpServer();
     const callHandler = (server as any)._requestHandlers?.get('tools/call');
 
     const response = await callHandler({
       method: 'tools/call',
       params: {
-        name: 'dump_syntax_tree',
-        arguments: {
-          code: 'const a = 1;',
-          language: 'unsupported_lang_xyz',
-        },
+        name: 'nonexistent_tool',
+        arguments: {},
       },
     });
 
     expect(response.isError).toBe(true);
-    expect(response.content[0].text).toContain('ast-grep dump failed');
-  });
-
-  it('invokes test_match_code_rule for in-memory dynamic lazy import (TC-2.1)', async () => {
-    const server = createMcpServer();
-    const callHandler = (server as any)._requestHandlers?.get('tools/call');
-
-    const rule = `
-id: test-lazy
-language: ts
-rule:
-  pattern: defineAsyncComponent(() => import($$$))
-`;
-
-    const code = "const ProductModal = defineAsyncComponent(() => import('../components/ProductModal.vue'));";
-
-    const response = await callHandler({
-      method: 'tools/call',
-      params: {
-        name: 'test_match_code_rule',
-        arguments: {
-          rule_yaml: rule,
-          code_snippet: code,
-          language: 'ts',
-        },
-      },
-    });
-
-    expect(response.isError).toBeFalsy();
-    const parsed = JSON.parse(response.content[0].text);
-    expect(parsed.matchCount).toBe(1);
-    expect(parsed.matches[0].line).toBe(1);
-  });
-
-  it('invokes test_match_code_rule for interface member matching (TC-2.7)', async () => {
-    const server = createMcpServer();
-    const callHandler = (server as any)._requestHandlers?.get('tools/call');
-
-    const rule = `
-id: test-prop-sig
-language: ts
-rule:
-  kind: property_signature
-  has:
-    pattern: '?'
-`;
-
-    const code = `interface Props {
-  id: string;
-  onViewDetails?: (p: Product) => void;
-}`;
-
-    const response = await callHandler({
-      method: 'tools/call',
-      params: {
-        name: 'test_match_code_rule',
-        arguments: {
-          rule_yaml: rule,
-          code_snippet: code,
-          language: 'ts',
-        },
-      },
-    });
-
-    expect(response.isError).toBeFalsy();
-    const parsed = JSON.parse(response.content[0].text);
-    expect(parsed.matchCount).toBe(1);
-    expect(parsed.matches[0].line).toBe(3);
-    expect(parsed.matches[0].text).toContain('onViewDetails');
-  });
-
-  it('returns informative hint on unquoted YAML mapping characters (TC-2.6)', async () => {
-    const server = createMcpServer();
-    const callHandler = (server as any)._requestHandlers?.get('tools/call');
-
-    const brokenRule = `
-id: broken-rule
-language: ts
-rule:
-  pattern: $NAME?: $$$
-`;
-
-    const response = await callHandler({
-      method: 'tools/call',
-      params: {
-        name: 'test_match_code_rule',
-        arguments: {
-          rule_yaml: brokenRule,
-          code_snippet: 'const a = 1;',
-          language: 'ts',
-        },
-      },
-    });
-
-    expect(response.isError).toBe(true);
-    expect(response.content[0].text).toContain('mapping values are not allowed');
-    expect(response.content[0].text).toContain('Hint: wrap your pattern with quotes');
-  });
-
-  it('supports target_path alias interchangeably with path in find_component_usage', async () => {
-    const server = createMcpServer();
-    const callHandler = (server as any)._requestHandlers?.get('tools/call');
-
-    const response = await callHandler({
-      method: 'tools/call',
-      params: {
-        name: 'find_component_usage',
-        arguments: {
-          component_name: 'OldButton',
-          target_path: FIXTURES_DIR,
-          output_format: 'json',
-        },
-      },
-    });
-
-    expect(response.isError).toBeFalsy();
-    const parsed = JSON.parse(response.content[0].text);
-    expect(Array.isArray(parsed)).toBe(true);
-    expect(parsed.length).toBeGreaterThanOrEqual(4);
-  });
-
-  it('supports target_path alias in find_code and returns clean error on missing path', async () => {
-    const server = createMcpServer();
-    const callHandler = (server as any)._requestHandlers?.get('tools/call');
-
-    const successResponse = await callHandler({
-      method: 'tools/call',
-      params: {
-        name: 'find_code',
-        arguments: {
-          pattern: 'defineProps<$$$>()',
-          target_path: FIXTURES_DIR,
-        },
-      },
-    });
-    expect(successResponse.isError).toBeFalsy();
-    expect(successResponse.content[0].text).toContain('NewButton.vue:6');
-
-    const errorResponse = await callHandler({
-      method: 'tools/call',
-      params: {
-        name: 'find_code',
-        arguments: {
-          pattern: 'defineProps<$$$>()',
-        },
-      },
-    });
-    expect(errorResponse.isError).toBe(true);
-    expect(errorResponse.content[0].text).toContain("Missing required argument: 'path'");
-  });
-
-  it('invokes scan_routes via MCP call tool handler', async () => {
-    const server = createMcpServer();
-    const callHandler = (server as any)._requestHandlers?.get('tools/call');
-
-    const response = await callHandler({
-      method: 'tools/call',
-      params: {
-        name: 'scan_routes',
-        arguments: {
-          target_path: FIXTURES_DIR,
-        },
-      },
-    });
-
-    expect(response.isError).toBeFalsy();
-    expect(response.content[0].text).toContain('Route Manifest');
-  });
-
-  it('invokes get_component_tree with direction: upward via MCP call tool handler', async () => {
-    const server = createMcpServer();
-    const callHandler = (server as any)._requestHandlers?.get('tools/call');
-
-    const response = await callHandler({
-      method: 'tools/call',
-      params: {
-        name: 'get_component_tree',
-        arguments: {
-          entry_path: join(FIXTURES_DIR, 'OldButton.vue'),
-          direction: 'upward',
-        },
-      },
-    });
-
-    expect(response.isError).toBeFalsy();
-    expect(response.content[0].text).toContain('Upward Blast Radius');
-    expect(response.content[0].text).toContain('consumers explored');
-  });
-
-  it('invokes query_state_impact via MCP call tool handler', async () => {
-    const server = createMcpServer();
-    const callHandler = (server as any)._requestHandlers?.get('tools/call');
-
-    const response = await callHandler({
-      method: 'tools/call',
-      params: {
-        name: 'query_state_impact',
-        arguments: {
-          identifier: 'useRouter',
-          target_path: FIXTURES_DIR,
-        },
-      },
-    });
-
-    expect(response.isError).toBeFalsy();
-    expect(response.content[0].text).toContain('State Impact Analysis for: useRouter');
-  });
-
-  it('invokes resolve_page_tree via MCP call tool handler', async () => {
-    const server = createMcpServer();
-    const callHandler = (server as any)._requestHandlers?.get('tools/call');
-
-    const response = await callHandler({
-      method: 'tools/call',
-      params: {
-        name: 'resolve_page_tree',
-        arguments: {
-          route_path: '/dashboard',
-          target_path: join(import.meta.dir, '../mock-projects/inertia-app'),
-        },
-      },
-    });
-
-    expect(response.isError).toBeFalsy();
-    expect(response.content[0].text).toContain('Route: /dashboard');
-    expect(response.content[0].text).toContain('Dashboard.vue');
-  });
-
-  it('invokes get_component_tree with route_path via MCP call tool handler', async () => {
-    const server = createMcpServer();
-    const callHandler = (server as any)._requestHandlers?.get('tools/call');
-
-    const response = await callHandler({
-      method: 'tools/call',
-      params: {
-        name: 'get_component_tree',
-        arguments: {
-          route_path: '/dashboard',
-          target_path: join(import.meta.dir, '../mock-projects/inertia-app'),
-        },
-      },
-    });
-
-    expect(response.isError).toBeFalsy();
-    expect(response.content[0].text).toContain('Route: /dashboard');
-    expect(response.content[0].text).toContain('Dashboard.vue');
+    expect(response.content[0].text).toContain('Unknown tool name: nonexistent_tool');
   });
 });

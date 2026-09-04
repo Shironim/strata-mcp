@@ -120,7 +120,7 @@ describe('Component Contract Extractor (Phase 2 RFC)', () => {
     expect(text).toContain('- default');
   });
 
-  it('invokes extract_component_contract via MCP tool handler', async () => {
+  it('invokes inspect_component via MCP tool handler', async () => {
     const server = createMcpServer();
     const handlers = (server as any)._requestHandlers;
     const callHandler = handlers.get('tools/call');
@@ -128,7 +128,7 @@ describe('Component Contract Extractor (Phase 2 RFC)', () => {
     const res = await callHandler({
       method: 'tools/call',
       params: {
-        name: 'extract_component_contract',
+        name: 'inspect_component',
         arguments: {
           path: join(FIXTURES_DIR, 'NewButton.vue'),
           output_format: 'json',

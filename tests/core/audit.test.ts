@@ -82,7 +82,7 @@ describe('Unused Components Audit Engine (Phase 4 RFC)', () => {
     expect(text).toContain('CardComponent.tsx (react)');
   });
 
-  it('invokes find_unused_components via MCP call tool handler', async () => {
+  it('invokes audit_frontend (dead-components) via MCP call tool handler', async () => {
     const server = createMcpServer();
     const handlers = (server as any)._requestHandlers;
     const callHandler = handlers.get('tools/call');
@@ -90,8 +90,9 @@ describe('Unused Components Audit Engine (Phase 4 RFC)', () => {
     const res = await callHandler({
       method: 'tools/call',
       params: {
-        name: 'find_unused_components',
+        name: 'audit_frontend',
         arguments: {
+          target: 'dead-components',
           target_path: VUE_APP_DIR,
           output_format: 'json',
         },
