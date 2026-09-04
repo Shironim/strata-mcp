@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.6.0] - 2026-09-03
+
+### Changed
+
+- **Trust-free ast-grep distribution**: replaced the `@ast-grep/cli` top-level wrapper
+  (which had a `postinstall` script requiring `bun pm trust @ast-grep/cli`)
+  with official upstream prebuilt platform packages
+  `@ast-grep/cli-linux-x64-gnu`,
+  `@ast-grep/cli-win32-x64-msvc`,
+  `@ast-grep/cli-darwin-arm64`, and
+  `@ast-grep/cli-darwin-x64` (ast-grep 0.45.3), wired up as
+  `optionalDependencies`. Installs now work out of the box on Linux (x64),
+  Windows (x64), and macOS (Apple Silicon & Intel) with no trust step; other platforms fall back to a system
+  `ast-grep` on `$PATH` or the `AST_GREP_BIN` environment variable with a
+  warning-only message instead of a startup failure. Binary resolution order:
+  `AST_GREP_BIN` → scoped platform package → legacy `@ast-grep/cli` install →
+  `$PATH`.
+- **ast-grep 0.38 → 0.45 compatibility**: treat `ast-grep run` exit code 1 with
+  empty stdout/stderr as "no matches" (0.45 changed the exit code), and accept
+  `--debug-query` CST output on stderr regardless of exit code.
+
+### Added
+
+- **Resolver unit tests** (`tests/astgrep/resolver.test.ts`): platform mapping,
+  `AST_GREP_BIN` override, and graceful-degradation messaging.
+
 ## [0.5.0] - 2026-09-02
 
 ### Added

@@ -8,7 +8,6 @@ Thank you for your interest in contributing to `strata-mcp`!
 2. Install dependencies with Bun:
    ```bash
    bun install
-   bun pm trust @ast-grep/cli
    ```
 3. Run the test suite:
    ```bash
@@ -19,10 +18,10 @@ Thank you for your interest in contributing to `strata-mcp`!
 
 - `src/engine/`: Core search engine, AST-grep wrapper, SFC splitter, offset remapper, template matcher, contract extractor (`contract.ts`), component hierarchy tree engine (`tree.ts`), file-based route topology scanner (`routes.ts`), persistent SQLite codebase graph (`database.ts`), and unused component auditor (`audit.ts`).
 - `src/adapters/`: Document Adapter pattern (`VueAdapter`, `AstroAdapter`, `ScriptAdapter`, and `AdapterFactory`).
-- `src/mcp.ts`: Model Context Protocol server implementation exposing 10 tools.
-- `src/cli.ts`: Standalone CLI companion (`strata`, with `vue-ast` alias).
+- `src/mcp.ts`: Model Context Protocol server implementation exposing 12 tools.
+- `src/cli.ts`: Standalone CLI companion (`strata`, `strata-mcp`).
 - `src/types.ts`: Centralized TypeScript data models and interfaces.
-- `tests/`: Automated unit, integration, and fixtures test suites (114 tests across 21 files).
+- `tests/`: Automated unit, integration, and fixtures test suites.
 
 ## Pull Request Guidelines
 

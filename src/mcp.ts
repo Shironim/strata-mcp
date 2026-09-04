@@ -7,6 +7,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { verifyAstGrepBinary } from './engine/astgrep';
 import { TOOLS, findTool } from './tools';
+import { main as runCli } from './cli';
 
 export { TOOLS, findTool } from './tools';
 
@@ -78,10 +79,20 @@ export async function runServer(): Promise<void> {
   await server.connect(transport);
 }
 
-// Auto-run when executed directly
+// Dual-mode single-binary entrypoint:
+// - If arguments are passed (argv.length > 0), run CLI (subcommands, flags, --version, --help, typo validation).
+// - If no arguments are passed (argv.length === 0), run the MCP stdio server.
 if (import.meta.main) {
-  runServer().catch((err) => {
-    console.error('Fatal MCP Server error:', err);
-    process.exit(1);
-  });
+  const argv = process.argv.slice(2);
+  if (argv.length > 0) {
+    runCli(argv).catch((err) => {
+      console.error('Fatal CLI error:', err);
+      process.exit(1);
+    });
+  } else {
+    runServer().catch((err) => {
+      console.error('Fatal MCP Server error:', err);
+      process.exit(1);
+    });
+  }
 }

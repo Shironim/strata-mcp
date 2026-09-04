@@ -1,14 +1,13 @@
 {
   "name": "@dimassetoid/strata-mcp",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "description": "Multi-framework frontend structural AST search, component graph, and route topology engine for AI agents (Vue, React, Next, Nuxt, Astro)",
   "type": "module",
   "main": "dist/index.js",
   "types": "src/types.ts",
   "bin": {
-    "strata": "dist/cli.js",
-    "strata-mcp": "dist/mcp.js",
-    "vue-ast": "dist/cli.js"
+    "strata": "dist/mcp.js",
+    "strata-mcp": "dist/mcp.js"
   },
   "files": [
     "dist",
@@ -19,7 +18,7 @@
   },
   "scripts": {
     "test": "bun test",
-    "build": "bun build ./src/cli.ts ./src/mcp.ts ./src/index.ts --outdir ./dist --target bun --external @vue/compiler-sfc --external @vue/compiler-dom --external @ast-grep/cli --external @modelcontextprotocol/sdk",
+    "build": "bun build ./src/cli.ts ./src/mcp.ts ./src/index.ts --outdir ./dist --target bun --external @vue/compiler-sfc --external @vue/compiler-dom --external @modelcontextprotocol/sdk",
     "prepublishOnly": "bun run build && bun test",
     "typecheck": "tsc --noEmit"
   },
@@ -48,17 +47,19 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "@ast-grep/cli": "^0.38.0",
     "@modelcontextprotocol/sdk": "^1.6.0",
     "@vue/compiler-dom": "^3.5.13",
     "@vue/compiler-sfc": "^3.5.13"
+  },
+  "optionalDependencies": {
+    "@ast-grep/cli-darwin-arm64": "0.45.3",
+    "@ast-grep/cli-darwin-x64": "0.45.3",
+    "@ast-grep/cli-linux-x64-gnu": "0.45.3",
+    "@ast-grep/cli-win32-x64-msvc": "0.45.3"
   },
   "devDependencies": {
     "@types/bun": "^1.4.0",
     "@types/node": "^22.13.5",
     "typescript": "^5.7.3"
-  },
-  "trustedDependencies": [
-    "@ast-grep/cli"
-  ]
+  }
 }
