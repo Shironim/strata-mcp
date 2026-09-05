@@ -3,18 +3,21 @@
 > **Multi-Framework Frontend Structural AST Search, Component Graph & Intelligence Engine**  
 > Precise AST-based structural code searching across **Vue SFCs (`.vue`)**, **Astro components (`.astro`)**, and **React/Next (`.js`, `.jsx`, `.ts`, `.tsx`)** with exact line-number remapping and persistent SQLite graph caching.
 
+[![npm version](https://img.shields.io/npm/v/@dimassetoid/strata-mcp)](https://www.npmjs.com/package/@dimassetoid/strata-mcp)
+[![Bun](https://img.shields.io/badge/Bun-%23000000.svg?logo=bun&logoColor=white)](https://bun.sh)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
 ---
 
 ## The Problem
 
-Modern frontend development frequently spans **Vue/Nuxt**, **React/Next**, and **Astro Islands**. Developers and AI coding agents need deep structural intelligence (not just text regex) for tasks like:
-- **Component Adoption Audits**: *"Where is legacy `OldButton` still used, and which pages haven't migrated to `NewButton`?"*
-- **Upward Blast Radius**: *"If I change `BaseTable.vue`, which child components, layouts, and route pages are affected?"*
-- **Route Topology Mapping**: *"What routes, layouts, and API handlers exist across Next.js, Nuxt 3, Astro, or Inertia?"*
-- **State Impact Tracing**: *"Which components and pages consume `useCartStore` or `ThemeContext`?"*
-- **Astro Island Auditing**: *"Which Vue and React components are embedded in `.astro` pages, and which ones are hydrated client-side (`client:load`, `client:visible`)?"*
+Modern frontend development frequently spans **Vue/Nuxt**, **React/Next**, and **Astro Islands**, often interfaced with fullstack backends like Laravel Inertia or REST/GraphQL APIs. Developers and AI coding agents need deep structural intelligence (not just text regex) for tasks like:
+- **Frontend-Backend Contract Drift**: *"Does my Vue `form.post('/cadets/store')` or TanStack Query mutation send payload keys (`cohort_year`) that match what the backend controller validates?"*
+- **Silent Reactivity Bugs**: *"Did someone accidentally destructure reactive props (`const { user } = props`) or directly mutate props in a child component?"*
+- **Context & Props Drift**: *"Which child components consume `inject('theme')` or `useContext()` without an active provider in the route layout hierarchy?"*
+- **Component Adoption & Blast Radius**: *"Where is legacy `OldButton` still used, and if I change `BaseTable.vue`, which child components, layouts, and route pages are affected?"*
+- **Route Topology & Dead Code**: *"What routes exist, which composables/stores have 0 external callers, and where do we have duplicate template clones?"*
+- **Design Token & Bundle Bloat**: *"Are hardcoded `#hex` colors bypassing our Tailwind design system, and are heavy libraries (`echarts`) eagerly loaded on client islands?"*
 
 Existing AST tools like [ast-grep](https://ast-grep.github.io) are powerful for `.js/.jsx/.ts/.tsx`, but **fail on multi-language documents like `.vue` and `.astro`** because they treat entire files as HTML, breaking JavaScript/TypeScript AST parsing inside `<script>` and frontmatter (`---`) blocks.
 
@@ -107,29 +110,27 @@ Connect `strata-mcp` to your favorite AI agent:
 
 ## Available MCP Tools
 
+`strata-mcp` exposes 5 unified, high-density MCP tools designed for maximum token efficiency and deep structural intelligence:
+
 | Tool | Category | Description |
 |---|---|---|
-| `find_code(pattern, path, language?, max_results?)` | Code Search | Searches code using `ast-grep` patterns with line remapping across `.vue`, `.astro`, and `.ts/.tsx`. Accelerated by Fast-Path Pruning. |
-| `find_code_by_rule(rule_yaml, path, max_results?)` | Code Search | Searches code using complex YAML rules with relational constraints (`inside`, `has`, `not`). |
-| `find_component_usage(component_name, path, scope?)` | Adoption Audit | Scans component imports in script/frontmatter and tag usages in template/JSX across multi-casing (kebab & Pascal). |
-| `dump_syntax_tree(code, language?)` | AST Helper | Dumps the CST syntax tree of a code snippet for AST pattern debugging. |
-| `test_match_code_rule(rule_yaml, code_snippet)` | Rule Sandbox | Validates a YAML rule against an in-memory code snippet without touching disk (< 20ms). |
-| `extract_component_contract(path, output_format?)` | Token Economy | Extracts component interface (`props`, `emits`, `slots`, `exposed`, CVA variants, SSR/RSC boundary violations, and data/state dependencies) with > 94% token savings. |
-| `get_component_tree(entry_path?, route_path?, target_path?, max_depth?, direction?, scope_filter?, output_format?)` | Architecture | Maps downward or upward component hierarchy trees (call graph / blast radius) from a file or route URL (`/catalog`) with domain/package scope filtering. |
-| `resolve_page_tree(route_path, target_path?, max_depth?, output_format?)` | Architecture | Resolves a URL route path directly to its page entrypoint file, layout wrappers, and downward component tree in 1 step. |
-| `find_unused_components(target_path, ignore_patterns?, exclude_pages?, output_format?)` | Dead Code Audit | Two-pass in-memory audit identifying orphan components. Results are partitioned into `orphanComponents` (reusable UI components with zero usages) and `unreferencedPages` (pages with no template callers). Case-insensitive glob matching ensures accuracy on mixed-case directories (e.g. `Pages/`, `Views/`). |
-| `scan_routes(target_path, framework?, prefix?, view?, output_format?)` | Routing | Discovers file-based route topology, dynamic parameters, nested layouts, and API handlers (Next.js, Nuxt 3, Astro, Inertia). Supports `view: "summary"` for domain-level aggregation on large projects and `prefix` filtering for focused sub-module inspection. |
-| `query_state_impact(identifier, target_path?, output_format?)` | State Architecture | Traces all components, layout wrappers, and pages consuming a specific state store (Pinia, Zustand, Redux), Context, or composable. |
-| `find_unused_state(target_path, output_format?)` | Dead Code Audit | Batch scanner detecting composables, stores, hooks, and utility functions with zero external consumers. Uses the SQLite `state_deps` graph for instant cross-file reference counting across `composables/`, `hooks/`, `stores/`, and `utils/`. |
+| `find_code(pattern?, component?, rule_yaml?, path?, language?)` | Code Search | Searches workspace code using AST patterns (`ast-grep`), relational YAML rules, or component adoption across `.vue`, `.astro`, and `.tsx`. For single-file inspection, use `inspect_component`. |
+| `inspect_component(path, symbol?, audit_events?, infer_props?, resolve_globals?, output_format?)` | Contract Master | Deep component inspection (.vue, .tsx, .jsx, .astro). Extracts interface contracts (props/emits/slots), data fetching boundaries (Inertia, TanStack Query, Axios), form schemas & file uploads, reactivity smells, and slices symbols with blast radius. |
+| `get_component_tree(entry_path?, route?, target_path?, max_depth?, direction?, scope_filter?, include_props?, output_format?)` | Architecture | Resolves component hierarchy trees from a file or route URL (`/dashboard`). Supports downward trees with props drilling (>2 levels) and dangling context alerts (provide/inject & useContext), or upward blast radius. |
+| `trace_state(identifier, target_path?, depth?, role?, direction?, output_format?)` | State Architecture | Traces state store (Pinia, Zustand, Redux), Context, or composable impact across components. Identifies mutators vs readers and multi-hop cascading dependency chains. |
+| `audit_frontend(target_path?, scope_path?, target?, threshold?, prefix?, framework?, ignore_patterns?, output_format?)` | System Audit | Architectural frontend health audit: file-based routes, dead components, unused state composables, structural template similarity, design tokens & a11y, and bundle health / island hydration. |
 
 ---
 
 ## High-Performance Architecture & Token Economy
 
-1. **Fast-Path Candidate Pruning (Engine B)**: Keyword-based file pre-filtering bypasses expensive AST subprocess spawning for non-matching files, dropping search execution times by **97%** (from ~1,150ms to < 30ms, and < 2ms for non-existent symbols).
-2. **Persistent SQLite Codebase Graph Cache (Engine A)**: Uses native `bun:sqlite` with WAL mode in `.strata/graph.db` to index components, edges, state dependencies, and routes with smart `mtime` delta synchronization (< 10ms warm sync) and instant SQL Recursive CTE blast radius queries.
-3. **Strict Token Economy**: Instead of dumping full 1,500-line components into the LLM context window, `extract_component_contract` delivers high-density interface summaries (< 80 tokens), preserving context window limits.
-4. **Engine Observability Metadata**: Every audit result surfaces its execution engine and duration. Text output shows a badge (e.g. `[Engine: in-memory-ast | 32ms]` or `[Engine: sqlite-graph-cache | 6ms]`); JSON output includes a `_meta: { engine, durationMs, cached }` payload for programmatic inspection.
+1. **Frontend Contract Mastery**: Extracts exact ingress/egress boundaries (Inertia form actions, REST/Query endpoints, Ziggy routes) and form schemas so AI agents can align frontend contracts directly with backend controllers without manual browsing.
+2. **Smart Path Resolver & Dynamic Imports**: Seamlessly resolves framework path aliases (`@/*`, `~/*`, `$lib/*`), implicit extensions (`.vue`, `.tsx`, `/index.*`), and lazy-loaded dynamic imports (`import()`, `defineAsyncComponent`, `React.lazy`).
+3. **First-Class Diagnostics**: Directly surfaces props drilling alerts, reactivity smells (reactive destructuring loss), dangling context consumers, arbitrary color token usage, and heavy island hydration warnings.
+4. **Fast-Path Candidate Pruning**: Keyword-based file pre-filtering bypasses expensive AST subprocess spawning for non-matching files, dropping search execution times by **97%** (from ~1,150ms to < 30ms, and < 2ms for non-existent symbols).
+5. **Persistent SQLite Codebase Graph Cache**: Uses native `bun:sqlite` with WAL mode in `.strata/graph.db` to index components, edges, state dependencies, and routes with smart `mtime` delta synchronization (< 10ms warm sync) and instant SQL Recursive CTE blast radius queries.
+6. **Strict Token Economy & Zero Raw Byte Dumping**: Returns high-density, structured summaries (< 80 tokens per contract) rather than dumping full multi-hundred-line components into the LLM context window.
+7. **Engine Observability Metadata**: Every audit result surfaces its execution engine and duration badge (e.g. `[Engine: sqlite-graph-cache | 6ms]`); JSON output includes structured `_meta: { engine, durationMs, cached }` for programmatic inspection.
 
 ---
 
@@ -246,19 +247,25 @@ strata dump "const count = ref(0);" --lang ts
 
 ---
 
-## Real-World Example: Multi-Framework Adoption Audit
+## Real-World Prompt Example for AI Agents
 
-Prompt to your AI Assistant:
-> *"Audit our project for migration from `OldButton` to `NewButton`. Check all `.vue`, `.astro`, and `.tsx` files and list which pages still use `OldButton` (including dynamic imports and Astro islands) and which ones are already migrated."*
+Here are practical prompt scenarios where AI coding agents leverage `strata-mcp` to deliver zero-drift frontend engineering:
 
-The assistant uses `find_component_usage` and returns:
-```text
-src/pages/Checkout.vue:4:5 - <OldButton label="Pay Now" />
-src/pages/Landing.astro:9:5 [client:visible] - <OldButton client:visible />
-src/pages/Dashboard.tsx:3:1 - const OldButton = React.lazy(() => import('./OldButton'))
-src/components/Barrel.ts:1:1 - export { default as OldButton } from './OldButton.vue'
-src/pages/Migrated.vue:5:5 - <NewButton variant="primary">Migrated</NewButton>
-```
+- **Fullstack Contract Alignment & Form Verification (`inspect_component`)**:
+  > *"Inspect `CadetCreate.vue` to check its boundary contract — what endpoint does the form submit to, what payload keys does it send, and are there any multipart file uploads? Cross-reference them with our backend `CadetStoreRequest.php`."*
+
+- **Upstream Blast Radius & Context Health (`get_component_tree`)**:
+  > *"Resolve the component tree starting from URL route `/dashboard/cadets`. Check for props drilling (>2 levels) and identify any dangling context consumers (`inject` / `useContext`) missing a provider in ancestor layouts."*
+
+- **Silent Reactivity & Anti-Pattern Audits (`inspect_component`)**:
+  > *"Audit `OrderSummary.vue` for Vue 3 reactivity smells — specifically flag any reactive props destructuring, direct prop mutations, or uncleaned watch effects."*
+
+- **Multi-Framework Component Migration (`find_code`)**:
+  > *"Audit our project for migration from `OldButton` to `NewButton`. Check all `.vue`, `.astro`, and `.tsx` files (including dynamic `import()` boundaries and Astro islands) and list all remaining usages."*
+
+- **Architectural Health & Dead Code Scans (`audit_frontend`)**:
+  > *"Run an architectural audit across `./resources/js`: detect unused state composables, flag structural template copy-paste duplicates, and report hardcoded `#hex` colors bypassing our design system tokens."*
+
 
 ---
 

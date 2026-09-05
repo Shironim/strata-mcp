@@ -5,7 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.7.0] - 2026-09-05
+
+### Added
+
+- **Smart Path Resolver (`src/engine/path-resolver.ts`)**:
+  - Transparent cross-framework path alias resolution (`@/*`, `~/*`, `$lib/*`) mapped from `tsconfig.json`, `jsconfig.json`, or customizable alias maps.
+  - Implicit extension matching (`.vue`, `.tsx`, `.jsx`, `.ts`, `.js`, `/index.*`) and robust cross-platform path normalization (Windows backslashes vs POSIX forward slashes).
+- **Dynamic Imports & Lazy-Loading Engine (`src/engine/dynamic-imports.ts`)**:
+  - Structural AST scanning for dynamic code-splitting and lazy imports: `import(...)`, Vue `defineAsyncComponent(...)`, React `React.lazy(...)`, and Next.js `next/dynamic(...)`.
+  - Integration with route and component graph traversal to prevent missing lazy-loaded boundaries.
+- **Frontend Contract Mastery & Data Fetching Boundaries (`src/engine/contract.ts`)**:
+  - Egress/ingress boundary contracts surfaced in `inspect_component`: captures Laravel Inertia (`useForm`, `router.post/get/put/delete`, `form.post`), TanStack Query (`useQuery`, `useMutation`), SWR, Axios, and native Fetch API.
+  - Automatic extraction of target endpoints (string literals, Ziggy `route('...')` helpers, template literals) and payload keys for cross-validation against backend API routes.
+  - Form dictionary & file upload contracts: extracts `<form>` field tags, required input validations, and marks `isMultipart: true` upon detecting `<input type="file">` or `FormData`.
+  - Deep prop shape inference (`infer_props: true`) for nested data access (`props.user.profile.avatar`) and global helper detection (`resolve_globals: true`).
+- **First-Class Props Drilling Diagnostics (`src/engine/tree.ts`)**:
+  - Traversal analysis in `get_component_tree` surfacing `drillingAlerts`: flags props forwarded across >2 component hierarchy levels without local usage or template mutation.
+- **Context Dependency Graph & Dangling Context Detection (`src/engine/tree.ts`)**:
+  - Hierarchical tracking of Vue `provide` / `inject` and React `createContext` / `useContext` across component trees.
+  - Surfaces `contextGraph.danglingConsumers` to flag consumer components rendered without an ancestor provider in the active route tree.
+- **First-Class Reactivity Smells Diagnoser (`src/engine/reactivity.ts`)**:
+  - Integrated into `inspect_component`: detects reactive prop destructuring (`const { prop } = props`), direct prop mutation (`props.prop = val`), dangling watch effects, and redundant reactive state allocations.
+- **Structural Template Similarity Engine (`src/engine/template-similarity.ts`)**:
+  - DOM AST topology hashing and similarity scoring (configurable threshold, default 0.8) to identify structural copy-paste slop and component consolidation opportunities.
+- **Design System & Accessibility (a11y) Auditing (`src/engine/style-audit.ts`)**:
+  - Surfaced in `audit_frontend`: audits arbitrary/hardcoded hex colors (`#hex`, `rgb`) vs design token scales, detects form inputs lacking accessible labels, and flags non-semantic clickable elements (`<div @click>` without keyboard accessibility or ARIA roles).
+- **Bundle & Astro Island Health Audit (`src/engine/bundle-audit.ts`)**:
+  - Audits Astro/Nuxt/Next island hydration strategies (`client:load` vs `client:visible` vs `client:idle`).
+  - Identifies heavy eager imports (e.g., `echarts`, `chart.js`, `lodash`, `moment`) running inside eagerly hydrated client islands.
+
+### Changed
+
+- **Unified 5 Core MCP Tools Architecture**:
+  - Streamlined MCP server interface down to 5 high-density, versatile tools: `find_code`, `inspect_component`, `get_component_tree`, `trace_state`, and `audit_frontend`.
+  - Rich responses equipped with first-class diagnostic fields (`boundaryContracts`, `formContracts`, `drillingAlerts`, `reactivitySmells`, `designAudit`, `bundleAudit`, `similarTemplates`).
+- **Token Economy & Output Formatting (`src/engine/formatter.ts`)**:
+  - Enhanced text formatters and structured JSON outputs designed for zero-raw-byte token optimization in LLM context windows.
 
 ## [0.6.0] - 2026-09-03
 
