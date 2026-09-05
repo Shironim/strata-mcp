@@ -98,6 +98,9 @@ export function resolveWorkspacePath(rawPath: string, rootHint?: string): string
     return lastKnownProjectRoot || process.cwd();
   }
 
+  // Cross-platform: convert Windows backslashes to forward slashes for segment resolution
+  const normalizedSlashes = trimmed.replace(/\\/g, '/');
+
   // Helper to check if a path is truly an absolute path with drive or UNC on Windows
   const isWindowsAbsolute = /^[A-Za-z]:[\\/]/.test(trimmed) || trimmed.startsWith('\\\\');
   const isPosixAbsolute = trimmed.startsWith('/') && !process.platform.startsWith('win');
@@ -117,14 +120,14 @@ export function resolveWorkspacePath(rawPath: string, rootHint?: string): string
   // Candidate 1: Check against rootHint if provided (handles both "src/..." and "/src/...")
   if (rootHint) {
     const resolvedHint = resolve(rootHint.trim().replace(/^['"]|['"]$/g, ''));
-    const relativePart = trimmed.replace(/^[/\\]+/, '');
+    const relativePart = normalizedSlashes.replace(/^[/\\]+/, '');
     const candidate = normalize(resolve(resolvedHint, relativePart));
     if (existsSync(candidate)) {
       setLastKnownProjectRoot(resolvedHint);
       return candidate;
     }
     // Also test direct join without stripping if rootHint was a directory
-    const directCandidate = normalize(resolve(resolvedHint, trimmed));
+    const directCandidate = normalize(resolve(resolvedHint, normalizedSlashes));
     if (existsSync(directCandidate)) {
       setLastKnownProjectRoot(resolvedHint);
       return directCandidate;
@@ -133,7 +136,7 @@ export function resolveWorkspacePath(rawPath: string, rootHint?: string): string
 
   // Candidate 2: Check against lastKnownProjectRoot
   if (lastKnownProjectRoot) {
-    const relativePart = trimmed.replace(/^[/\\]+/, '');
+    const relativePart = normalizedSlashes.replace(/^[/\\]+/, '');
     const candidate = normalize(resolve(lastKnownProjectRoot, relativePart));
     if (existsSync(candidate)) {
       return candidate;
@@ -141,7 +144,7 @@ export function resolveWorkspacePath(rawPath: string, rootHint?: string): string
   }
 
   // Candidate 3: Check against process.cwd()
-  const cwdRelative = trimmed.replace(/^[/\\]+/, '');
+  const cwdRelative = normalizedSlashes.replace(/^[/\\]+/, '');
   const cwdCandidate = normalize(resolve(process.cwd(), cwdRelative));
   if (existsSync(cwdCandidate)) {
     const detectedRoot = findProjectRoot(cwdCandidate);
@@ -164,7 +167,7 @@ export function resolveWorkspacePath(rawPath: string, rootHint?: string): string
     ? resolve(rootHint.trim().replace(/^['"]|['"]$/g, ''))
     : (lastKnownProjectRoot || process.cwd());
 
-  const relativePart = trimmed.replace(/^[/\\]+/, '');
+  const relativePart = normalizedSlashes.replace(/^[/\\]+/, '');
   return normalize(resolve(baseDir, relativePart));
 }
 
