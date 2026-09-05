@@ -70,6 +70,8 @@ export interface ComponentPropContract {
   type: string;
   required: boolean;
   default?: string;
+  isUnion?: boolean;
+  unionMembers?: string[];
 }
 
 export interface ComponentEmitContract {
@@ -122,23 +124,76 @@ export interface DataDependencyInfo {
   mutations?: string[];
 }
 
+export interface ComponentModelContract {
+  name: string;
+  type?: string;
+  required?: boolean;
+  default?: string;
+}
+
+export interface ComponentSlotDetail {
+  name: string;
+  isScoped: boolean;
+  bindings?: string[];
+  payload?: Record<string, string>;
+}
+
+export interface ComponentStyleTokens {
+  layoutTraps: string[];
+  zIndices: string[];
+  overflow: string[];
+  positioning: string[];
+}
+
+export interface InferredPropProperty {
+  property: string;
+  inferredType?: string;
+  usageSnippet?: string;
+}
+
+export interface InferredPropDetail {
+  propName: string;
+  properties: InferredPropProperty[];
+}
+
+export interface GlobalSymbolInfo {
+  name: string;
+  category: 'ziggy-route' | 'auto-import' | 'global-helper' | 'inferred-global';
+  hint?: string;
+}
+
 export interface ComponentContract {
   component: string;
-  framework: 'vue' | 'react' | 'astro' | 'unknown';
+  framework: 'vue' | 'react' | 'astro' | 'unknown' | 'vue-composable';
   filePath: string;
   props: ComponentPropContract[];
   emits: ComponentEmitContract[];
   slots: string[];
+  slotDetails?: ComponentSlotDetail[];
+  models?: ComponentModelContract[];
   exposed?: string[];
   variants?: ComponentVariantsInfo;
   renderBoundary?: RenderBoundaryInfo;
   stateDependencies?: StateDependencyInfo;
   dataDependencies?: DataDependencyInfo;
+  inferredProps?: InferredPropDetail[];
+  globalSymbols?: GlobalSymbolInfo[];
+  styleTokens?: ComponentStyleTokens;
+  reactivitySmells?: ReactivitySmell[];
+  boundaryContracts?: BoundaryContract[];
+  formContracts?: FormContract[];
 }
 
 export interface ContractOptions {
   path: string;
+  inferProps?: boolean;
+  resolveGlobals?: boolean;
   outputFormat?: 'text' | 'json';
+}
+
+export interface PassedPropInfo {
+  propName: string;
+  expression: string;
 }
 
 export interface ComponentTreeNode {
@@ -149,8 +204,19 @@ export interface ComponentTreeNode {
   isAutoImported?: boolean;
   isPage?: boolean;
   isExternalScope?: boolean;
+  warning?: string;
   depth: number;
+  passedProps?: PassedPropInfo[];
   children: ComponentTreeNode[];
+}
+
+export interface PropsDrillingAlert {
+  prop: string;
+  origin: string;
+  drilledThrough: string[];
+  target: string;
+  depth: number;
+  recommendation: string;
 }
 
 export interface ComponentTreeResult {
@@ -158,6 +224,8 @@ export interface ComponentTreeResult {
   totalComponents: number;
   maxDepthReached: number;
   direction?: 'downward' | 'upward';
+  propsDrilling: PropsDrillingAlert[];
+  contextGraph?: ContextDependencyGraph;
   resolvedRoute?: {
     routePath: string;
     matchedRoute: string;
@@ -177,6 +245,7 @@ export interface ComponentTreeOptions {
   outputFormat?: 'text' | 'json';
   aliasMap?: Record<string, string>;
   includeLayouts?: boolean;
+  includeProps?: boolean;
 }
 
 export interface ResolveRouteEntryOptions {
@@ -197,7 +266,7 @@ export interface ResolveRouteEntryResult {
 }
 
 export interface EngineMetadata {
-  engine: 'in-memory-ast' | 'sqlite-graph-cache' | 'ast-grep';
+  engine: 'in-memory-ast' | 'sqlite-graph-cache' | 'ast-grep' | 'template-similarity-comparator';
   durationMs: number;
   cached?: boolean;
 }
@@ -206,7 +275,7 @@ export interface UnusedComponentInfo {
   name: string;
   fileName: string;
   filePath: string;
-  framework: 'vue' | 'react' | 'astro' | 'unknown';
+  framework: 'vue' | 'react' | 'astro' | 'unknown' | 'vue-composable';
   isPage?: boolean;
 }
 
@@ -287,11 +356,19 @@ export interface StateImpactConsumer {
   renderBoundary?: string;
   kind: 'store' | 'context' | 'composable';
   identifier: string;
+  role?: 'mutator' | 'reader';
+  actionsCalled?: string[];
+  usageSnippet?: string;
 }
 
 export interface StateImpactResult {
   identifier: string;
   totalConsumers: number;
+  roleFilter?: 'all' | 'mutators' | 'readers';
+  mutatorsCount?: number;
+  readersCount?: number;
+  mutators?: StateImpactConsumer[];
+  readers?: StateImpactConsumer[];
   consumers: StateImpactConsumer[];
   _meta?: EngineMetadata;
 }
@@ -299,7 +376,22 @@ export interface StateImpactResult {
 export interface QueryStateImpactOptions {
   identifier: string;
   targetPath?: string;
+  role?: 'all' | 'mutators' | 'readers';
   outputFormat?: 'text' | 'json';
+}
+
+export interface TemplateSimilarityCluster {
+  similarity: number;
+  files: string[];
+  sharedStructure: string[];
+  recommendation: string;
+}
+
+export interface TemplateSimilarityResult {
+  workspaceRoot: string;
+  clusters: TemplateSimilarityCluster[];
+  totalComponentsAudited: number;
+  _meta?: EngineMetadata;
 }
 
 export interface UnusedStateItem {
@@ -377,6 +469,7 @@ export interface EventHandlerAuditResult {
 
 export interface AuditEventHandlersOptions {
   path: string;
+  code?: string;
   outputFormat?: 'text' | 'json';
 }
 
@@ -403,5 +496,140 @@ export interface TraceStateChainOptions {
   maxDepth?: number;
   outputFormat?: 'text' | 'json';
 }
+
+export interface ReactivitySmell {
+  type: 'vue-props-destructure' | 'vue-prop-mutation' | 'react-inline-in-loop' | 'general';
+  severity: 'error' | 'warning';
+  message: string;
+  line: number;
+  snippet?: string;
+  recommendation: string;
+}
+
+export interface ArbitraryTokenViolation {
+  file: string;
+  line: number;
+  token: string;
+  category: 'color' | 'spacing' | 'radius' | 'size' | 'other';
+  recommendation: string;
+}
+
+export interface A11yViolation {
+  file: string;
+  line: number;
+  element: string;
+  issue: string;
+  recommendation: string;
+}
+
+export interface DesignSystemAuditResult {
+  workspaceRoot: string;
+  totalFilesAudited: number;
+  arbitraryTokens: ArbitraryTokenViolation[];
+  radiusDistribution: Record<string, number>;
+  a11yViolations: A11yViolation[];
+  _meta?: EngineMetadata;
+}
+
+export interface AuditDesignTokensOptions {
+  targetPath: string;
+  scopePath?: string;
+  excludeDirs?: string[];
+  outputFormat?: 'text' | 'json';
+}
+
+// ---------------------------------------------------------------------------
+// Universal Data Fetching & Boundary Contract (Vue, Nuxt, React, Next, Astro, Inertia)
+// ---------------------------------------------------------------------------
+
+export type BoundaryContractType =
+  | 'inertia-form'
+  | 'inertia-router'
+  | 'tanstack-query'
+  | 'swr'
+  | 'nuxt-fetch'
+  | 'server-action'
+  | 'native-fetch'
+  | 'axios';
+
+export type BoundaryMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'UNKNOWN';
+
+export interface BoundaryContract {
+  boundaryType: BoundaryContractType;
+  method: BoundaryMethod;
+  targetEndpoint: string;
+  endpointSource: 'literal' | 'ziggy-route' | 'template-literal' | 'action-symbol' | 'variable';
+  payloadKeys?: string[];
+  optimisticUpdate?: boolean;
+  loc?: { line: number; column?: number };
+}
+
+// ---------------------------------------------------------------------------
+// Universal Form & Payload Contract
+// ---------------------------------------------------------------------------
+
+export interface FormFieldContract {
+  key: string;
+  type: string; // 'text' | 'email' | 'number' | 'file' | 'password' | 'checkbox' | 'select' | 'textarea' | 'unknown'
+  required: boolean;
+  binding?: string; // e.g. "form.name", "name", "v-model"
+}
+
+export interface FormContract {
+  binding?: string;
+  isMultipart: boolean;
+  fields: FormFieldContract[];
+  submitEndpoint?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Universal Implicit Context Graph (Provide/Inject & React Context)
+// ---------------------------------------------------------------------------
+
+export interface ContextDependencyNode {
+  key: string;
+  type: 'vue-provide' | 'vue-inject' | 'react-provider' | 'react-use-context';
+  component: string;
+  filePath: string;
+  line: number;
+  valueSnippet?: string;
+}
+
+export interface ContextDependencyRelation {
+  key: string;
+  provider?: ContextDependencyNode;
+  consumer: ContextDependencyNode;
+  isCoveredInTree: boolean;
+  warning?: string;
+}
+
+export interface ContextDependencyGraph {
+  providers: ContextDependencyNode[];
+  consumers: ContextDependencyNode[];
+  relations: ContextDependencyRelation[];
+  danglingConsumers: ContextDependencyRelation[];
+}
+
+// ---------------------------------------------------------------------------
+// Zero-Bloat Bundle & Island Architecture Awareness
+// ---------------------------------------------------------------------------
+
+export interface BundleWeightWarning {
+  file: string;
+  line: number;
+  module: string;
+  category: 'chart' | 'rich-text' | 'pdf' | 'spreadsheet' | '3d-canvas' | 'heavy-utility';
+  recommendation: string;
+  islandDirective?: string; // e.g. 'client:load' vs 'client:visible'
+}
+
+export interface BundleAuditResult {
+  workspaceRoot: string;
+  totalFilesAudited: number;
+  heavyEagerImports: BundleWeightWarning[];
+  totalWarnings: number;
+  _meta?: EngineMetadata;
+}
+
 
 

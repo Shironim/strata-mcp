@@ -15,7 +15,7 @@ export function createMcpServer(): Server {
   const server = new Server(
     {
       name: 'strata-mcp',
-      version: '0.6.0',
+      version: '0.7.0',
     },
     {
       capabilities: {
@@ -34,7 +34,7 @@ export function createMcpServer(): Server {
     };
   });
 
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  server.setRequestHandler(CallToolRequestSchema, async (request): Promise<any> => {
     const { name, arguments: args = {} } = request.params;
     const tool = findTool(name);
 

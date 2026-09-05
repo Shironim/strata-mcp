@@ -1,12 +1,18 @@
 import { sliceSymbol, formatSymbolSliceAsText } from '../engine/slicer';
-import { auditEventHandlers, formatEventHandlerAuditAsText } from '../engine/reactivity';
+import {
+  auditEventHandlers,
+  formatEventHandlerAuditAsText,
+  detectReactivitySmells,
+  formatReactivitySmellsAsText,
+} from '../engine/reactivity';
 import { extractComponentContract, formatContractAsText } from '../engine/contract';
+import { resolveWorkspacePath } from '../engine/path-resolver';
 import type { McpToolDefinition } from './types';
 
 export const inspectComponentTool: McpToolDefinition = {
   name: 'inspect_component',
   description:
-    'Deep inspection of a specific frontend component or file (.vue, .tsx, .jsx, .astro, .ts, .js). Extracts public interface contracts (props/emits/slots), slices specific function/symbol bodies with exact line numbers, callers, and covering test suites (blast radius), or audits Vue SFC template-to-script event handlers for broken/dead bindings. Use this before modifying or refactoring a function to safely assess impact without dumping the full file.',
+    'Deep component inspection (.vue, .tsx, .jsx, .astro). Extracts interface contracts (props/emits/slots), data fetching boundaries (Inertia, TanStack Query, Axios endpoints & payload keys), form schemas & file uploads, reactivity smells (props destructuring, direct mutations), and slices symbols with blast radius.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -16,7 +22,7 @@ export const inspectComponentTool: McpToolDefinition = {
       },
       target_path: {
         type: 'string',
-        description: 'Alias for path',
+        description: 'Project root directory or alias for path',
       },
       symbol: {
         type: 'string',
@@ -32,6 +38,16 @@ export const inspectComponentTool: McpToolDefinition = {
         description:
           'When true on Vue components, audits template-to-script reactivity integrity for broken and dead event handlers',
       },
+      infer_props: {
+        type: 'boolean',
+        description:
+          'When true (default), deeply infers object prop sub-properties (.data, .links, etc.) and data shapes from template and script AST',
+      },
+      resolve_globals: {
+        type: 'boolean',
+        description:
+          'When true (default), identifies un-imported global symbols, Ziggy route() helpers, and auto-imported composables',
+      },
       output_format: {
         type: 'string',
         enum: ['text', 'json'],
@@ -41,13 +57,21 @@ export const inspectComponentTool: McpToolDefinition = {
     required: ['path'],
   },
   handler: async (args: Record<string, any>) => {
-    const filePath = (args.path || args.target_path) ? String(args.path || args.target_path) : '';
-    if (!filePath) {
+    const targetPathHint = (args.target_path || args.project_root || args.root)
+      ? String(args.target_path || args.project_root || args.root)
+      : undefined;
+    const rawPath = args.path
+      ? String(args.path)
+      : (targetPathHint || '');
+
+    if (!rawPath) {
       return {
         isError: true,
         content: [{ type: 'text', text: "Missing required argument: 'path' (or 'target_path')" }],
       };
     }
+
+    const filePath = resolveWorkspacePath(rawPath, targetPathHint);
 
     const isJson = args.output_format === 'json';
     const symbolName = args.symbol || args.symbol_name;
@@ -79,21 +103,47 @@ export const inspectComponentTool: McpToolDefinition = {
       };
     }
 
-    // Sub-action B: Event handler reactivity audit
+    // Sub-action B: Public interface contract with reactivity smells & optional event handler audit
+    const inferProps = args.infer_props !== false;
+    const resolveGlobals = args.resolve_globals !== false;
+    const contract = await extractComponentContract(filePath, { inferProps, resolveGlobals });
+
+    // Detect Reactivity Smells directly as first-class diagnostics
+    const reactivitySmells = await detectReactivitySmells({ path: filePath });
+    contract.reactivitySmells = reactivitySmells;
+
     if (args.audit_events) {
-      const result = await auditEventHandlers({ path: filePath });
+      const auditResult = await auditEventHandlers({ path: filePath });
+      if (isJson) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(
+                {
+                  ...contract,
+                  eventAudit: auditResult,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      }
+
+      const contractText = formatContractAsText(contract);
+      const auditText = formatEventHandlerAuditAsText(auditResult);
       return {
         content: [
           {
             type: 'text',
-            text: isJson ? JSON.stringify(result, null, 2) : formatEventHandlerAuditAsText(result),
+            text: `${contractText}\n\n${auditText}`,
           },
         ],
       };
     }
 
-    // Sub-action C: Default public interface contract
-    const contract = await extractComponentContract(filePath);
     return {
       content: [
         {
@@ -104,3 +154,4 @@ export const inspectComponentTool: McpToolDefinition = {
     };
   },
 };
+

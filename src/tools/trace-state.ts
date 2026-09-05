@@ -4,6 +4,7 @@ import {
   traceStateChain,
   formatStateChainAsText,
 } from '../engine/database';
+import { resolveProjectRoot } from '../engine/path-resolver';
 import type { McpToolDefinition } from './types';
 
 export const traceStateTool: McpToolDefinition = {
@@ -29,6 +30,12 @@ export const traceStateTool: McpToolDefinition = {
         type: 'number',
         description: 'Traversal depth: 1 for direct consumers impact, or >1 for multi-hop call chain (default: 1)',
       },
+      role: {
+        type: 'string',
+        enum: ['all', 'mutators', 'readers'],
+        description:
+          'Consumer role filter: "all" (grouped into mutators and readers), "mutators" (only triggers/action callers), or "readers" (only state/render consumers). Default: "all"',
+      },
       direction: {
         type: 'string',
         enum: ['consumers', 'dependencies', 'both'],
@@ -51,9 +58,10 @@ export const traceStateTool: McpToolDefinition = {
       };
     }
 
-    const targetPath = (args.target_path || args.path)
+    const rawTargetPath = (args.target_path || args.path)
       ? String(args.target_path || args.path)
-      : process.cwd();
+      : undefined;
+    const targetPath = resolveProjectRoot(rawTargetPath);
     const depth = args.depth ? Number(args.depth) : 1;
     const isJson = args.output_format === 'json';
 
@@ -73,7 +81,8 @@ export const traceStateTool: McpToolDefinition = {
       };
     }
 
-    const result = await queryStateImpact(targetPath, identifier);
+    const role = (args.role as 'all' | 'mutators' | 'readers') || 'all';
+    const result = await queryStateImpact(targetPath, identifier, role);
     return {
       content: [
         {

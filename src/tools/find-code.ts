@@ -5,12 +5,13 @@ import {
   formatMatchesAsText,
 } from '../engine/search';
 import { dumpSyntaxTree, executeAstGrep } from '../engine/astgrep';
+import { resolveWorkspacePath, resolveProjectRoot } from '../engine/path-resolver';
 import type { McpToolDefinition } from './types';
 
 export const findCodeTool: McpToolDefinition = {
   name: 'find_code',
   description:
-    'Search across workspace code using AST patterns (ast-grep), relational YAML rules, or component usage/adoption. Also supports in-memory CST syntax tree dumping and testing rules. Use this for SEARCHING across many files (e.g. finding all `<Button>` usages or `watchEffect` patterns). To inspect or slice a specific known component/file, use `inspect_component` instead.',
+    'Searches workspace code using AST patterns (ast-grep), relational YAML rules, or component adoption across .vue, .astro, and .tsx. For inspecting a single known component or file, use inspect_component instead.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -53,7 +54,9 @@ export const findCodeTool: McpToolDefinition = {
       },
       language: {
         type: 'string',
-        description: 'Language hint (ts, js, tsx, jsx, html, css) — default: "ts"',
+        enum: ['auto', 'vue', 'astro', 'ts', 'js', 'tsx', 'jsx', 'html', 'css'],
+        description:
+          'Language or framework parser hint (auto, vue, astro, ts, js, tsx, jsx, html, css). Automatically routes .vue/.astro script blocks to ts/js and template blocks to html — default: "auto"',
       },
       scope: {
         type: 'string',
@@ -79,11 +82,11 @@ export const findCodeTool: McpToolDefinition = {
   handler: async (args: Record<string, any>) => {
     const isJson = args.output_format === 'json';
     const codeSnippet = (args.code || args.code_snippet) ? String(args.code || args.code_snippet) : undefined;
-    const targetPath = (args.path || args.target_path) ? String(args.path || args.target_path) : undefined;
+    const rawTargetPath = (args.path || args.target_path) ? String(args.path || args.target_path) : undefined;
     const language = args.language ? String(args.language) : undefined;
 
     // Mode A: dump_ast
-    if (args.action === 'dump_ast' || (!targetPath && codeSnippet && !args.pattern && !args.rule_yaml)) {
+    if (args.action === 'dump_ast' || (!rawTargetPath && codeSnippet && !args.pattern && !args.rule_yaml)) {
       if (!codeSnippet) {
         return {
           isError: true,
@@ -113,13 +116,8 @@ export const findCodeTool: McpToolDefinition = {
       };
     }
 
-    // Search requires path
-    if (!targetPath) {
-      return {
-        isError: true,
-        content: [{ type: 'text', text: "Missing required argument: 'path' (or 'target_path')" }],
-      };
-    }
+    // Resolve target directory or file with ergonomic fallback to active root
+    const targetPath = rawTargetPath ? resolveWorkspacePath(rawTargetPath) : resolveProjectRoot();
 
     const excludeDirs = Array.isArray(args.exclude_dirs)
       ? args.exclude_dirs.map(String)

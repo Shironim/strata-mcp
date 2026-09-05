@@ -1,13 +1,20 @@
 import { scanRoutes, formatRoutesAsText } from '../engine/routes';
 import { findUnusedComponents, formatUnusedAsText } from '../engine/audit';
 import { findUnusedState, formatUnusedStateAsText } from '../engine/database';
+import {
+  findSimilarTemplates,
+  formatSimilarTemplatesAsText,
+} from '../engine/template-similarity';
+import { auditDesignTokens, formatDesignAuditAsText } from '../engine/style-audit';
+import { auditBundleHealth, formatBundleAuditAsText } from '../engine/bundle-audit';
+import { resolveProjectRoot } from '../engine/path-resolver';
 import type { RouteFramework } from '../types';
 import type { McpToolDefinition } from './types';
 
 export const auditFrontendTool: McpToolDefinition = {
   name: 'audit_frontend',
   description:
-    'Performs a comprehensive architectural audit of the frontend codebase: maps all file-based URL routes, detects orphan/dead components, and discovers unused state stores/composables. Can audit specific targets or run a full health check (target: "all").',
+    'Architectural frontend health audit: file-based routes, dead components, unused state composables, structural template similarity, design tokens & a11y, and bundle health / island hydration. Supports targeted or full audits (target: "all").',
   inputSchema: {
     type: 'object',
     properties: {
@@ -19,11 +26,20 @@ export const auditFrontendTool: McpToolDefinition = {
         type: 'string',
         description: 'Alias for target_path',
       },
+      scope_path: {
+        type: 'string',
+        description:
+          'Sub-directory or workspace scope filter within target_path (e.g. "apps/web") to avoid scanning entire monorepos and prevent cold-start timeouts',
+      },
       target: {
         type: 'string',
-        enum: ['routes', 'dead-components', 'dead-state', 'all'],
+        enum: ['routes', 'dead-components', 'dead-state', 'similar-templates', 'design-tokens', 'bundle-health', 'all'],
         description:
-          'Audit target: "routes" (URL topology), "dead-components" (orphan components), "dead-state" (unused composables/stores), or "all" for a full architectural diagnostic (default: "all")',
+          'Audit target: "routes" (URL topology), "dead-components" (orphan components), "dead-state" (unused composables/stores), "similar-templates" (redundant template structure & DRY opportunities), "design-tokens" (arbitrary Tailwind colors/spacing, radius consistency & a11y violations), "bundle-health" (heavy eager imports & eager island hydration), or "all" for a full architectural diagnostic (default: "all")',
+      },
+      threshold: {
+        type: 'number',
+        description: 'Similarity threshold for template redundancy audit between 0.0 and 1.0 (default: 0.8)',
       },
       prefix: {
         type: 'string',
@@ -52,9 +68,11 @@ export const auditFrontendTool: McpToolDefinition = {
     },
   },
   handler: async (args: Record<string, any>) => {
-    const targetPath = (args.target_path || args.path)
+    const rawTargetPath = (args.target_path || args.path)
       ? String(args.target_path || args.path)
-      : process.cwd();
+      : undefined;
+    const targetPath = resolveProjectRoot(rawTargetPath);
+    const scopePath = args.scope_path ? String(args.scope_path) : undefined;
     const target = args.target ? String(args.target) : 'all';
     const isJson = args.output_format === 'json';
     const excludeDirs = Array.isArray(args.exclude_dirs)
@@ -96,7 +114,7 @@ export const auditFrontendTool: McpToolDefinition = {
     }
 
     if (target === 'dead-state') {
-      const result = await findUnusedState(targetPath);
+      const result = await findUnusedState(targetPath, { scopePath });
       return {
         content: [
           {
@@ -107,8 +125,56 @@ export const auditFrontendTool: McpToolDefinition = {
       };
     }
 
+    if (target === 'similar-templates') {
+      const result = await findSimilarTemplates({
+        targetPath,
+        threshold: args.threshold ? Number(args.threshold) : undefined,
+        excludeDirs,
+      });
+      return {
+        content: [
+          {
+            type: 'text',
+            text: isJson ? JSON.stringify(result, null, 2) : formatSimilarTemplatesAsText(result),
+          },
+        ],
+      };
+    }
+
+    if (target === 'design-tokens' || target === 'design') {
+      const result = await auditDesignTokens({
+        targetPath,
+        scopePath,
+        excludeDirs,
+      });
+      return {
+        content: [
+          {
+            type: 'text',
+            text: isJson ? JSON.stringify(result, null, 2) : formatDesignAuditAsText(result),
+          },
+        ],
+      };
+    }
+
+    if (target === 'bundle-health' || target === 'bundle') {
+      const result = await auditBundleHealth({
+        targetPath,
+        scopePath,
+        excludeDirs,
+      });
+      return {
+        content: [
+          {
+            type: 'text',
+            text: isJson ? JSON.stringify(result, null, 2) : formatBundleAuditAsText(result),
+          },
+        ],
+      };
+    }
+
     // target === 'all'
-    const [routes, unusedComponents, unusedState] = await Promise.all([
+    const [routes, unusedComponents, unusedState, similarTemplates, designSystemAudit, bundleAudit] = await Promise.all([
       scanRoutes({
         targetPath,
         frameworkHint: args.framework as RouteFramework | undefined,
@@ -119,7 +185,22 @@ export const auditFrontendTool: McpToolDefinition = {
         ignorePatterns: args.ignore_patterns as string[] | undefined,
         excludeDirs,
       }),
-      findUnusedState(targetPath),
+      findUnusedState(targetPath, { scopePath }),
+      findSimilarTemplates({
+        targetPath,
+        threshold: args.threshold ? Number(args.threshold) : undefined,
+        excludeDirs,
+      }),
+      auditDesignTokens({
+        targetPath,
+        scopePath,
+        excludeDirs,
+      }),
+      auditBundleHealth({
+        targetPath,
+        scopePath,
+        excludeDirs,
+      }),
     ]);
 
     if (isJson) {
@@ -127,7 +208,7 @@ export const auditFrontendTool: McpToolDefinition = {
         content: [
           {
             type: 'text',
-            text: JSON.stringify({ routes, unusedComponents, unusedState }, null, 2),
+            text: JSON.stringify({ routes, unusedComponents, unusedState, similarTemplates, designSystemAudit, bundleAudit }, null, 2),
           },
         ],
       };
@@ -141,6 +222,12 @@ export const auditFrontendTool: McpToolDefinition = {
       formatUnusedAsText(unusedComponents),
       '\n---\n',
       formatUnusedStateAsText(unusedState),
+      '\n---\n',
+      formatSimilarTemplatesAsText(similarTemplates),
+      '\n---\n',
+      formatDesignAuditAsText(designSystemAudit),
+      '\n---\n',
+      formatBundleAuditAsText(bundleAudit),
     ].join('\n');
 
     return {

@@ -4,6 +4,7 @@ import { collectFiles } from './collector';
 import { getCandidateNames } from './template';
 import { detectFramework } from './contract';
 import { escapeRegExp } from './patterns';
+import { scanDynamicImportsAndGlobals } from './dynamic-imports';
 import type {
   UnusedComponentInfo,
   UnusedComponentsOptions,
@@ -108,7 +109,7 @@ export async function findUnusedComponents(
     name: string;
     fileName: string;
     filePath: string;
-    framework: 'vue' | 'react' | 'astro' | 'unknown';
+    framework: 'vue' | 'react' | 'astro' | 'unknown' | 'vue-composable';
     candidates: string[];
     isPage: boolean;
     usageCount: number;
@@ -145,7 +146,21 @@ export async function findUnusedComponents(
     }
   }
 
+  // Scan dynamic imports, Inertia glob resolvers, and global component registrations
+  const dynamicRegistry = await scanDynamicImportsAndGlobals(targetDir, fileContents, allFiles);
+
   for (const comp of declaredComponents) {
+    const normCompPath = normalize(comp.filePath);
+
+    // Whitelist components matched by import.meta.glob, defineAsyncComponent, or registered globally
+    if (
+      dynamicRegistry.globMatchedFiles.has(normCompPath) ||
+      dynamicRegistry.globalComponents.has(comp.name.toLowerCase())
+    ) {
+      comp.usageCount++;
+      continue;
+    }
+
     for (const { file, content } of fileContents) {
       if (file === comp.filePath) continue; // skip self references
       if (isComponentReferencedInContent(content, comp.candidates)) {

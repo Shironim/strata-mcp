@@ -9,6 +9,7 @@ import {
   extractStateDependencies,
 } from './contract';
 import { extractLocalImports, isPageFile } from './tree';
+import { escapeRegExp } from './patterns';
 import { scanRoutes } from './routes';
 import type {
   QueryStateImpactOptions,
@@ -159,8 +160,13 @@ export interface ParsedWorkspaceBatch {
 /**
  * 1. Gathers disk candidate files and calculates the delta against SQLite.
  */
-export async function hashChecker(absRoot: string, db: Database): Promise<WorkspaceDelta> {
-  const allDiskFiles = await collectFiles(absRoot);
+export async function hashChecker(
+  absRoot: string,
+  db: Database,
+  scopePath?: string
+): Promise<WorkspaceDelta> {
+  const scanTarget = scopePath ? resolve(absRoot, scopePath) : absRoot;
+  const allDiskFiles = await collectFiles(scanTarget);
   const candidateFiles = allDiskFiles.filter((f) => {
     const ext = extname(f).toLowerCase();
     const norm = f.replace(/\\/g, '/');
@@ -219,7 +225,12 @@ export async function hashChecker(absRoot: string, db: Database): Promise<Worksp
     }
   }
 
+  const normScanTarget = normalize(scanTarget);
   for (const [path, dbInfo] of dbMap.entries()) {
+    // If scopePath is provided, only mark deletion for files residing within scopePath
+    if (scopePath && !path.startsWith(normScanTarget)) {
+      continue;
+    }
     if (!diskMap.has(path)) {
       deleted.push(dbInfo.id);
     }
@@ -482,13 +493,16 @@ export function transactionCommitter(
  * Synchronizes the workspace disk state with SQLite using file mtime (Smart Delta Sync).
  * Orchestrates: hashChecker -> batchParser -> transactionCommitter.
  */
-export async function syncWorkspace(workspaceRoot: string): Promise<SyncStats> {
+export async function syncWorkspace(
+  workspaceRoot: string,
+  scopePath?: string
+): Promise<SyncStats> {
   const startTime = performance.now();
   const absRoot = resolve(workspaceRoot);
   const db = getWorkspaceDatabase(absRoot);
 
   // 1. Gather files and detect delta
-  const delta = await hashChecker(absRoot, db);
+  const delta = await hashChecker(absRoot, db, scopePath);
 
   // Fast exit if nothing changed
   if (delta.added.length === 0 && delta.modified.length === 0 && delta.deleted.length === 0) {
@@ -512,11 +526,137 @@ export async function syncWorkspace(workspaceRoot: string): Promise<SyncStats> {
 
 
 /**
+ * Analyzes consumer source code to classify whether it mutates state/calls actions
+ * or merely reads/watches/renders state.
+ */
+async function classifyConsumerRole(
+  absPath: string,
+  identifier: string
+): Promise<{ role: 'mutator' | 'reader'; actionsCalled?: string[]; snippet?: string }> {
+  try {
+    const content = await fs.readFile(absPath, 'utf8');
+
+    const actionKeywords = [
+      'confirm',
+      'handle',
+      'submit',
+      'set',
+      'update',
+      'delete',
+      'add',
+      'remove',
+      'open',
+      'close',
+      'mutate',
+      'trigger',
+      'run',
+      'toggle',
+      'reset',
+      'dispatch',
+      'post',
+      'put',
+      'patch',
+      'reload',
+      'visit',
+      'revalidate',
+      'refresh',
+    ];
+
+    const callNames: string[] = [];
+
+    // 1. Destructured call: const { confirmDelete, isConfirmOpen } = useConfirm()
+    const destructureRegex = new RegExp(
+      `(?:const|let|var)\\s*\\{([^}]+)\\}\\s*=\\s*${escapeRegExp(identifier)}\\s*\\(`,
+      'g'
+    );
+    for (const match of content.matchAll(destructureRegex)) {
+      const vars = match[1]
+        .split(',')
+        .map((v) => v.trim().split(':')[0].trim())
+        .filter(Boolean);
+      for (const v of vars) {
+        const isActionName = actionKeywords.some((kw) =>
+          v.toLowerCase().startsWith(kw) || v.toLowerCase().includes(kw)
+        );
+        const isInvoked = new RegExp(`\\b${escapeRegExp(v)}\\s*\\(`).test(content);
+        if (isActionName || isInvoked) {
+          callNames.push(`${v}()`);
+        }
+      }
+    }
+
+    // 2. Instance variable call: const confirm = useConfirm(); confirm.open(...) or const form = useForm(...)
+    const instanceRegex = new RegExp(
+      `(?:const|let|var)\\s+([A-Za-z0-9_$]+)\\s*=\\s*${escapeRegExp(identifier)}\\s*\\(`,
+      'g'
+    );
+    for (const match of content.matchAll(instanceRegex)) {
+      const instName = match[1];
+      const methodCalls = content.matchAll(
+        new RegExp(`\\b${escapeRegExp(instName)}\\.([A-Za-z0-9_$]+)\\s*\\(`, 'g')
+      );
+      for (const mc of methodCalls) {
+        callNames.push(`${instName}.${mc[1]}()`);
+      }
+    }
+
+    // 3. Direct router or $inertia global call: router.post(...), router.reload(...)
+    if (identifier === 'router' || identifier === '$inertia') {
+      const routerCalls = content.matchAll(
+        new RegExp(`\\b${escapeRegExp(identifier)}\\.([A-Za-z0-9_$]+)\\s*\\(`, 'g')
+      );
+      for (const rc of routerCalls) {
+        callNames.push(`${identifier}.${rc[1]}()`);
+      }
+    }
+
+    // 4. Direct chained call: useConfirm().confirm(...)
+    const directChained = content.matchAll(
+      new RegExp(`\\b${escapeRegExp(identifier)}\\s*\\([^)]*\\)\\.([A-Za-z0-9_$]+)\\s*\\(`, 'g')
+    );
+    for (const dc of directChained) {
+      callNames.push(`${dc[1]}()`);
+    }
+
+    // 4. Inferred action calls matching identifier naming conventions
+    if (callNames.length > 0) {
+      const uniqueCalls = Array.from(new Set(callNames));
+      return {
+        role: 'mutator',
+        actionsCalled: uniqueCalls,
+        snippet: uniqueCalls.slice(0, 3).join(', '),
+      };
+    }
+
+    // Check if renders dialog or watches modal visibility
+    const rendersDialog =
+      /<(?:App)?(?:[A-Za-z0-9_]+)?(?:Confirm|Modal|Dialog|Drawer|Toast)/i.test(content) &&
+      content.includes(identifier);
+
+    if (rendersDialog || /is[A-Z][A-Za-z0-9_]+(?:Open|Visible|Active|Loading)/.test(content)) {
+      return {
+        role: 'reader',
+        snippet: 'renders dialog / watches visibility state',
+      };
+    }
+
+    return {
+      role: 'reader',
+      snippet: 'consumes state values / reactive refs',
+    };
+  } catch {
+    return { role: 'reader' };
+  }
+}
+
+/**
  * Queries the impact of a state dependency (store, context, composable) across all files in SQLite.
+ * Categorizes consumers into Mutators (triggers/actions) and Readers (renderers/watchers).
  */
 export async function queryStateImpact(
   workspaceRoot: string,
-  identifier: string
+  identifier: string,
+  roleFilter: 'all' | 'mutators' | 'readers' = 'all'
 ): Promise<StateImpactResult> {
   const startTime = performance.now();
   const absRoot = resolve(workspaceRoot);
@@ -541,20 +681,43 @@ export async function queryStateImpact(
     identifier: string;
   }>;
 
-  const consumers: StateImpactConsumer[] = rows.map((r) => ({
-    path: r.path,
-    isPage: r.is_page === 1,
-    renderBoundary: r.render_boundary || undefined,
-    kind: r.kind,
-    identifier: r.identifier,
-  }));
+  const consumers: StateImpactConsumer[] = await Promise.all(
+    rows.map(async (r) => {
+      const classification = await classifyConsumerRole(r.path, identifier);
+      return {
+        path: r.path,
+        isPage: r.is_page === 1,
+        renderBoundary: r.render_boundary || undefined,
+        kind: r.kind,
+        identifier: r.identifier,
+        role: classification.role,
+        actionsCalled: classification.actionsCalled,
+        usageSnippet: classification.snippet,
+      };
+    })
+  );
+
+  const mutators = consumers.filter((c) => c.role === 'mutator');
+  const readers = consumers.filter((c) => c.role === 'reader');
+
+  let filteredConsumers = consumers;
+  if (roleFilter === 'mutators') {
+    filteredConsumers = mutators;
+  } else if (roleFilter === 'readers') {
+    filteredConsumers = readers;
+  }
 
   const durationMs = Math.round(performance.now() - startTime);
 
   return {
     identifier,
     totalConsumers: consumers.length,
-    consumers,
+    roleFilter,
+    mutatorsCount: mutators.length,
+    readersCount: readers.length,
+    mutators,
+    readers,
+    consumers: filteredConsumers,
     _meta: {
       engine: 'sqlite-graph-cache',
       durationMs,
@@ -581,11 +744,43 @@ export function formatStateImpactAsText(result: StateImpactResult): string {
     return lines.join('\n');
   }
 
-  lines.push('\nConsumers:');
-  for (const c of result.consumers) {
-    const pageBadge = c.isPage ? ' [Page]' : '';
-    const boundaryBadge = c.renderBoundary ? ` (${c.renderBoundary})` : '';
-    lines.push(`  - ${c.path}${pageBadge}${boundaryBadge}`);
+  if (result.roleFilter === 'mutators') {
+    lines.push(`\nMutators / Actions (Trigger / Write State) [${result.mutatorsCount || 0}]:`);
+    for (const c of result.consumers) {
+      const pageBadge = c.isPage ? ' [Page]' : '';
+      const actionBadge = c.usageSnippet ? ` -> ${c.usageSnippet}` : '';
+      lines.push(`  - ${c.path}${pageBadge}${actionBadge}`);
+    }
+    return lines.join('\n');
+  }
+
+  if (result.roleFilter === 'readers') {
+    lines.push(`\nReaders / Renderers (Display & Watch State) [${result.readersCount || 0}]:`);
+    for (const c of result.consumers) {
+      const pageBadge = c.isPage ? ' [Page]' : '';
+      const usageBadge = c.usageSnippet ? ` -> ${c.usageSnippet}` : '';
+      lines.push(`  - ${c.path}${pageBadge}${usageBadge}`);
+    }
+    return lines.join('\n');
+  }
+
+  // Default 'all': grouped output
+  if (result.mutators && result.mutators.length > 0) {
+    lines.push(`\nMutators / Actions (Trigger / Write State) [${result.mutators.length}]:`);
+    for (const c of result.mutators) {
+      const pageBadge = c.isPage ? ' [Page]' : '';
+      const actionBadge = c.usageSnippet ? ` -> ${c.usageSnippet}` : '';
+      lines.push(`  - ${c.path}${pageBadge}${actionBadge}`);
+    }
+  }
+
+  if (result.readers && result.readers.length > 0) {
+    lines.push(`\nReaders / Renderers (Display & Watch State) [${result.readers.length}]:`);
+    for (const c of result.readers) {
+      const pageBadge = c.isPage ? ' [Page]' : '';
+      const usageBadge = c.usageSnippet ? ` -> ${c.usageSnippet}` : '';
+      lines.push(`  - ${c.path}${pageBadge}${usageBadge}`);
+    }
   }
 
   return lines.join('\n');
@@ -595,15 +790,17 @@ export function formatStateImpactAsText(result: StateImpactResult): string {
  * Discovers dead or unreferenced state, composables, and stores across the workspace.
  */
 export async function findUnusedState(
-  workspaceRoot: string
+  workspaceRoot: string,
+  options?: { scopePath?: string }
 ): Promise<UnusedStateResult> {
   const startTime = performance.now();
   const absRoot = resolve(workspaceRoot);
-  await syncWorkspace(absRoot);
+  await syncWorkspace(absRoot, options?.scopePath);
   const db = getWorkspaceDatabase(absRoot);
 
-  // 1. Identify all state candidate files in the workspace (composables, stores, hooks, utils)
-  const allFiles = await collectFiles(absRoot);
+  // 1. Identify all state candidate files in the workspace or scoped sub-path
+  const scanTarget = options?.scopePath ? resolve(absRoot, options.scopePath) : absRoot;
+  const allFiles = await collectFiles(scanTarget);
   const stateCandidates = allFiles.filter((f) => {
     const norm = f.replace(/\\/g, '/').toLowerCase();
     const ext = extname(f).toLowerCase();

@@ -203,11 +203,16 @@ export async function findCode(options: SearchOptions): Promise<ResolvedMatch[]>
       const adapter = createDocumentAdapter(file, content);
       const matches: ResolvedMatch[] = [];
 
+      const effectiveScriptLang =
+        options.language && options.language !== 'vue' && options.language !== 'astro' && options.language !== 'auto'
+          ? options.language
+          : undefined;
+
       for (const block of adapter.getScriptBlocks()) {
         const rawMatches = await executeAstGrep({
           code: block.content,
           pattern: options.pattern,
-          language: options.language || block.lang || 'ts',
+          language: effectiveScriptLang || block.lang || 'ts',
         });
         matches.push(...remapMatches(rawMatches, block, file));
       }
@@ -241,7 +246,7 @@ export async function findCode(options: SearchOptions): Promise<ResolvedMatch[]>
               templateBlock,
               filePath: file,
               pattern: options.pattern,
-              language: options.language,
+              language: effectiveScriptLang || 'ts',
             }))
           );
         }
@@ -283,11 +288,16 @@ export async function findCodeByRule(options: SearchOptions): Promise<ResolvedMa
       const adapter = createDocumentAdapter(file, content);
       const matches: ResolvedMatch[] = [];
 
+      const effectiveScriptLang =
+        options.language && options.language !== 'vue' && options.language !== 'astro' && options.language !== 'auto'
+          ? options.language
+          : undefined;
+
       for (const block of adapter.getScriptBlocks()) {
         const rawMatches = await executeAstGrep({
           code: block.content,
           rule: options.rule,
-          language: options.language || block.lang || 'ts',
+          language: effectiveScriptLang || block.lang || 'ts',
         });
         matches.push(...remapMatches(rawMatches, block, file));
       }

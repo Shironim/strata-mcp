@@ -17,6 +17,7 @@ import type {
   DeadHandlerInfo,
   EventHandlerAuditResult,
   EventHandlerInfo,
+  ReactivitySmell,
 } from '../types';
 
 const BUILTIN_GLOBALS = new Set([
@@ -102,10 +103,14 @@ export async function auditEventHandlers(
 ): Promise<EventHandlerAuditResult> {
   const targetFile = resolve(options.path);
   let fileContent: string;
-  try {
-    fileContent = await fs.readFile(targetFile, 'utf8');
-  } catch {
-    throw new Error(`Failed to read component file: ${targetFile}`);
+  if (options.code !== undefined) {
+    fileContent = options.code;
+  } else {
+    try {
+      fileContent = await fs.readFile(targetFile, 'utf8');
+    } catch {
+      throw new Error(`Failed to read component file: ${targetFile}`);
+    }
   }
 
   const sfc = parseSfc(fileContent, targetFile);
@@ -251,6 +256,44 @@ export async function auditEventHandlers(
             });
           }
         }
+
+        // Two-way binding: v-model and v-model:argument
+        if (prop.type === NodeTypes.DIRECTIVE && prop.name === 'model') {
+          const dir = prop as DirectiveNode;
+          const modelArg = dir.arg && 'content' in dir.arg ? dir.arg.content : 'modelValue';
+          const fullEvent = `v-model${modelArg === 'modelValue' ? '' : `:${modelArg}`}`;
+          const expContent = dir.exp && 'content' in dir.exp ? dir.exp.content.trim() : '';
+
+          const relLine = dir.loc.start.line;
+          const relCol = dir.loc.start.column;
+          const absPos = remapPosition(relLine, relCol, templateBlock.loc.start);
+
+          if (expContent) {
+            const analysis = analyzeEventExpression(expContent);
+            const ident = analysis.identifier;
+            if (ident) {
+              referencedIdentifiersInTemplate.add(ident);
+            }
+
+            if (definedIdentifiers.has(ident)) {
+              validHandlers.push({
+                event: fullEvent,
+                handlerName: ident,
+                line: absPos.line,
+                status: 'valid',
+                source: scriptDeclaredFunctions.has(ident) ? 'local-function' : 'import',
+              });
+            } else {
+              brokenHandlers.push({
+                event: fullEvent,
+                handlerName: ident || expContent,
+                line: absPos.line,
+                status: 'broken',
+                source: 'unresolved',
+              });
+            }
+          }
+        }
       }
     }
 
@@ -340,3 +383,187 @@ export function formatEventHandlerAuditAsText(result: EventHandlerAuditResult): 
 
   return lines.join('\n');
 }
+
+export interface DetectReactivitySmellsOptions {
+  path: string;
+  code?: string;
+}
+
+/**
+ * Detects anti-patterns and performance smells in reactivity architectures:
+ * - Vue 3: Props destructuring losing reactivity, direct prop mutation via v-model or script
+ * - React: Inline function/object allocation inside .map() render loops, missing useEffect deps
+ */
+export async function detectReactivitySmells(
+  options: DetectReactivitySmellsOptions
+): Promise<ReactivitySmell[]> {
+  const smells: ReactivitySmell[] = [];
+  const filePath = options.path;
+  let code = options.code;
+
+  if (!code) {
+    try {
+      code = await fs.readFile(filePath, 'utf8');
+    } catch {
+      return smells;
+    }
+  }
+
+  const lines = code.split(/\r?\n/);
+  const ext = filePath.split('.').pop()?.toLowerCase();
+
+  // 1. Vue SFC Analysis
+  if (ext === 'vue') {
+    for (let i = 0; i < lines.length; i++) {
+      const lineNum = i + 1;
+      const line = lines[i];
+
+      // Smell A: Destructuring defineProps directly (loses reactivity in Vue 3)
+      const definePropsDestructMatch = line.match(/(?:const|let|var)\s*\{([^}]+)\}\s*=\s*defineProps/);
+      if (definePropsDestructMatch) {
+        const destructuredVars = definePropsDestructMatch[1].trim();
+        smells.push({
+          type: 'vue-props-destructure',
+          severity: 'warning',
+          message: `Destructuring '{ ${destructuredVars} }' directly from defineProps() causes loss of reactivity.`,
+          line: lineNum,
+          snippet: line.trim(),
+          recommendation: `Access via props object (e.g. 'props.${destructuredVars.split(',')[0].trim()}') or use 'toRefs(props)' to preserve reactivity.`,
+        });
+      }
+
+      // Smell B: Destructuring props object without toRefs
+      if (
+        /(?:const|let|var)\s*\{([^}]+)\}\s*=\s*props\b/.test(line) &&
+        !line.includes('toRefs') &&
+        !line.includes('storeToRefs')
+      ) {
+        const varsMatch = line.match(/(?:const|let|var)\s*\{([^}]+)\}\s*=\s*props\b/);
+        const vars = varsMatch ? varsMatch[1].trim() : 'props';
+        smells.push({
+          type: 'vue-props-destructure',
+          severity: 'warning',
+          message: `Destructuring '{ ${vars} }' directly from 'props' loses reactivity.`,
+          line: lineNum,
+          snippet: line.trim(),
+          recommendation: `Use 'const { ${vars} } = toRefs(props)' or reference 'props.${vars.split(',')[0].trim()}'.`,
+        });
+      }
+
+      // Smell C: Direct prop mutation in template (v-model="props.xxx" or v-model="$props.xxx")
+      const vModelPropMatch = line.match(/v-model(?::[A-Za-z0-9_-]+)?=["'](?:\$?props)\.([A-Za-z0-9_$.]+)["']/);
+      if (vModelPropMatch) {
+        const propName = vModelPropMatch[1];
+        smells.push({
+          type: 'vue-prop-mutation',
+          severity: 'error',
+          message: `Directly mutating prop via 'v-model="props.${propName}"' violates Vue's one-way data flow.`,
+          line: lineNum,
+          snippet: line.trim(),
+          recommendation: `Emit an event (e.g. '@update:modelValue') or use 'defineModel()' / computed setter instead of mutating the prop.`,
+        });
+      }
+
+      // Smell D: Direct prop mutation in script (props.foo = ... or $props.foo = ...)
+      const scriptPropMutMatch = line.match(/(?:\bprops|\$props)\.([A-Za-z0-9_$]+)\s*(?:=|\+\+|--|\+=|-=)/);
+      if (scriptPropMutMatch && !line.includes('defineProps') && !line.includes('==') && !line.includes('===')) {
+        const propName = scriptPropMutMatch[1];
+        smells.push({
+          type: 'vue-prop-mutation',
+          severity: 'error',
+          message: `Direct mutation of prop '${propName}' in script violates one-way data flow.`,
+          line: lineNum,
+          snippet: line.trim(),
+          recommendation: `Emit an event to the parent component rather than mutating the prop directly.`,
+        });
+      }
+    }
+  }
+
+  // 2. React / JSX / TSX Analysis
+  if (ext === 'jsx' || ext === 'tsx' || ext === 'js' || ext === 'ts') {
+    let inMapBlock = false;
+    let mapStartLine = 0;
+
+    for (let i = 0; i < lines.length; i++) {
+      const lineNum = i + 1;
+      const line = lines[i];
+
+      if (/\.(?:map|flatMap)\s*\(\s*(?:\([^)]*\)|[A-Za-z0-9_$]+)\s*=>/.test(line)) {
+        inMapBlock = true;
+        mapStartLine = lineNum;
+      }
+
+      if (inMapBlock) {
+        // Smell A: Inline function handlers inside loop rendering custom components
+        const inlineHandlerMatch = line.match(/<[A-Z][A-Za-z0-9_]*[^>]*?(?:on[A-Z][A-Za-z0-9]*)=\{(?:\([^)]*\)|[A-Za-z0-9_$]+)\s*=>/);
+        if (inlineHandlerMatch) {
+          smells.push({
+            type: 'react-inline-in-loop',
+            severity: 'warning',
+            message: `Inline arrow function callback allocated inside .map() render loop causes unnecessary re-renders.`,
+            line: lineNum,
+            snippet: line.trim(),
+            recommendation: `Extract item action handler, pass ID to child component callback, or wrap child in React.memo with useCallback.`,
+          });
+        }
+
+        // Smell B: Inline object / style literal inside loop rendering custom components
+        const inlineObjMatch = line.match(/<[A-Z][A-Za-z0-9_]*[^>]*?[a-zA-Z0-9_-]+=\{\{\s*[^}]+\s*\}\}/);
+        if (inlineObjMatch) {
+          smells.push({
+            type: 'react-inline-in-loop',
+            severity: 'warning',
+            message: `Inline object literal passed as prop inside .map() loop creates new object references every render.`,
+            line: lineNum,
+            snippet: line.trim(),
+            recommendation: `Hoist static style/config objects outside the render loop or memoize.`,
+          });
+        }
+
+        if (lineNum > mapStartLine + 30 || (line.includes(');') && inMapBlock)) {
+          inMapBlock = false;
+        }
+      }
+
+      // Smell C: useEffect hook without dependency array
+      const useEffectNoDeps = line.match(/useEffect\s*\(\s*(?:\(\)\s*=>|function\s*\(\))\s*\{/);
+      if (useEffectNoDeps && !line.includes(', [')) {
+        const followingLines = lines.slice(i, Math.min(i + 15, lines.length)).join('\n');
+        if (/\}\s*\)/.test(followingLines) && !/\}\s*,\s*\[/.test(followingLines)) {
+          smells.push({
+            type: 'general',
+            severity: 'warning',
+            message: `useEffect hook called without a dependency array runs on EVERY single render.`,
+            line: lineNum,
+            snippet: line.trim(),
+            recommendation: `Add a dependency array '[]' or specify reactive dependencies.`,
+          });
+        }
+      }
+    }
+  }
+
+  return smells;
+}
+
+/**
+ * Formats reactivity smells into a concise, readable diagnostic text block.
+ */
+export function formatReactivitySmellsAsText(smells: ReactivitySmell[]): string {
+  if (!smells || smells.length === 0) {
+    return '✅ No reactivity smells detected.';
+  }
+
+  const lines: string[] = [`Reactivity Smells (${smells.length} detected):`];
+  for (const s of smells) {
+    const icon = s.severity === 'error' ? '❌' : '⚠️';
+    lines.push(`  ${icon} [${s.severity.toUpperCase()}] Line ${s.line}: ${s.message}`);
+    if (s.snippet) {
+      lines.push(`     Code: \`${s.snippet}\``);
+    }
+    lines.push(`     Fix: ${s.recommendation}`);
+  }
+  return lines.join('\n');
+}
+

@@ -267,7 +267,15 @@ export function isBinaryExecutionError(err: unknown): boolean {
 export async function executeAstGrep(options: AstGrepQueryOptions): Promise<RawMatch[]> {
   const bin = resolveAstGrepBinary();
   const isCmd = bin.endsWith('.cmd') || bin.endsWith('.bat');
-  const lang = options.language || 'ts';
+  let lang = options.language || 'ts';
+  if (lang === 'vue' || lang === 'astro' || lang === 'auto') {
+    const checkText = options.pattern || options.code || '';
+    if (/^\s*<[A-Za-z0-9_$-]/.test(checkText) || checkText.includes('</') || checkText.endsWith('/>')) {
+      lang = 'html';
+    } else {
+      lang = 'ts';
+    }
+  }
   const isRule = Boolean(options.rule);
 
   const args: string[] = isRule ? ['scan'] : ['run'];
@@ -413,9 +421,13 @@ export async function executeAstGrep(options: AstGrepQueryOptions): Promise<RawM
  * Dumps the CST of a code snippet.
  */
 export async function dumpSyntaxTree(code: string, language: string = 'ts'): Promise<string> {
+  let lang = language;
+  if (lang === 'vue' || lang === 'astro' || lang === 'auto') {
+    lang = (/^\s*<[A-Za-z0-9_$-]/.test(code) || code.includes('</') || code.endsWith('/>')) ? 'html' : 'ts';
+  }
   const bin = resolveAstGrepBinary();
   const isCmd = bin.endsWith('.cmd') || bin.endsWith('.bat');
-  const args = ['run', '--pattern', code, '--lang', language, '--debug-query=cst', '--stdin'];
+  const args = ['run', '--pattern', code, '--lang', lang, '--debug-query=cst', '--stdin'];
 
   return new Promise((resolve, reject) => {
     let stderr = '';

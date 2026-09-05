@@ -72,7 +72,37 @@ export async function detectRouteFramework(
 ): Promise<{ framework: RouteFramework; baseDir: string }> {
   const normTarget = resolve(targetPath);
 
-  // 1. Next.js App Router
+  const hasNuxtConfig =
+    existsSync(join(normTarget, 'nuxt.config.ts')) ||
+    existsSync(join(normTarget, 'nuxt.config.js')) ||
+    existsSync(join(normTarget, 'app.vue'));
+  const hasAstroConfig =
+    existsSync(join(normTarget, 'astro.config.mjs')) ||
+    existsSync(join(normTarget, 'astro.config.ts'));
+  const hasNextConfig =
+    existsSync(join(normTarget, 'next.config.js')) ||
+    existsSync(join(normTarget, 'next.config.mjs')) ||
+    existsSync(join(normTarget, 'next.config.ts'));
+
+  // 1. Nuxt 3 (if nuxt config or app.vue is present)
+  if (hasNuxtConfig) {
+    for (const candidate of [join(normTarget, 'pages'), join(normTarget, 'src', 'pages')]) {
+      if (existsSync(candidate)) {
+        return { framework: 'nuxt', baseDir: candidate };
+      }
+    }
+  }
+
+  // 2. Astro (if astro config is present)
+  if (hasAstroConfig) {
+    for (const candidate of [join(normTarget, 'src', 'pages'), join(normTarget, 'pages')]) {
+      if (existsSync(candidate)) {
+        return { framework: 'astro', baseDir: candidate };
+      }
+    }
+  }
+
+  // 3. Next.js App Router
   for (const candidate of [join(normTarget, 'app'), join(normTarget, 'src', 'app')]) {
     if (existsSync(candidate)) {
       const files = await collectFiles(candidate);
@@ -88,29 +118,30 @@ export async function detectRouteFramework(
     }
   }
 
-  // 2. Inertia.js (Laravel + Vue/React)
+  // 4. Inertia.js (Laravel + Vue/React in resources/js/Pages)
   for (const candidate of [
     join(normTarget, 'resources', 'js', 'Pages'),
     join(normTarget, 'resources', 'js', 'pages'),
-    join(normTarget, 'Pages'),
   ]) {
     if (existsSync(candidate)) {
       return { framework: 'inertia', baseDir: candidate };
     }
   }
 
-  // 3. Nuxt 3
-  for (const candidate of [join(normTarget, 'pages'), join(normTarget, 'src', 'pages')]) {
-    if (existsSync(candidate)) {
-      const files = await collectFiles(candidate);
-      const hasVuePages = files.some((f) => f.endsWith('.vue'));
-      if (hasVuePages) {
-        return { framework: 'nuxt', baseDir: candidate };
+  // 5. Nuxt 3 fallback (check for .vue files in pages directory)
+  if (!hasNextConfig) {
+    for (const candidate of [join(normTarget, 'pages'), join(normTarget, 'src', 'pages')]) {
+      if (existsSync(candidate)) {
+        const files = await collectFiles(candidate);
+        const hasVuePages = files.some((f) => f.endsWith('.vue'));
+        if (hasVuePages) {
+          return { framework: 'nuxt', baseDir: candidate };
+        }
       }
     }
   }
 
-  // 4. Astro
+  // 6. Astro fallback
   for (const candidate of [join(normTarget, 'src', 'pages'), join(normTarget, 'pages')]) {
     if (existsSync(candidate)) {
       const files = await collectFiles(candidate);
@@ -121,11 +152,17 @@ export async function detectRouteFramework(
     }
   }
 
-  // 5. Next.js Pages Router
+  // 7. Next.js Pages Router
   for (const candidate of [join(normTarget, 'pages'), join(normTarget, 'src', 'pages')]) {
     if (existsSync(candidate)) {
       return { framework: 'next-pages', baseDir: candidate };
     }
+  }
+
+  // 8. Standalone Inertia root Pages directory (if not Nuxt/Next)
+  const rootPages = join(normTarget, 'Pages');
+  if (!hasNuxtConfig && !hasNextConfig && existsSync(rootPages)) {
+    return { framework: 'inertia', baseDir: rootPages };
   }
 
   // 6. Direct folder check if user targeted a specific routes/pages directory
@@ -303,15 +340,44 @@ async function scanInertiaPages(baseDir: string): Promise<RouteInfo[]> {
     const rel = relative(baseDir, file).replace(/\\/g, '/');
     const cleanRel = rel.replace(/\.[a-z0-9]+$/, '');
 
-    // Standard Inertia page naming: e.g. "Dashboard" -> "/dashboard", "Penjualan/Index" -> "/penjualan"
-    let routePath =
-      '/' +
-      cleanRel
-        .split('/')
-        .map((seg) => (seg === 'Index' ? '' : seg.toLowerCase()))
-        .filter(Boolean)
-        .join('/');
+    // Ignore sub-components, private partials, and files starting with _
+    // E.g. "Penjualan/Partials/CustomerSection.vue", "Partials/...", "Components/...", "_Modal.vue"
+    const segments = cleanRel.split('/');
+    const isPrivateOrPartial = segments.some((seg) => {
+      const lower = seg.toLowerCase();
+      return (
+        lower === 'partials' ||
+        lower === 'components' ||
+        lower === 'private' ||
+        seg.startsWith('_')
+      );
+    });
+    if (isPrivateOrPartial) continue;
 
+    // Standard Inertia page naming: e.g. "Dashboard" -> "/dashboard", "Penjualan/Index" -> "/penjualan"
+    // Applies Laravel RESTful resource conventions:
+    // - "Services/Show" or "Services/Detail" -> "/services/[id]"
+    // - "Services/Edit" -> "/services/[id]/edit"
+    // - Retains custom brackets if present: "Services/[slug]" -> "/services/[slug]"
+    const mappedSegments: string[] = [];
+    for (let i = 0; i < segments.length; i++) {
+      const seg = segments[i];
+      const isLast = i === segments.length - 1;
+
+      if (seg === 'Index') {
+        continue;
+      } else if (isLast && (seg === 'Show' || seg === 'Detail')) {
+        mappedSegments.push('[id]');
+      } else if (isLast && seg === 'Edit') {
+        mappedSegments.push('[id]', 'edit');
+      } else if (seg.startsWith('[') && seg.endsWith(']')) {
+        mappedSegments.push(seg);
+      } else {
+        mappedSegments.push(seg.toLowerCase());
+      }
+    }
+
+    let routePath = '/' + mappedSegments.filter(Boolean).join('/');
     if (!routePath) routePath = '/';
 
     // Extract layout imported inside the Inertia page

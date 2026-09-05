@@ -14,6 +14,11 @@ import type {
   ComponentTreeNode,
   ComponentTreeOptions,
   ComponentTreeResult,
+  ContextDependencyGraph,
+  ContextDependencyNode,
+  ContextDependencyRelation,
+  PassedPropInfo,
+  PropsDrillingAlert,
 } from '../types';
 
 interface ExtractedImport {
@@ -29,40 +34,11 @@ const NAMED_IMPORT_BLOCK_PATTERN = /\{([^}]+)\}/;
 const NAMED_IMPORT_ITEM_PATTERN = /^([A-Za-z0-9_$]+)(?:\s+as\s+([A-Za-z0-9_$]+))?$/;
 const DYNAMIC_IMPORT_PATTERN =
   /(?:const|let|var)\s+([A-Za-z0-9_$]+)\s*=\s*(?:defineAsyncComponent|lazy|dynamic)\s*\(\s*(?:\(\)\s*=>\s*)?import\s*\(\s*['"]([^'"]+)['"]\s*\)\s*\)/g;
+const INLINE_ASYNC_COMPONENT_PATTERN =
+  /([A-Za-z0-9_$]+)\s*:\s*(?:defineAsyncComponent|lazy|dynamic)\s*\(\s*(?:\(\)\s*=>\s*)?import\s*\(\s*['"]([^'"]+)['"]\s*\)\s*\)/g;
 
-/**
- * Discovers the project root directory by walking up looking for config/lock markers.
- */
-export function findProjectRoot(fromPath: string): string {
-  let dir = dirname(resolve(fromPath));
-  const markers = [
-    'package.json',
-    'jsconfig.json',
-    'tsconfig.json',
-    'nuxt.config.ts',
-    'nuxt.config.js',
-    'next.config.js',
-    'next.config.mjs',
-    'next.config.ts',
-    'astro.config.mjs',
-    'vite.config.ts',
-    'vite.config.js',
-    '.git',
-  ];
-
-  while (true) {
-    for (const marker of markers) {
-      if (existsSync(join(dir, marker))) {
-        return dir;
-      }
-    }
-    const parent = dirname(dir);
-    if (parent === dir) break;
-    dir = parent;
-  }
-
-  return dirname(resolve(fromPath));
-}
+import { findProjectRoot } from './path-resolver';
+export { findProjectRoot };
 
 /**
  * Builds an index of available component files in the project for auto-import resolution.
@@ -91,6 +67,7 @@ export async function buildComponentCatalog(rootDir: string): Promise<Map<string
 
 /**
  * Extracts custom component tags rendered in a template or JSX (e.g. <AppHeader>, <app-button>).
+ * Also resolves dynamic components rendered via Vue/Nuxt `<component :is="...">` and dictionary maps.
  */
 export function extractRenderedCustomTags(content: string): string[] {
   const tags = new Set<string>();
@@ -98,7 +75,155 @@ export function extractRenderedCustomTags(content: string): string[] {
   for (const match of content.matchAll(tagRegex)) {
     tags.add(match[1]);
   }
+
+  // 1. Vue/Nuxt dynamic component: <component :is="DirectComponent" />
+  const directIsRegex = /<component\s+[^>]*?(?::|v-bind:)is=["']([A-Z][A-Za-z0-9_$]*)["']/g;
+  for (const m of content.matchAll(directIsRegex)) {
+    tags.add(m[1]);
+  }
+
+  // 2. Vue/Nuxt dynamic component map: <component :is="mapVar[key]" /> or :is="mapVar.key"
+  const dynamicMapRegex = /<component\s+[^>]*?(?::|v-bind:)is=["']([A-Za-z0-9_$]+)(?:\[|\.)/g;
+  for (const m of content.matchAll(dynamicMapRegex)) {
+    const mapVarName = m[1];
+    const dictDeclRegex = new RegExp(
+      `(?:const|let|var)\\s+${escapeRegExp(mapVarName)}\\s*(?::\\s*[^=]+)?=\\s*\\{([\\s\\S]*?)\\}`,
+      'm'
+    );
+    const dictMatch = content.match(dictDeclRegex);
+    if (dictMatch && dictMatch[1]) {
+      const dictBody = dictMatch[1];
+      const valueRegex = /:\s*([A-Z][A-Za-z0-9_$]*)/g;
+      for (const vm of dictBody.matchAll(valueRegex)) {
+        tags.add(vm[1]);
+      }
+    }
+  }
+
+  // 3. React / Next.js / Astro dynamic component map: const DynamicComp = mapVar[key]; ... <DynamicComp
+  const reactMapRegex = /(?:const|let|var)\s+([A-Z][A-Za-z0-9_$]*)\s*=\s*([A-Za-z0-9_$]+)\[/g;
+  for (const rm of content.matchAll(reactMapRegex)) {
+    const renderedVar = rm[1];
+    const mapVarName = rm[2];
+    if (new RegExp(`<${escapeRegExp(renderedVar)}[\\s/>]`).test(content)) {
+      const dictDeclRegex = new RegExp(
+        `(?:const|let|var)\\s+${escapeRegExp(mapVarName)}\\s*(?::\\s*[^=]+)?=\\s*\\{([\\s\\S]*?)\\}`,
+        'm'
+      );
+      const dictMatch = content.match(dictDeclRegex);
+      if (dictMatch && dictMatch[1]) {
+        const dictBody = dictMatch[1];
+        const valueRegex = /:\s*([A-Z][A-Za-z0-9_$]*)/g;
+        for (const vm of dictBody.matchAll(valueRegex)) {
+          tags.add(vm[1]);
+        }
+      }
+    }
+  }
+
+  // 4. React createElement / jsx runtime: createElement(Component) or jsx(Component)
+  const createElementRegex = /\b(?:React\.createElement|createElement|jsx|jsxs)\(\s*([A-Z][A-Za-z0-9_$]*)/g;
+  for (const cm of content.matchAll(createElementRegex)) {
+    tags.add(cm[1]);
+  }
+
   return Array.from(tags);
+}
+
+export interface DynamicComponentWarning {
+  component: string;
+  warning: string;
+}
+
+/**
+ * Extracts warnings for dynamic or polymorphic components that cannot be statically resolved.
+ */
+export function extractDynamicWarnings(
+  content: string,
+  resolvedCustomTags: Set<string>
+): DynamicComponentWarning[] {
+  const warnings: DynamicComponentWarning[] = [];
+
+  // 1. Vue dynamic component: <component :is="expr" /> where expr is not resolved statically
+  const anyIsRegex = /<component\s+[^>]*?(?::|v-bind:)is=["']([^"']+)["']/g;
+  for (const m of content.matchAll(anyIsRegex)) {
+    const rawExpr = m[1].trim();
+    if (!resolvedCustomTags.has(rawExpr)) {
+      warnings.push({
+        component: `<component :is="${rawExpr}">`,
+        warning: `Dynamic/polymorphic component (:is="${rawExpr}") cannot be statically resolved`,
+      });
+    }
+  }
+
+  // 2. Radix UI / Headless / Polymorphic asChild pattern
+  const asChildRegex = /<([A-Z][A-Za-z0-9_.]*)\s+[^>]*?\basChild\b/g;
+  for (const m of content.matchAll(asChildRegex)) {
+    warnings.push({
+      component: `<${m[1]} asChild>`,
+      warning: `Polymorphic delegate component (<${m[1]} asChild>) cannot be statically resolved`,
+    });
+  }
+
+  return warnings;
+}
+
+/**
+ * Extracts props and dynamic bindings passed to child components in a template or JSX.
+ */
+export function extractPassedProps(parentContent: string, componentNames: string[]): PassedPropInfo[] {
+  const passedProps: PassedPropInfo[] = [];
+  const seenProps = new Set<string>();
+
+  for (const name of componentNames) {
+    const tagRegex = new RegExp(`<${escapeRegExp(name)}([\\s\\S]*?)(?:\\/?>|>)`, 'i');
+    const match = parentContent.match(tagRegex);
+    if (!match) continue;
+
+    const attributesBlock = match[1];
+
+    // 1. Dynamic bindings: :propName="expression" or v-bind:propName="expression"
+    const dynamicBindingRegex = /(?::|v-bind:)([A-Za-z0-9_-]+)=["']([^"']+)["']/g;
+    for (const b of attributesBlock.matchAll(dynamicBindingRegex)) {
+      const propName = b[1];
+      const expression = b[2].trim();
+      if (!seenProps.has(propName)) {
+        seenProps.add(propName);
+        passedProps.push({ propName, expression });
+      }
+    }
+
+    // 2. Two-way bindings: v-model="expression" or v-model:propName="expression"
+    const vModelRegex = /v-model(?::([A-Za-z0-9_-]+))?=["']([^"']+)["']/g;
+    for (const b of attributesBlock.matchAll(vModelRegex)) {
+      const propName = b[1] ? `v-model:${b[1]}` : 'v-model';
+      const expression = b[2].trim();
+      if (!seenProps.has(propName)) {
+        seenProps.add(propName);
+        passedProps.push({ propName, expression });
+      }
+    }
+
+    // 3. Static string attributes (excluding non-prop HTML standard attributes)
+    const staticPropRegex = /\b([A-Za-z0-9_-]+)=["']([^"']+)["']/g;
+    for (const s of attributesBlock.matchAll(staticPropRegex)) {
+      const propName = s[1];
+      if (
+        propName.startsWith(':') ||
+        propName.startsWith('v-') ||
+        propName.startsWith('@') ||
+        ['class', 'style', 'id', 'ref', 'key'].includes(propName)
+      ) {
+        continue;
+      }
+      if (!seenProps.has(propName)) {
+        seenProps.add(propName);
+        passedProps.push({ propName, expression: `"${s[2]}"` });
+      }
+    }
+  }
+
+  return passedProps;
 }
 
 /**
@@ -272,17 +397,80 @@ export function extractLocalImports(
     }
   }
 
+  const inlineDynamicMatches = content.matchAll(INLINE_ASYNC_COMPONENT_PATTERN);
+  for (const m of inlineDynamicMatches) {
+    const source = m[2].trim();
+    const isLocal =
+      source.startsWith('.') ||
+      source.startsWith('/') ||
+      (aliasConfig?.isAlias(source) ?? false);
+    if (isLocal) {
+      imports.push({
+        name: m[1],
+        alias: undefined,
+        source,
+        isDynamic: true,
+      });
+    }
+  }
+
   return imports;
 }
 
 /**
- * Checks if a single candidate name appears as a rendered tag (or `:is` binding) in the content.
+ * Checks if a single candidate name appears as a rendered tag, `:is` binding, or inside a dynamic map.
  */
 function isCandidateRendered(content: string, candidate: string): boolean {
+  // 1. Direct tag (<Candidate or <Namespace.Candidate) or Vue :is string literal
   const tagPattern = new RegExp(
     `<(?:[A-Za-z0-9_$.]+\\.)?${escapeRegExp(candidate)}[\\s/>]|:is=['"]${escapeRegExp(candidate)}['"]`
   );
-  return tagPattern.test(content);
+  if (tagPattern.test(content)) {
+    return true;
+  }
+
+  // 2. Vue/Nuxt dynamic component :is binding (e.g. <component :is="mapVar[key]" />)
+  if (/(?::|v-bind:)is=/.test(content)) {
+    const objValPattern = new RegExp(
+      `(?::\\s*|{\\s*|,\\s*)${escapeRegExp(candidate)}\\s*[,}]`
+    );
+    if (objValPattern.test(content)) {
+      return true;
+    }
+  }
+
+  // 3. React / Next.js / Astro dynamic component map: const Comp = mapVar[key]; <Comp ... />
+  const dynamicJsxVarRegex = /(?:const|let|var)\s+([A-Z][A-Za-z0-9_$]*)\s*=\s*([A-Za-z0-9_$]+)\[/g;
+  for (const match of content.matchAll(dynamicJsxVarRegex)) {
+    const jsxVar = match[1];
+    const mapName = match[2];
+    if (new RegExp(`<${escapeRegExp(jsxVar)}[\\s/>]`).test(content)) {
+      const mapDeclRegex = new RegExp(
+        `(?:const|let|var)\\s+${escapeRegExp(mapName)}\\s*(?::\\s*[^=]+)?=\\s*\\{[\\s\\S]*?\\b${escapeRegExp(candidate)}\\b[\\s\\S]*?\\}`
+      );
+      if (mapDeclRegex.test(content)) {
+        return true;
+      }
+    }
+  }
+
+  // 4. Direct JSX map property access: <COMPONENT_MAP.candidate /> or <map.Candidate />
+  const dotAccessPattern = new RegExp(
+    `<[A-Za-z0-9_$]+\\.${escapeRegExp(candidate)}[\\s/>]`
+  );
+  if (dotAccessPattern.test(content)) {
+    return true;
+  }
+
+  // 5. React.createElement / jsx(Candidate)
+  const createElementPattern = new RegExp(
+    `\\b(?:React\\.createElement|createElement|jsx|jsxs)\\(\\s*${escapeRegExp(candidate)}\\b`
+  );
+  if (createElementPattern.test(content)) {
+    return true;
+  }
+
+  return false;
 }
 
 /**
@@ -302,6 +490,169 @@ function isPathInScope(filePath: string, scopeFilters: string[]): boolean {
   if (scopeFilters.length === 0) return true;
   const norm = filePath.replace(/\\/g, '/');
   return scopeFilters.some((f) => norm.includes(f) || norm.startsWith(f));
+}
+
+interface PropTracker {
+  propName: string;
+  expression: string;
+  originComponent: string;
+  drilledThrough: string[];
+}
+
+/**
+ * Traverses the resolved component tree to identify props forwarded through
+ * 1 or more intermediate components without local consumption or transformation.
+ */
+export function detectPropsDrilling(root: ComponentTreeNode): PropsDrillingAlert[] {
+  const alerts: PropsDrillingAlert[] = [];
+  const seen = new Set<string>();
+
+  function traverse(node: ComponentTreeNode, activeChains: PropTracker[]) {
+    for (const child of node.children) {
+      const nextChains: PropTracker[] = [];
+
+      if (child.passedProps && child.passedProps.length > 0) {
+        for (const p of child.passedProps) {
+          const propName = p.propName;
+          const expr = (p.expression || '').trim();
+
+          // Check if this prop matches or forwards an active prop chain received by `node`
+          const matchedChain = activeChains.find((c) => {
+            if (c.propName === propName) return true;
+            if (c.propName === expr) return true;
+            if (c.expression && c.expression === expr) return true;
+            if (expr.startsWith(`${c.propName}.`) || expr.startsWith(`${c.propName}[`)) return true;
+            if (c.expression && (expr.startsWith(`${c.expression}.`) || expr.startsWith(`${c.expression}[`))) return true;
+            return false;
+          });
+
+          if (matchedChain) {
+            const drilledThrough = [...matchedChain.drilledThrough, node.component];
+            const depth = drilledThrough.length + 1;
+
+            if (depth >= 2) {
+              const alertKey = `${matchedChain.originComponent}:${drilledThrough.join('>')}:${child.component}:${propName}`;
+              if (!seen.has(alertKey)) {
+                seen.add(alertKey);
+                alerts.push({
+                  prop: p.expression || propName,
+                  origin: matchedChain.originComponent,
+                  drilledThrough,
+                  target: child.component,
+                  depth,
+                  recommendation:
+                    depth >= 3
+                      ? `Consider Pinia/Zustand or Provide/Inject to eliminate deep ${depth}-level props drilling`
+                      : `Provide/Inject or Composable candidate instead of drilling through ${node.component}`,
+                });
+              }
+            }
+
+            nextChains.push({
+              propName,
+              expression: expr || matchedChain.expression,
+              originComponent: matchedChain.originComponent,
+              drilledThrough,
+            });
+          } else {
+            // New prop chain originating from `node`
+            nextChains.push({
+              propName,
+              expression: expr,
+              originComponent: node.component,
+              drilledThrough: [],
+            });
+          }
+        }
+      }
+
+      traverse(child, nextChains);
+    }
+  }
+
+  traverse(root, []);
+  return alerts;
+}
+
+/**
+ * Extracts provide/inject (Vue) and Context Provider/useContext (React) nodes from component code.
+ */
+export function extractComponentContextNodes(
+  filePath: string,
+  content: string
+): { providers: ContextDependencyNode[]; consumers: ContextDependencyNode[] } {
+  const providers: ContextDependencyNode[] = [];
+  const consumers: ContextDependencyNode[] = [];
+  const component = basename(filePath);
+
+  const getLine = (offset: number) => {
+    let line = 1;
+    for (let i = 0; i < offset && i < content.length; i++) {
+      if (content.charCodeAt(i) === 10) line++;
+    }
+    return line;
+  };
+
+  // 1. Vue provide: provide('key', val) or provide(KEY_SYM, val)
+  const vueProvideRegex = /\bprovide\s*\(\s*(?:['"]([^'"]+)['"]|([A-Za-z0-9_$]+))\s*,\s*([^)]*)\)/g;
+  for (const m of content.matchAll(vueProvideRegex)) {
+    const key = m[1] || m[2];
+    if (key) {
+      providers.push({
+        key,
+        type: 'vue-provide',
+        component,
+        filePath,
+        line: getLine(m.index || 0),
+        valueSnippet: m[3]?.trim(),
+      });
+    }
+  }
+
+  // 2. Vue inject: inject('key') or inject(KEY_SYM)
+  const vueInjectRegex = /\binject\s*(?:<[^>]+>)?\s*\(\s*(?:['"]([^'"]+)['"]|([A-Za-z0-9_$]+))\s*(?:,[^)]*)?\)/g;
+  for (const m of content.matchAll(vueInjectRegex)) {
+    const key = m[1] || m[2];
+    if (key) {
+      consumers.push({
+        key,
+        type: 'vue-inject',
+        component,
+        filePath,
+        line: getLine(m.index || 0),
+      });
+    }
+  }
+
+  // 3. React <Context.Provider value={...}>
+  const reactProviderRegex = /<([A-Za-z0-9_$]+?)(?:Context)?\.Provider\b(?:[^>]*?value=\{([^}]+)\})?/g;
+  for (const m of content.matchAll(reactProviderRegex)) {
+    const key = m[1].endsWith('Context') ? m[1] : `${m[1]}Context`;
+    providers.push({
+      key,
+      type: 'react-provider',
+      component,
+      filePath,
+      line: getLine(m.index || 0),
+      valueSnippet: m[2]?.trim(),
+    });
+  }
+
+  // 4. React useContext(Context)
+  const reactUseContextRegex = /\buseContext\s*(?:<[^>]+>)?\s*\(\s*([A-Za-z0-9_$]+)\s*\)/g;
+  for (const m of content.matchAll(reactUseContextRegex)) {
+    const rawKey = m[1];
+    const key = rawKey.endsWith('Context') ? rawKey : `${rawKey}Context`;
+    consumers.push({
+      key,
+      type: 'react-use-context',
+      component,
+      filePath,
+      line: getLine(m.index || 0),
+    });
+  }
+
+  return { providers, consumers };
 }
 
 /**
@@ -328,10 +679,16 @@ async function getDownwardComponentTree(
   const allComponents = new Set<string>();
   let maxDepthReached = 0;
 
+  const allProviders: ContextDependencyNode[] = [];
+  const allConsumers: ContextDependencyNode[] = [];
+  const contextRelations: ContextDependencyRelation[] = [];
+  const danglingConsumers: ContextDependencyRelation[] = [];
+
   async function buildSubTree(
     filePath: string,
     depth: number,
-    visitedInBranch: Set<string>
+    visitedInBranch: Set<string>,
+    availableProviders: ContextDependencyNode[] = []
   ): Promise<ComponentTreeNode> {
     const normPath = normalize(filePath);
     const componentName = basename(filePath);
@@ -358,6 +715,34 @@ async function getDownwardComponentTree(
       content = await fs.readFile(normPath, 'utf8');
     } catch {
       return node;
+    }
+
+    // Extract Context Nodes (Vue provide/inject & React Context)
+    const { providers: localProviders, consumers: localConsumers } = extractComponentContextNodes(normPath, content);
+    allProviders.push(...localProviders);
+    allConsumers.push(...localConsumers);
+
+    const currentAvailableProviders = [...availableProviders, ...localProviders];
+
+    for (const consumer of localConsumers) {
+      const matchedProvider = currentAvailableProviders.find((p) => p.key === consumer.key);
+      if (matchedProvider) {
+        contextRelations.push({
+          key: consumer.key,
+          provider: matchedProvider,
+          consumer,
+          isCoveredInTree: true,
+        });
+      } else {
+        const relation: ContextDependencyRelation = {
+          key: consumer.key,
+          consumer,
+          isCoveredInTree: false,
+          warning: `Context key '${consumer.key}' consumed in '${consumer.component}' has no matching Provider in this hierarchy branch. May cause runtime undefined context when rendered directly.`,
+        };
+        contextRelations.push(relation);
+        danglingConsumers.push(relation);
+      }
     }
 
     const imports = extractLocalImports(content, aliasConfig);
@@ -392,11 +777,19 @@ async function getDownwardComponentTree(
         const childNode = await buildSubTree(
           childNorm,
           depth + 1,
-          new Set(visitedInBranch)
+          new Set(visitedInBranch),
+          currentAvailableProviders
         );
         childNode.alias = imp.alias;
         childNode.isDynamic = imp.isDynamic;
         childNode.isPage = isPageFile(childNorm);
+
+        const candidateNames = getCandidateNames(imp.alias || imp.name);
+        const passedProps = extractPassedProps(content, candidateNames);
+        if (passedProps.length > 0) {
+          childNode.passedProps = passedProps;
+        }
+
         node.children.push(childNode);
       }
     }
@@ -412,26 +805,108 @@ async function getDownwardComponentTree(
           const childNode = await buildSubTree(
             catalogTarget,
             depth + 1,
-            new Set(visitedInBranch)
+            new Set(visitedInBranch),
+            currentAvailableProviders
           );
           childNode.isAutoImported = true;
           childNode.isPage = isPageFile(catalogTarget);
+
+          const candidateNames = getCandidateNames(tag);
+          const passedProps = extractPassedProps(content, candidateNames);
+          if (passedProps.length > 0) {
+            childNode.passedProps = passedProps;
+          }
+
           node.children.push(childNode);
         }
       }
     }
 
+    // 3. Dynamic component fallback tags (e.g. from dynamic map evaluation)
+    for (const tag of customTags) {
+      const isRegistered =
+        imports.some((i) => (i.alias || i.name) === tag) || catalog.has(tag.toLowerCase());
+      if (isRegistered || tag.startsWith('app-') || tag.startsWith('base-')) {
+        continue;
+      }
+      node.children.push({
+        component: tag,
+        filePath: 'dynamic-unresolved',
+        warning: 'Dynamic component rendered via variable/computed (definition unresolved)',
+        depth: depth + 1,
+        children: [],
+      });
+    }
+
+    // 4. Dynamic and polymorphic component warning nodes
+    const dynamicWarnings = extractDynamicWarnings(content, new Set(customTags));
+    for (const dyn of dynamicWarnings) {
+      node.children.push({
+        component: dyn.component,
+        filePath: '',
+        isDynamic: true,
+        warning: dyn.warning,
+        depth: depth + 1,
+        children: [],
+      });
+    }
+
     return node;
   }
 
-  const rootNode = await buildSubTree(entryPath, 0, new Set());
+  const rootNode = await buildSubTree(entryPath, 0, new Set(), []);
+
+  const contextGraph: ContextDependencyGraph | undefined =
+    allProviders.length > 0 || allConsumers.length > 0
+      ? {
+          providers: allProviders,
+          consumers: allConsumers,
+          relations: contextRelations,
+          danglingConsumers,
+        }
+      : undefined;
 
   return {
     root: rootNode,
     totalComponents: allComponents.size,
     maxDepthReached,
     direction: 'downward',
+    propsDrilling: detectPropsDrilling(rootNode),
+    contextGraph,
   };
+}
+
+/**
+ * Resolves a disambiguated component name for upward traversal trees.
+ * When a file is a page (or generic index.*), includes the domain/parent folder (e.g. "Penjualan/Index.vue").
+ */
+export function getDisambiguatedComponentName(filePath: string, isPage: boolean): string {
+  const norm = filePath.replace(/\\/g, '/');
+  const base = basename(filePath);
+
+  if (isPage) {
+    const pageMatch = norm.match(/(?:^|\/)(?:pages|Pages|views|Views|routes)\/(.+)$/);
+    if (pageMatch && pageMatch[1]) {
+      return pageMatch[1];
+    }
+    const appMatch = norm.match(/(?:^|\/)app\/(.+)$/);
+    if (appMatch && appMatch[1]) {
+      return appMatch[1];
+    }
+    const dir = basename(dirname(filePath));
+    if (dir && dir !== '.' && dir !== '/' && dir !== '\\') {
+      return `${dir}/${base}`;
+    }
+  }
+
+  if (/^index\.[a-z0-9]+$/i.test(base)) {
+    const dir = basename(dirname(filePath));
+    if (dir && dir !== '.' && dir !== '/' && dir !== '\\') {
+      return `${dir}/${base}`;
+    }
+  }
+
+  return base;
 }
 
 /**
@@ -530,7 +1005,8 @@ export async function getUpwardComponentTree(
     visitedInBranch: Set<string>
   ): Promise<ComponentTreeNode> {
     const normPath = normalize(currentPath);
-    const componentName = basename(currentPath);
+    const isPage = isPageFile(normPath);
+    const componentName = depth === 0 ? basename(currentPath) : getDisambiguatedComponentName(normPath, isPage);
     allConsumers.add(normPath);
     if (depth > maxDepthReached) maxDepthReached = depth;
 
@@ -542,7 +1018,7 @@ export async function getUpwardComponentTree(
       component: componentName,
       filePath: normPath,
       depth,
-      isPage: isPageFile(normPath),
+      isPage,
       isExternalScope: !isInDomain ? true : undefined,
       children: [],
     };
@@ -572,6 +1048,7 @@ export async function getUpwardComponentTree(
     totalComponents: allConsumers.size,
     maxDepthReached,
     direction: 'upward',
+    propsDrilling: [],
   };
 }
 
@@ -665,10 +1142,17 @@ export function formatTreeAsText(result: ComponentTreeResult): string {
       const branch = isLast ? '└── ' : '├── ';
       let label = node.component;
       if (node.alias) label += ` (alias: ${node.alias})`;
-      if (node.isDynamic) label += ` [dynamic/lazy]`;
+      if (node.passedProps && node.passedProps.length > 0) {
+        const propsStr = node.passedProps
+          .map((p) => (p.expression ? `${p.propName} <- ${p.expression}` : p.propName))
+          .join(', ');
+        label += ` [props: ${propsStr}]`;
+      }
+      if (node.isDynamic && !node.warning) label += ` [dynamic/lazy]`;
       if (node.isAutoImported) label += ` [auto-imported]`;
       if (node.isPage) label += ` [Page]`;
       if (node.isExternalScope) label += ` [external-domain/package]`;
+      if (node.warning) label += ` ⚠️ ${node.warning}`;
       text += `${prefix}${branch}${label}\n`;
     }
 
@@ -685,6 +1169,33 @@ export function formatTreeAsText(result: ComponentTreeResult): string {
   const treeText = renderNode(result.root);
   const summaryType = isUpward ? 'consumers' : 'components';
   const summary = `\nSummary: ${result.totalComponents} ${summaryType} explored, max depth: ${result.maxDepthReached}`;
-  return header + treeText + summary;
+  let output = header + treeText + summary;
+
+  if (result.propsDrilling && result.propsDrilling.length > 0) {
+    output += `\n\nProps Drilling Diagnostics (${result.propsDrilling.length} detected):`;
+    for (const alert of result.propsDrilling) {
+      const chain = [alert.origin, ...alert.drilledThrough, alert.target].join(' ➔ ');
+      output += `\n  ⚠️  [depth: ${alert.depth}] prop "${alert.prop}": ${chain}`;
+      output += `\n      Recommendation: ${alert.recommendation}`;
+    }
+  }
+
+  if (result.contextGraph) {
+    const { providers, consumers, danglingConsumers } = result.contextGraph;
+    if (providers.length > 0 || consumers.length > 0) {
+      output += `\n\nImplicit Context Graph (Provide/Inject & React Context):`;
+      output += `\n  - Providers declared (${providers.length}): ${providers.map((p) => `"${p.key}" in ${p.component}`).join(', ') || '(none)'}`;
+      output += `\n  - Consumers injected (${consumers.length}): ${consumers.map((c) => `"${c.key}" in ${c.component}`).join(', ') || '(none)'}`;
+
+      if (danglingConsumers.length > 0) {
+        output += `\n  ⚠️  Dangling Context Warnings (${danglingConsumers.length} detected):`;
+        for (const dc of danglingConsumers) {
+          output += `\n      • Context "${dc.key}" consumed in ${dc.consumer.component} (Line ${dc.consumer.line}) has NO matching Provider in ancestor hierarchy!`;
+        }
+      }
+    }
+  }
+
+  return output;
 }
 

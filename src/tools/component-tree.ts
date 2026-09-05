@@ -1,10 +1,11 @@
 import { getComponentTree, formatTreeAsText } from '../engine/tree';
+import { resolveWorkspacePath, resolveProjectRoot } from '../engine/path-resolver';
 import type { McpToolDefinition } from './types';
 
 export const componentTreeTool: McpToolDefinition = {
   name: 'get_component_tree',
   description:
-    'Resolves component hierarchy and call graph trees starting from a root file, layout, or directly from a URL route path (e.g. "/dashboard"). Supports downward traversal (root -> children) to see the sub-tree, or upward traversal (leaf -> consumers/pages) to inspect upstream blast radius.',
+    'Resolves component hierarchy trees from a root file or URL route (e.g. "/dashboard"). Supports downward trees with props drilling (>2 levels) and dangling context alerts (provide/inject & useContext), or upward traversal for blast radius.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -48,6 +49,11 @@ export const componentTreeTool: McpToolDefinition = {
         type: 'string',
         description: 'Optional package/domain scope filter (e.g. "apps/web", "features/auth")',
       },
+      include_props: {
+        type: 'boolean',
+        description:
+          'When true (default), displays props and data bindings passed down to child components [props: childProp <- parentExpr]',
+      },
       output_format: {
         type: 'string',
         enum: ['text', 'json'],
@@ -57,8 +63,10 @@ export const componentTreeTool: McpToolDefinition = {
   },
   handler: async (args: Record<string, any>) => {
     const routePath = (args.route || args.route_path) ? String(args.route || args.route_path) : undefined;
-    const entryPath = args.entry_path ? String(args.entry_path) : undefined;
-    const targetPath = (args.target_path || args.path) ? String(args.target_path || args.path) : undefined;
+    const rawTargetPath = (args.target_path || args.path) ? String(args.target_path || args.path) : undefined;
+    const resolvedTargetPath = resolveProjectRoot(rawTargetPath);
+    const entryPath = args.entry_path ? resolveWorkspacePath(String(args.entry_path), resolvedTargetPath) : undefined;
+    const targetPath = resolvedTargetPath;
 
     if (!entryPath && !routePath) {
       return {
@@ -81,6 +89,14 @@ export const componentTreeTool: McpToolDefinition = {
       aliasMap: args.alias_map as Record<string, string> | undefined,
       scopeFilter: args.scope_filter ? String(args.scope_filter) : undefined,
     });
+
+    if (args.include_props === false) {
+      const stripProps = (n: any) => {
+        delete n.passedProps;
+        n.children?.forEach(stripProps);
+      };
+      stripProps(tree.root);
+    }
 
     const isJson = args.output_format === 'json';
     return {

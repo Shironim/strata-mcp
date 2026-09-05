@@ -22,6 +22,8 @@ export * from './engine/routes';
 export * from './engine/database';
 export * from './engine/slicer';
 export * from './engine/reactivity';
+export * from './engine/style-audit';
+export * from './engine/path-resolver';
 export * from './adapters/factory';
 export * from './adapters/types';
 export * from './mcp';
