@@ -5,6 +5,7 @@ import {
   formatUnusedAsText,
   matchesGlob,
 } from '../../src/engine/audit';
+import { findSimilarTemplates } from '../../src/engine/template-similarity';
 import { createMcpServer } from '../../src/mcp';
 
 const FIXTURES_DIR = join(import.meta.dir, '../fixtures');
@@ -103,5 +104,23 @@ describe('Unused Components Audit Engine (Phase 4 RFC)', () => {
     const parsed = JSON.parse(res.content[0].text);
     expect(parsed.totalScanned).toBe(5);
     expect(parsed.unusedCount).toBe(0);
+  });
+
+  it('generates appropriate component extension recommendations based on cluster file types', async () => {
+    // Tests template similarity across React mock project
+    const reactAppDir = join(import.meta.dir, '../mock-projects/react-app');
+    const result = await findSimilarTemplates({
+      targetPath: reactAppDir,
+      threshold: 0.5,
+    });
+
+    expect(result.totalComponentsAudited).toBeGreaterThan(0);
+    // If any clusters are found in react-app, recommendations should not suggest .vue
+    for (const cluster of result.clusters) {
+      if (cluster.files.every((f) => f.endsWith('.tsx') || f.endsWith('.jsx'))) {
+        expect(cluster.recommendation).not.toContain('.vue');
+        expect(cluster.recommendation).toMatch(/\.(tsx|jsx)$/);
+      }
+    }
   });
 });

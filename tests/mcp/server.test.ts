@@ -348,6 +348,107 @@ describe('MCP Server & 5 Core Tools', () => {
       expect(response.isError).toBeFalsy();
       expect(response.content[0].text).toContain('Frontend Architecture & Health Audit');
     });
+
+    it('audits template structural similarity when target is similar-templates', async () => {
+      const server = createMcpServer();
+      const callHandler = (server as any)._requestHandlers?.get('tools/call');
+
+      const response = await callHandler({
+        method: 'tools/call',
+        params: {
+          name: 'audit_frontend',
+          arguments: {
+            target: 'similar-templates',
+            target_path: FIXTURES_DIR,
+          },
+        },
+      });
+
+      expect(response.isError).toBeFalsy();
+      expect(response.content[0].text).toContain('Template Similarity & Abstraction Opportunities');
+    });
+  });
+
+  describe('Core Tools Enhanced Capabilities (Breaking & Clean Specs)', () => {
+    it('find_code tolerates language: "vue" without ast-grep error', async () => {
+      const server = createMcpServer();
+      const callHandler = (server as any)._requestHandlers?.get('tools/call');
+
+      const response = await callHandler({
+        method: 'tools/call',
+        params: {
+          name: 'find_code',
+          arguments: {
+            pattern: 'ref($$$)',
+            path: FIXTURES_DIR,
+            language: 'vue',
+          },
+        },
+      });
+
+      expect(response.isError).toBeFalsy();
+    });
+
+    it('inspect_component extracts inferred props and global symbols', async () => {
+      const server = createMcpServer();
+      const callHandler = (server as any)._requestHandlers?.get('tools/call');
+
+      const response = await callHandler({
+        method: 'tools/call',
+        params: {
+          name: 'inspect_component',
+          arguments: {
+            path: join(FIXTURES_DIR, 'RuntimePropsButton.vue'),
+            infer_props: true,
+            resolve_globals: true,
+            output_format: 'json',
+          },
+        },
+      });
+
+      expect(response.isError).toBeFalsy();
+      const contract = JSON.parse(response.content[0].text);
+      expect(contract.props).toBeDefined();
+    });
+
+    it('get_component_tree supports include_props parameter', async () => {
+      const server = createMcpServer();
+      const callHandler = (server as any)._requestHandlers?.get('tools/call');
+
+      const response = await callHandler({
+        method: 'tools/call',
+        params: {
+          name: 'get_component_tree',
+          arguments: {
+            entry_path: join(FIXTURES_DIR, 'PageOne.vue'),
+            include_props: true,
+          },
+        },
+      });
+
+      expect(response.isError).toBeFalsy();
+      expect(response.content[0].text).toBeDefined();
+    });
+
+    it('trace_state supports role filter for mutators and readers', async () => {
+      const server = createMcpServer();
+      const callHandler = (server as any)._requestHandlers?.get('tools/call');
+
+      const response = await callHandler({
+        method: 'tools/call',
+        params: {
+          name: 'trace_state',
+          arguments: {
+            identifier: 'useCartStore',
+            target_path: FIXTURES_DIR,
+            role: 'all',
+          },
+        },
+      });
+
+      expect(response.isError).toBeFalsy();
+      expect(response.content[0].text).toContain('State Impact Analysis');
+    });
   });
 
   it('rejects unknown tool calls cleanly', async () => {

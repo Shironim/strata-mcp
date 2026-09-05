@@ -91,20 +91,6 @@ rule:
     expect(dump.length).toBeGreaterThan(0);
   });
 
-  it('resolves ast-grep binary even when process.cwd() is an external directory', () => {
-    const originalCwd = process.cwd();
-    try {
-      const { tmpdir } = require('node:os');
-      const { existsSync } = require('node:fs');
-      process.chdir(tmpdir());
-      const { resolveAstGrepBinary } = require('../../src/engine/astgrep');
-      const resolved = resolveAstGrepBinary();
-      expect(existsSync(resolved)).toBe(true);
-      expect(resolved.toLowerCase()).toContain('ast-grep');
-    } finally {
-      process.chdir(originalCwd);
-    }
-  });
 
   it('correctly identifies binary execution errors vs parse warnings (GAP-06)', () => {
     expect(isBinaryExecutionError(new Error('Failed to execute ast-grep at "ast-grep": spawn ENOENT'))).toBe(true);

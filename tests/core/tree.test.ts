@@ -61,6 +61,78 @@ describe('Component Hierarchy Tree & Graph Engine (Phase 3 RFC)', () => {
     expect(isRenderedInContent(vueTemplate, 'UnusedComponent')).toBe(false);
   });
 
+  it('checks if dynamic component maps are recognized across Vue, React, and Astro', () => {
+    // 1. Vue/Nuxt dynamic component map (:is="componentMap[tab]")
+    const vueDynamicMap = `
+      <template>
+        <component :is="componentMap[activeTab]" />
+      </template>
+      <script setup>
+      import LaptopSection from './LaptopSection.vue';
+      import PhoneSection from './PhoneSection.vue';
+      import UnusedSection from './UnusedSection.vue';
+
+      const componentMap = {
+        laptop: LaptopSection,
+        phone: PhoneSection,
+      };
+      </script>
+    `;
+    expect(isRenderedInContent(vueDynamicMap, 'LaptopSection')).toBe(true);
+    expect(isRenderedInContent(vueDynamicMap, 'PhoneSection')).toBe(true);
+    expect(isRenderedInContent(vueDynamicMap, 'UnusedSection')).toBe(false);
+
+    // 2. React / Next.js dynamic JSX lookup map
+    const reactDynamicMap = `
+      import WidgetA from './WidgetA';
+      import WidgetB from './WidgetB';
+      import UnusedWidget from './UnusedWidget';
+
+      const WIDGETS: Record<string, React.ComponentType> = {
+        a: WidgetA,
+        b: WidgetB,
+      };
+
+      export default function Dashboard({ type }) {
+        const SelectedWidget = WIDGETS[type];
+        return <div><SelectedWidget /></div>;
+      }
+    `;
+    expect(isRenderedInContent(reactDynamicMap, 'WidgetA')).toBe(true);
+    expect(isRenderedInContent(reactDynamicMap, 'WidgetB')).toBe(true);
+    expect(isRenderedInContent(reactDynamicMap, 'UnusedWidget')).toBe(false);
+
+    // 3. React.createElement / jsx
+    const reactCreateElem = `
+      import DynamicModal from './DynamicModal';
+      export function renderModal() {
+        return React.createElement(DynamicModal, { open: true });
+      }
+    `;
+    expect(isRenderedInContent(reactCreateElem, 'DynamicModal')).toBe(true);
+
+    // 4. Astro frontmatter dynamic component map
+    const astroDynamicMap = `
+      ---
+      import HeroOne from './HeroOne.astro';
+      import HeroTwo from './HeroTwo.astro';
+      import UnusedHero from './UnusedHero.astro';
+
+      const HEROS = {
+        v1: HeroOne,
+        v2: HeroTwo,
+      };
+      const ActiveHero = HEROS[Astro.props.variant];
+      ---
+      <section>
+        <ActiveHero />
+      </section>
+    `;
+    expect(isRenderedInContent(astroDynamicMap, 'HeroOne')).toBe(true);
+    expect(isRenderedInContent(astroDynamicMap, 'HeroTwo')).toBe(true);
+    expect(isRenderedInContent(astroDynamicMap, 'UnusedHero')).toBe(false);
+  });
+
   it('resolves downward component tree for Vue CatalogView.vue with barrel, alias, and lazy imports', async () => {
     const entryPath = join(VUE_APP_DIR, 'src/views/CatalogView.vue');
     const result = await getComponentTree({
@@ -156,5 +228,27 @@ describe('Component Hierarchy Tree & Graph Engine (Phase 3 RFC)', () => {
     const parsed = JSON.parse(res.content[0].text);
     expect(parsed.root.component).toBe('CatalogView.vue');
     expect(parsed.totalComponents).toBeGreaterThanOrEqual(4);
+  });
+
+  it('detects unresolved dynamic and polymorphic components and flags warnings', async () => {
+    const { extractDynamicWarnings } = await import('../../src/engine/tree');
+    const templateContent = `
+      <template>
+        <div>
+          <component :is="activeTab" />
+          <Dialog.Trigger asChild>
+            <button>Open</button>
+          </Dialog.Trigger>
+          <StaticHeader />
+        </div>
+      </template>
+    `;
+
+    const warnings = extractDynamicWarnings(templateContent, new Set(['StaticHeader']));
+    expect(warnings.length).toBe(2);
+    expect(warnings[0].component).toBe('<component :is="activeTab">');
+    expect(warnings[0].warning).toContain('Dynamic/polymorphic component');
+    expect(warnings[1].component).toBe('<Dialog.Trigger asChild>');
+    expect(warnings[1].warning).toContain('Polymorphic delegate component');
   });
 });

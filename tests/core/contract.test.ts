@@ -5,6 +5,7 @@ import {
   formatContractAsText,
   detectFramework,
   extractSlotsFromTemplate,
+  extractStateDependencies,
 } from '../../src/engine/contract';
 import { createMcpServer } from '../../src/mcp';
 
@@ -141,5 +142,55 @@ describe('Component Contract Extractor (Phase 2 RFC)', () => {
     expect(parsed.component).toBe('NewButton');
     expect(parsed.framework).toBe('vue');
     expect(parsed.props[0].name).toBe('variant');
+  });
+
+  it('extracts cross-framework state dependencies including Inertia router, Next.js, and Nanostores', () => {
+    // 1. Inertia Vue 3 router import & mutation
+    const vueInertia = `
+      <script setup lang="ts">
+      import { router } from '@inertiajs/vue3';
+      function handleSubmit() {
+        router.post('/login', {});
+      }
+      </script>
+    `;
+    const resVue = extractStateDependencies(vueInertia, 'vue');
+    expect(resVue.composables).toContain('router');
+
+    // 2. Inertia React router import & mutation
+    const reactInertia = `
+      import { router } from '@inertiajs/react';
+      export default function Form() {
+        return <button onClick={() => router.delete('/items/1')}>Delete</button>;
+      }
+    `;
+    const resReact = extractStateDependencies(reactInertia, 'react');
+    expect(resReact.composables).toContain('router');
+
+    // 3. Next.js navigation hooks
+    const nextJsPage = `
+      'use client';
+      import { useRouter, usePathname } from 'next/navigation';
+      export default function Page() {
+        const router = useRouter();
+        const pathname = usePathname();
+        return <div>{pathname}</div>;
+      }
+    `;
+    const resNext = extractStateDependencies(nextJsPage, 'react');
+    expect(resNext.composables).toContain('useRouter');
+    expect(resNext.composables).toContain('usePathname');
+
+    // 4. Nanostores atom extraction (Astro / React / Vue)
+    const astroPage = `
+      ---
+      import { useStore } from '@nanostores/react';
+      import { $cart } from '../stores/cart';
+      const cart = useStore($cart);
+      ---
+      <div>Items: {cart.length}</div>
+    `;
+    const resAstro = extractStateDependencies(astroPage, 'astro');
+    expect(resAstro.stores).toContain('$cart');
   });
 });
