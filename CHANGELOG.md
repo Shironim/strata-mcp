@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] - 2026-09-06
+
+### Added
+
+- **Native MCP Protocol Instructions (`src/instructions.ts`, `src/mcp.ts`)**:
+  - Implemented first-class Model Context Protocol specification `instructions` support within `ServerOptions` to automatically deliver high-density runtime guidance to MCP clients (Antigravity, Claude, Cursor) upon initial `initialize` handshake.
+  - Zero-configuration agent guidance: automatically provisions and synchronizes `instructions.md` within MCP client tool cache directories without requiring postinstall scripts or manual user setup.
+- **The Dual-Phase Bookends Architecture (`src/instructions.ts`)**:
+  - Codified the end-to-end frontend agent lifecycle into two deterministic, token-efficient gates:
+    - **Phase 1: Pre-Flight Discovery**: Mandates contract extraction (`inspect_component`), precision function slicing (`symbol`), and upward blast radius calculation (`get_component_tree(direction: "upward")`) before modifying source files, eliminating blind whole-file dumping.
+    - **Phase 2: Post-Flight Verification Gate**: Establishes mandatory post-modification verification via `inspect_component(audit_events: true)` to automatically catch broken template-to-script event bindings, abandoned dead handlers, and reactivity leaks (e.g., Vue 3 prop destructuring without `toRefs`).
+- **Batch-First Editing & Anti-Micro-Verification Protocol (`src/instructions.ts`)**:
+  - Enforced strict agent execution heuristics prohibiting repetitive verification loops between micro-edits; requires agents to complete all planned AST edits in a target batch before triggering a single, decisive post-flight semantic verification pass.
+- **Persistent Knowledge Graph Analytics Guidance (`src/instructions.ts`, `src/engine/database.ts`)**:
+  - Added comprehensive architectural guidance for leveraging the underlying SQLite graph (`.strata/graph.db`): documented direct SQL query patterns across indexed tables (`files`, `components`, `edges`, `state_deps`, `routes`) for custom ad-hoc metrics including God component detection (high fan-out), foundation blast radius (high fan-in), and recursive CTE upward dependency walks.
+
 ## [0.7.0] - 2026-09-05
 
 ### Added

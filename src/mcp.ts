@@ -8,6 +8,7 @@ import {
 import { verifyAstGrepBinary } from './engine/astgrep';
 import { TOOLS, findTool } from './tools';
 import { main as runCli } from './cli';
+import { STRATA_INSTRUCTIONS } from './instructions';
 
 export { TOOLS, findTool } from './tools';
 
@@ -15,12 +16,13 @@ export function createMcpServer(): Server {
   const server = new Server(
     {
       name: 'strata-mcp',
-      version: '0.7.0',
+      version: '0.7.1',
     },
     {
       capabilities: {
         tools: {},
       },
+      instructions: STRATA_INSTRUCTIONS,
     }
   );
 
