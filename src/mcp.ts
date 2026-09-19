@@ -19,7 +19,7 @@ export function createMcpServer(): Server {
   const server = new Server(
     {
       name: 'strata-mcp',
-      version: '0.7.3',
+      version: '0.7.4',
     },
     {
       capabilities: {
