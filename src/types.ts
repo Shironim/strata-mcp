@@ -111,10 +111,21 @@ export interface ComponentVariantsInfo {
   defaultVariants?: Record<string, string>;
 }
 
+export type StateAccessMode = 'read' | 'write' | 'watch';
+
+export interface StateDependencyItem {
+  kind: 'store' | 'context' | 'composable';
+  identifier: string;
+  accessMode: StateAccessMode;
+  lineNumber?: number;
+  usageSnippet?: string;
+}
+
 export interface StateDependencyInfo {
   stores: string[];
   contexts: string[];
   composables: string[];
+  items?: StateDependencyItem[];
 }
 
 export interface DataDependencyInfo {
@@ -357,6 +368,8 @@ export interface StateImpactConsumer {
   kind: 'store' | 'context' | 'composable';
   identifier: string;
   role?: 'mutator' | 'reader';
+  accessMode?: StateAccessMode;
+  lineNumber?: number;
   actionsCalled?: string[];
   usageSnippet?: string;
 }
@@ -610,6 +623,16 @@ export interface ContextDependencyGraph {
   danglingConsumers: ContextDependencyRelation[];
 }
 
+export interface EdgePayload {
+  passedProps?: PassedPropInfo[];
+  listenedEvents?: string[];
+  slots?: string[];
+  contexts?: {
+    provided?: ContextDependencyNode[];
+    consumed?: ContextDependencyNode[];
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Zero-Bloat Bundle & Island Architecture Awareness
 // ---------------------------------------------------------------------------
@@ -630,6 +653,88 @@ export interface BundleAuditResult {
   totalWarnings: number;
   _meta?: EngineMetadata;
 }
+
+// ---------------------------------------------------------------------------
+// Prescriptive Refactoring & Automated Patch Plan
+// ---------------------------------------------------------------------------
+
+export type PatchRefactorType =
+  | 'rename_prop'
+  | 'remove_prop'
+  | 'rename_event'
+  | 'remove_event';
+
+export interface ComponentPatchItem {
+  file: string;
+  line: number;
+  column: number;
+  targetTag: string;
+  oldSnippet: string;
+  newSnippet: string;
+  description: string;
+}
+
+export interface PatchPlanOptions {
+  componentPath: string;
+  refactorType: PatchRefactorType;
+  oldName: string;
+  newName?: string;
+  targetPath?: string;
+}
+
+export interface PatchPlanResult {
+  component: string;
+  refactorType: PatchRefactorType;
+  oldName: string;
+  newName?: string;
+  totalConsumersAudited: number;
+  totalPatches: number;
+  patches: ComponentPatchItem[];
+  _meta?: EngineMetadata;
+}
+
+// ---------------------------------------------------------------------------
+// Cross-Boundary API Contract Extractor
+// ---------------------------------------------------------------------------
+
+export type ApiMethod =
+  | 'GET'
+  | 'POST'
+  | 'PUT'
+  | 'PATCH'
+  | 'DELETE'
+  | 'HEAD'
+  | 'OPTIONS'
+  | 'UNKNOWN';
+
+export type ApiClientKind =
+  | 'fetch'
+  | 'axios'
+  | 'useFetch'
+  | 'useQuery'
+  | 'useMutation'
+  | '$fetch'
+  | 'custom';
+
+export interface ApiContractItem {
+  file: string;
+  line: number;
+  column: number;
+  endpoint: string;
+  method: ApiMethod;
+  clientKind: ApiClientKind;
+  payloadParams?: string[];
+  callerFunction?: string;
+}
+
+export interface ApiContractResult {
+  workspaceRoot: string;
+  totalEndpointsFound: number;
+  endpoints: ApiContractItem[];
+  endpointSummary: Record<string, { methods: ApiMethod[]; callers: string[] }>;
+  _meta?: EngineMetadata;
+}
+
 
 
 

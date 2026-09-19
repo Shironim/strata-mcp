@@ -210,7 +210,14 @@ export async function auditEventHandlers(
           const dir = prop as DirectiveNode;
           const eventName = dir.arg && 'content' in dir.arg ? dir.arg.content : 'unknown';
           const modifierList = (dir.modifiers ?? [])
-            .map((m: any) => (typeof m === 'string' ? m : m?.content ?? m?.name ?? ''))
+            .map((m: unknown) => {
+              if (typeof m === 'string') return m;
+              if (m && typeof m === 'object') {
+                const node = m as { content?: string; name?: string };
+                return node.content ?? node.name ?? '';
+              }
+              return '';
+            })
             .filter(Boolean);
           const modifiers = modifierList.length ? `.${modifierList.join('.')}` : '';
           const fullEvent = `${eventName}${modifiers}`;
