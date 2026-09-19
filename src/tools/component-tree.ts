@@ -1,5 +1,6 @@
 import { getComponentTree, formatTreeAsText } from '../engine/tree';
 import { resolveWorkspacePath, resolveProjectRoot } from '../engine/path-resolver';
+import type { ComponentTreeNode, ComponentTreeOptions } from '../types';
 import type { McpToolDefinition } from './types';
 
 export const componentTreeTool: McpToolDefinition = {
@@ -85,14 +86,14 @@ export const componentTreeTool: McpToolDefinition = {
       routePath,
       targetPath,
       maxDepth: args.max_depth ? Number(args.max_depth) : undefined,
-      direction: args.direction as any,
+      direction: args.direction as ComponentTreeOptions['direction'],
       aliasMap: args.alias_map as Record<string, string> | undefined,
       scopeFilter: args.scope_filter ? String(args.scope_filter) : undefined,
     });
 
     if (args.include_props === false) {
-      const stripProps = (n: any) => {
-        delete n.passedProps;
+      const stripProps = (n: ComponentTreeNode) => {
+        delete (n as { passedProps?: unknown }).passedProps;
         n.children?.forEach(stripProps);
       };
       stripProps(tree.root);

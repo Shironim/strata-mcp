@@ -7,6 +7,10 @@ import {
 } from '../engine/template-similarity';
 import { auditDesignTokens, formatDesignAuditAsText } from '../engine/style-audit';
 import { auditBundleHealth, formatBundleAuditAsText } from '../engine/bundle-audit';
+import {
+  extractWorkspaceApiContracts,
+  formatApiContractsAsText,
+} from '../engine/api-contract';
 import { resolveProjectRoot } from '../engine/path-resolver';
 import type { RouteFramework } from '../types';
 import type { McpToolDefinition } from './types';
@@ -33,9 +37,18 @@ export const auditFrontendTool: McpToolDefinition = {
       },
       target: {
         type: 'string',
-        enum: ['routes', 'dead-components', 'dead-state', 'similar-templates', 'design-tokens', 'bundle-health', 'all'],
+        enum: [
+          'routes',
+          'dead-components',
+          'dead-state',
+          'similar-templates',
+          'design-tokens',
+          'bundle-health',
+          'api-contracts',
+          'all',
+        ],
         description:
-          'Audit target: "routes" (URL topology), "dead-components" (orphan components), "dead-state" (unused composables/stores), "similar-templates" (redundant template structure & DRY opportunities), "design-tokens" (arbitrary Tailwind colors/spacing, radius consistency & a11y violations), "bundle-health" (heavy eager imports & eager island hydration), or "all" for a full architectural diagnostic (default: "all")',
+          'Audit target: "routes" (URL topology), "dead-components" (orphan components), "dead-state" (unused composables/stores), "similar-templates" (redundant template structure & DRY opportunities), "design-tokens" (arbitrary Tailwind colors/spacing, radius consistency & a11y violations), "bundle-health" (heavy eager imports & eager island hydration), "api-contracts" (outbound API endpoints & caller mapping), or "all" for a full architectural diagnostic (default: "all")',
       },
       threshold: {
         type: 'number',
@@ -158,11 +171,7 @@ export const auditFrontendTool: McpToolDefinition = {
     }
 
     if (target === 'bundle-health' || target === 'bundle') {
-      const result = await auditBundleHealth({
-        targetPath,
-        scopePath,
-        excludeDirs,
-      });
+      const result = await auditBundleHealth({ targetPath, scopePath });
       return {
         content: [
           {
@@ -173,8 +182,20 @@ export const auditFrontendTool: McpToolDefinition = {
       };
     }
 
+    if (target === 'api-contracts' || target === 'api' || target === 'apis') {
+      const result = await extractWorkspaceApiContracts({ targetPath, scopePath });
+      return {
+        content: [
+          {
+            type: 'text',
+            text: isJson ? JSON.stringify(result, null, 2) : formatApiContractsAsText(result),
+          },
+        ],
+      };
+    }
+
     // target === 'all'
-    const [routes, unusedComponents, unusedState, similarTemplates, designSystemAudit, bundleAudit] = await Promise.all([
+    const [routes, unusedComponents, unusedState, similarTemplates, designSystemAudit, bundleAudit, apiContracts] = await Promise.all([
       scanRoutes({
         targetPath,
         frameworkHint: args.framework as RouteFramework | undefined,
@@ -201,6 +222,10 @@ export const auditFrontendTool: McpToolDefinition = {
         scopePath,
         excludeDirs,
       }),
+      extractWorkspaceApiContracts({
+        targetPath,
+        scopePath,
+      }),
     ]);
 
     if (isJson) {
@@ -208,7 +233,7 @@ export const auditFrontendTool: McpToolDefinition = {
         content: [
           {
             type: 'text',
-            text: JSON.stringify({ routes, unusedComponents, unusedState, similarTemplates, designSystemAudit, bundleAudit }, null, 2),
+            text: JSON.stringify({ routes, unusedComponents, unusedState, similarTemplates, designSystemAudit, bundleAudit, apiContracts }, null, 2),
           },
         ],
       };
@@ -228,6 +253,8 @@ export const auditFrontendTool: McpToolDefinition = {
       formatDesignAuditAsText(designSystemAudit),
       '\n---\n',
       formatBundleAuditAsText(bundleAudit),
+      '\n---\n',
+      formatApiContractsAsText(apiContracts),
     ].join('\n');
 
     return {
