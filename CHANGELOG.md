@@ -5,6 +5,89 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.3] - 2026-09-19
+
+### Added
+
+- **CLI Initialization & Agent Harness Provisioning (`strata init`)**:
+  - Added `strata init [target-dir]` command to bootstrap agent harness rules, skills, and hooks directly into `.agents/`:
+    - `.agents/rules/strata-frontend.md`: Deterministic tool routing matrix for AI Coding Agents.
+    - `.agents/skills/strata-inspect/SKILL.md`: Dedicated agent skill for deep AST component inspection.
+    - `.agents/hooks/strata-post-write.sh`: Post-write delta-sync hook for automated cache refresh.
+  - Automatically ensures `.strata/` is registered in `.gitignore` and performs initial SQLite workspace indexing.
+- **Automated In-Process Background Sync (`src/mcp.ts`)**:
+  - Activated non-blocking `WorkspaceWatcher` in-process during MCP server lifecycle (`runServer()`), guaranteeing real-time SQLite cache freshness without requiring manual sync commands.
+- **Full CLI-to-MCP Feature Parity (`get_routes` & `get_api_contracts`)**:
+  - `get_routes`: First-class MCP tool exposing frontend route discovery across Next.js (App/Pages router), Nuxt, Astro, and Laravel Inertia.
+  - `get_api_contracts`: First-class MCP tool extracting outbound HTTP API calls (Inertia, TanStack Query, Axios, fetch) and request payload keys.
+- **Explicit Daemon Subcommand (`strata serve`) & TTY Safeguard**:
+  - Added dedicated `serve` subcommand to launch the stdio MCP server for AI coding agents.
+  - Implemented TTY terminal detection on the `strata` root binary: interactive terminal invocations without arguments now immediately print CLI help instead of hanging on `stdin`.
+- **Dual-Sink Telemetry & Analytics Engine (`src/engine/telemetry.ts`)**:
+  - Implemented `StrataTelemetry` recording JSON Lines events to `.strata/strata.log` with automatic 2MB file rotation (`strata.log.1`).
+  - Measures execution latency (`duration_ms`), output metrics (`bytes_out`, `lines_out`), and emits `slow_tool_execution` alerts to `stderr`.
+
+### Fixed
+
+- **Astro Frontmatter AST Parser (`src/engine/parsers/contract-astro.ts`)**:
+  - Fixed missing `executeAstGrep` import that caused silent runtime `ReferenceError` during Astro frontmatter interface extraction.
+- **SQLite Database Path SSOT Alignment**:
+  - Standardized internal log messages and unit test assertions from `.strata/cache.db` to `.strata/graph.db`.
+- **Engine Response Metadata Version**:
+  - Aligned `_meta.version` across `src/engine/patch-plan.ts` and `src/engine/api-contract.ts` to `0.7.3`.
+
+### Removed
+
+- **Internal Debugging Utility (`strata dump`)**:
+  - Removed obsolete `dump` command and `dumpSyntaxTree` export from public CLI interface for production-grade cleanliness.
+
+## [0.7.2] - 2026-09-19
+
+### Added
+
+- **Realtime Watcher & Instant Cache Daemon (`src/engine/watcher.ts`, `src/engine/database.ts`)**:
+  - Implemented zero-dependency reactive filesystem watcher using native `node:fs.watch({ recursive: true })` with sub-100ms debouncing, hot-cache updates, and graceful kernel fallback for Linux inotify limits (`ENOSPC`).
+  - Event storm circuit breaker: automatically collates mass file modifications (`> 50 files` during `git checkout`, `git pull`, or stash operations) into a single atomic SQLite batch transaction (`BEGIN IMMEDIATE ... COMMIT`).
+  - Transient write protection: ignores 0-byte in-flight file states and preserves valid cached ASTs during active user typing syntax errors.
+  - Route topology cascade: automatically detects and synchronizes page/route changes (`isPageFile`) to invalidate routing tables.
+  - High-concurrency database hardening: added `PRAGMA busy_timeout = 5000;` alongside `PRAGMA journal_mode = WAL;` to prevent `SQLITE_BUSY` lock contention during concurrent background writes and foreground MCP tool queries.
+- **Prescriptive Refactoring & Automated Patch Plan Generator (`generate_patch_plan`, `src/engine/patch-plan.ts`, `src/tools/patch-plan.ts`)**:
+  - Introduced the `generate_patch_plan` MCP tool and engine: transforms descriptive blast radius into prescriptive, AST-level code replacement recommendations.
+  - Supports `rename_prop`, `remove_prop`, `rename_event`, and `remove_event` operations across Vue SFC (`@vue/compiler-dom`), Astro templates, and JSX/TSX.
+  - Automatically matches PascalCase vs kebab-case tag variants (`<UserCard>` vs `<user-card>`), static attributes, dynamic bindings (`:prop`, `v-bind:prop`), and event directives (`@event`, `v-on:event`).
+  - Outputs exact file paths, line numbers, column numbers, current code snippets, and replacement snippets ready for autonomous agent execution.
+- **Cross-Boundary API Contract Extractor (`src/engine/api-contract.ts`, `src/tools/audit-frontend.ts`)**:
+  - Outbound network contract extraction: structural detection for Axios (`axios.<method>`), Nuxt/ofetch (`$fetch`, `useFetch`), native `fetch`, and TanStack Query (`useQuery`, `useMutation`).
+  - Smart endpoint URL canonicalization: normalizes template string interpolations (e.g. `` `/api/users/${id}` `` -> `/api/users/:id`) and string concatenations into standard REST parameters.
+  - Integrated into `audit_frontend`: accessible standalone via `target: "api-contracts"` or aggregated within `target: "all"`.
+
+### Changed
+
+- **Engine Core Modularization (Decomposed God Modules)**:
+  - Decomposed three large engine modules (`contract.ts`, `tree.ts`, and `database.ts`) into granular, single-responsibility submodules adhering to strict SRP:
+    - **`src/engine/storage/`**:
+      - `schema.ts`: SQLite DDL tables, indexes, auto-migrations, WAL connection registry, and layout detection.
+      - `delta-sync.ts`: Delta mtime hashing, batch parser, atomic SQLite transaction committer, and sync orchestration.
+      - `blast-radius.ts`: Recursive SQLite CTE queries for upward blast radius and SQL anti-join for unused components.
+      - `state-storage.ts`: Aggregation of state mutator/reader consumers, dead state finder, and multi-hop state dependency tracing.
+    - **`src/engine/graph/`**:
+      - `path-helpers.ts`: Static/dynamic import parsing, alias resolution, and barrel re-export chasing.
+      - `props-drilling.ts`: Multi-level props drilling alerts and passed props AST extraction.
+      - `context-analyzer.ts`: Implicit context graph mapping (Vue `provide`/`inject` & React `createContext`/`useContext`).
+      - `downward-traversal.ts`: Downward component tree construction from pages/roots and formatted text rendering.
+      - `upward-traversal.ts`: Upward ancestor tree traversal and component name disambiguation.
+    - **`src/engine/parsers/`**:
+      - `contract-vue.ts`: Vue SFC AST parsing (`@vue/compiler-dom`), template slots, runtime props, `withDefaults`, and composables.
+      - `contract-react.ts`: React JSX/TSX AST inspection, hooks, and event handler patterns.
+      - `contract-astro.ts`: Astro component frontmatter, slots, and props.
+      - `state-dependency.ts`: Framework-agnostic state (Pinia, Vuex, Zustand, Redux) and data dependency extraction.
+  - **100% Backward-Compatible Facade Contracts**:
+    - Maintained `src/engine/database.ts`, `src/engine/tree.ts`, and `src/engine/contract.ts` as lightweight re-export facades to guarantee zero breaking changes for existing tools and test suites.
+- **Engine & Tool Type Safety Hardening**:
+  - Eliminated explicit `any` usage in [`src/engine/database.ts`](file:///home/shironim/Project/strata-mcp/src/engine/database.ts) by strictly typing cache payloads with [`ComponentContract`](file:///home/shironim/Project/strata-mcp/src/types.ts).
+  - Enhanced [`src/tools/component-tree.ts`](file:///home/shironim/Project/strata-mcp/src/tools/component-tree.ts) with [`ComponentTreeNode`](file:///home/shironim/Project/strata-mcp/src/types.ts) traversal contracts and strict `ComponentTreeOptions['direction']` typing.
+  - Hardened Vue modifier mapping in [`src/engine/reactivity.ts`](file:///home/shironim/Project/strata-mcp/src/engine/reactivity.ts) using type narrowing over `unknown`.
+
 ## [0.7.1] - 2026-09-06
 
 ### Added
