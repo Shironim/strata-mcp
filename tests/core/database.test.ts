@@ -1,7 +1,8 @@
-import { beforeAll, describe, expect, it } from 'bun:test';
+import { beforeAll, afterAll, describe, expect, it } from 'bun:test';
 import { existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import {
+  closeAllDatabases,
   formatStateImpactAsText,
   getWorkspaceDatabase,
   queryStateImpact,
@@ -14,6 +15,7 @@ const FIXTURES_DIR = join(import.meta.dir, '../fixtures');
 
 describe('Persistent SQLite Codebase Graph Cache Engine (bun:sqlite)', () => {
   beforeAll(() => {
+    closeAllDatabases();
     const dbDir = join(FIXTURES_DIR, '.strata');
     if (existsSync(dbDir)) {
       try {
@@ -22,6 +24,10 @@ describe('Persistent SQLite Codebase Graph Cache Engine (bun:sqlite)', () => {
         // Ignore file lock on Windows parallel runs
       }
     }
+  });
+
+  afterAll(() => {
+    closeAllDatabases();
   });
 
   it('initializes SQLite database in .strata with WAL mode and gitignore', () => {

@@ -13,7 +13,7 @@ describe('MCP Server & 5 Core Tools', () => {
     expect(listHandler).toBeDefined();
 
     const toolsResult = await listHandler({ method: 'tools/list', params: {} });
-    expect(toolsResult.tools.length).toBe(5);
+    expect(toolsResult.tools.length).toBe(8);
 
     const toolNames = toolsResult.tools.map((t: any) => t.name);
     expect(toolNames).toEqual([
@@ -22,6 +22,9 @@ describe('MCP Server & 5 Core Tools', () => {
       'get_component_tree',
       'trace_state',
       'audit_frontend',
+      'generate_patch_plan',
+      'get_routes',
+      'get_api_contracts',
     ]);
   });
 
