@@ -1,36 +1,42 @@
 #!/usr/bin/env bun
 import { existsSync, promises as fs } from 'node:fs';
 import { findCode, findCodeByRule, findComponentUsage, formatMatchesAsText } from './engine/search';
-import { dumpSyntaxTree } from './engine/astgrep';
 import { extractComponentContract, formatContractAsText } from './engine/contract';
 import { getComponentTree, formatTreeAsText } from './engine/tree';
 import { findUnusedComponents, formatUnusedAsText } from './engine/audit';
 import { scanRoutes, formatRoutesAsText } from './engine/routes';
+import { generatePatchPlan } from './engine/patch-plan';
+import { extractWorkspaceApiContracts, formatApiContractsAsText } from './engine/api-contract';
 import {
   formatStateImpactAsText,
   formatUnusedStateAsText,
   findUnusedState,
   queryStateImpact,
   syncWorkspace,
+  closeAllDatabases,
 } from './engine/database';
-import type { RouteFramework } from './types';
+import { handleStrataInit } from './cli/commands/init';
+import type { PatchRefactorType, RouteFramework } from './types';
 
 function printHelp() {
   console.log(`
 strata — Multi-Framework Frontend Structural Code Search & Intelligence CLI
 
 Usage:
+  strata serve [options]
+  strata init [target-dir]
   strata search <pattern> [options]
   strata find-component-usage <component-name> [options]
   strata contract <component-file> [options]
   strata tree [entry-file] [--route <path>] [options]
+  strata patch-plan <component-file> --refactor <type> --old <name> [--new <name>]
+  strata apis [target-dir] [options]
   strata routes [target-dir] [options]
   strata impact <state-identifier> [options]
   strata unused-state [target-dir] [options]
   strata sync [target-dir]
   strata unused [target-dir] [options]
   strata rule <rule-file-or-yaml> [options]
-  strata dump <code> [options]
 
 Options:
   --path <dir|file>       Target directory or file (default: .)
@@ -117,6 +123,18 @@ export async function main(argv: string[] = process.argv.slice(2)) {
   const isJson = Boolean(flags.json);
 
   try {
+    if (command === 'serve') {
+      const { runServer } = await import('./mcp');
+      await runServer();
+      return;
+    }
+
+    if (command === 'init') {
+      const initPath = positional[1] || targetPath;
+      await handleStrataInit({ cwd: initPath, force: Boolean(flags.force) });
+      return;
+    }
+
     if (command === 'search' || command === 'find') {
       const pattern = positional[1];
       if (!pattern) {
@@ -313,15 +331,53 @@ export async function main(argv: string[] = process.argv.slice(2)) {
       return;
     }
 
-    if (command === 'dump') {
-      const code = positional[1];
-      if (!code) {
-        console.error('Error: Code snippet is required.');
+    if (command === 'patch-plan' || command === 'patch') {
+      const componentPath = positional[1];
+      if (!componentPath) {
+        console.error('Error: Component file path is required for patch-plan (e.g. strata patch-plan src/Button.vue --refactor rename_prop --old type --new variant).');
         process.exit(1);
       }
 
-      const dump = await dumpSyntaxTree(code, (flags.lang as string) || 'ts');
-      console.log(dump);
+      const refactorType = (flags.refactor ?? flags['refactor-type'] ?? 'rename_prop') as PatchRefactorType;
+      const oldName = String(flags.old ?? flags['old-name'] ?? '');
+      const newName = flags.new ? String(flags.new) : (flags['new-name'] ? String(flags['new-name']) : undefined);
+
+      if (!oldName) {
+        console.error('Error: --old <name> is required.');
+        process.exit(1);
+      }
+
+      const result = await generatePatchPlan({
+        componentPath,
+        refactorType,
+        oldName,
+        newName,
+        targetPath,
+      });
+
+      if (isJson) {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        console.log(`\nPrescriptive Patch Plan: ${refactorType.toUpperCase()} on "${componentPath}"`);
+        console.log(`Audited ${result.totalConsumersAudited} consumers, found ${result.totalPatches} patches:\n`);
+        for (const patch of result.patches) {
+          console.log(`- ${patch.file}:${patch.line}:${patch.column} (<${patch.targetTag}>)`);
+          console.log(`  Current:  ${patch.oldSnippet}`);
+          console.log(`  Replace:  ${patch.newSnippet || '(remove)'}\n`);
+        }
+      }
+      return;
+    }
+
+    if (command === 'apis' || command === 'api-contracts') {
+      const scanPath = positional[1] || targetPath;
+      const result = await extractWorkspaceApiContracts({ targetPath: scanPath });
+
+      if (isJson) {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        console.log(formatApiContractsAsText(result));
+      }
       return;
     }
 
@@ -330,6 +386,8 @@ export async function main(argv: string[] = process.argv.slice(2)) {
   } catch (err) {
     console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
     process.exit(1);
+  } finally {
+    closeAllDatabases();
   }
 }
 

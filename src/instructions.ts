@@ -35,16 +35,20 @@ Always operate in two distinct phases:
 | **Audit Events & Reactivity** | \`inspect_component\` | \`path: "...", audit_events: true\` | Detect broken template-to-script handlers & Vue/React reactivity smells. |
 | **Downward Component Hierarchy** | \`get_component_tree\` | \`entry_path\` or \`route\`, \`direction: "downward"\` | Complete rendered child tree & props drilling detection. |
 | **Upward Blast Radius** | \`get_component_tree\` | \`entry_path: "...", direction: "upward"\` | All parent components and pages impacted by modifying a leaf file. |
+| **Route Map & Topology** | \`get_routes\` | \`targetPath?: "...", framework?: "next-app"|"nuxt"|"astro"|"inertia"\` | Instant file-based routing topology, layouts, dynamic parameters, and page handlers. |
+| **Outbound API Contracts** | \`get_api_contracts\` | \`targetPath?: "..."\` | Maps API endpoints, HTTP methods, TanStack/Inertia/Axios network boundaries, and payload contracts. |
 | **Trace State & Composables** | \`trace_state\` | \`identifier: "...", depth: 1|2+\` | Map consuming components for Pinia/Zustand stores, contexts, composables. |
-| **Topology & Dead Code Audit** | \`audit_frontend\` | \`target: "routes"|"dead-components"|"all"\` | Manifest of URL routes, layout wrappers, and orphan components. |
+| **Topology, Dead Code & APIs** | \`audit_frontend\` | \`target: "routes"|"dead-components"|"api-contracts"|"all"\` | Manifest of URL routes, layout wrappers, orphan components, and outbound API endpoints. |
+| **Prescriptive Patch Plan** | \`generate_patch_plan\` | \`component_path: "...", refactor_type: "rename_prop", old_name: "...", new_name: "..."\` | Prescriptive AST patch recommendations (file, line, column, replacement snippet) across all consumers. |
 | **Structural AST Search** | \`find_code\` | \`pattern: "..."\` or \`component: "..."\` | ast-grep pattern matches or component usage occurrences across repo. |
 
-## Maximizing the Persistent Knowledge Graph (\`.strata/graph.db\`)
+## Maximizing the Persistent Knowledge Graph (\`.strata/graph.db\`) & Realtime Watcher
 
-Strata maintains a high-speed SQLite dependency graph at \`.strata/graph.db\` with incremental delta caching:
+Strata maintains a high-speed SQLite dependency graph at \`.strata/graph.db\` with native background realtime watching:
 
-1. **Zero-IO / Instant Querying**: Unchanged files are verified via SHA/mtime hash, serving cached AST contracts with 0ms re-parse overhead.
+1. **Reactive Hot Cache Daemon**: Integrated native filesystem watcher (\`node:fs.watch\`) continuously updates the SQLite graph in the background (<100ms debounce), delivering instant hot cache hits (<1ms) without disk crawl overhead.
 2. **Recursive Blast Radius Traversal**: When refactoring shared UI or utilities, run \`get_component_tree(direction: "upward")\`. Strata executes recursive Common Table Expressions (CTE) over the \`edges\` table, instantly uncovering every consumer without touching disk.
-3. **Multi-Hop State Impact**: When altering a store or composable, use \`trace_state\` with \`depth: 2+\` to follow chained composable consumption across the graph.
-4. **Direct SQLite Analytics (Advanced)**: The SQLite database at \`.strata/graph.db\` contains 5 indexed tables (\`files\`, \`components\`, \`edges\`, \`state_deps\`, \`routes\`). You can directly run SQL queries against it to extract custom architectural metrics (e.g., detecting "God Components" with high fan-out, critical foundation components with high fan-in, or finding orphan files).
+3. **Prescriptive Code Migrations**: Combine blast radius discovery with \`generate_patch_plan\` to obtain direct, deterministic AST patches across all affected consumers.
+4. **Multi-Hop State Impact**: When altering a store or composable, use \`trace_state\` with \`depth: 2+\` to follow chained composable consumption across the graph.
+5. **Direct SQLite Analytics (Advanced)**: The SQLite database at \`.strata/graph.db\` contains 5 indexed tables (\`files\`, \`components\`, \`edges\`, \`state_deps\`, \`routes\`). You can directly run SQL queries against it to extract custom architectural metrics (e.g., detecting "God Components" with high fan-out, critical foundation components with high fan-in, or finding orphan files).
 `.trim();
