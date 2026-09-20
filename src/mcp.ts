@@ -9,6 +9,7 @@ import { verifyAstGrepBinary } from './engine/astgrep';
 import { TOOLS, findTool } from './tools';
 import { main as runCli } from './cli';
 import { STRATA_INSTRUCTIONS } from './instructions';
+import { STRATA_VERSION } from './version';
 import { closeAllDatabases, getDatabase } from './engine/database';
 import { WorkspaceWatcher } from './engine/watcher';
 import { StrataTelemetry } from './engine/telemetry';
@@ -19,7 +20,7 @@ export function createMcpServer(): Server {
   const server = new Server(
     {
       name: 'strata-mcp',
-      version: '0.7.4',
+      version: STRATA_VERSION,
     },
     {
       capabilities: {
@@ -180,40 +181,36 @@ export async function runServer(): Promise<void> {
     closeAllDatabases();
   });
 
+  if (process.stdin.isTTY) {
+    process.stderr.write(`[strata] MCP server daemon running on stdio (PID: ${process.pid}).\n`);
+    process.stderr.write(`[strata] Listening for JSON-RPC client messages. Press Ctrl+C to stop.\n`);
+  }
+
   await server.connect(transport);
 }
 
-// Dual-mode single-binary entrypoint:
-// - If 'serve' subcommand is passed: run the MCP stdio server.
-// - If other arguments are passed: run CLI (subcommands, flags, help).
+// Dual-mode entrypoint:
+// - If arguments are passed: delegate entirely to runCli (Single Source of Truth for command routing).
 // - If no arguments are passed:
-//   - When interactive (TTY): display CLI help instead of hanging.
-//   - When non-interactive (piped stdin): fallback to MCP server for backward compatibility.
+//   - When interactive (TTY): display CLI help instead of hanging on stdin.
+//   - When non-interactive (piped stdin, e.g. Claude Desktop / Cursor): launch MCP stdio server.
 if (import.meta.main) {
   const argv = process.argv.slice(2);
   if (argv.length > 0) {
-    if (argv[0] === 'serve') {
-      runServer().catch((err) => {
-        console.error('Fatal MCP Server error:', err);
-        process.exit(1);
-      });
-    } else {
-      runCli(argv).catch((err) => {
-        console.error('Fatal CLI error:', err);
-        process.exit(1);
-      });
-    }
+    runCli(argv).catch((err) => {
+      console.error('Fatal CLI error:', err);
+      process.exit(1);
+    });
+  } else if (process.stdin.isTTY) {
+    runCli([]).catch((err) => {
+      console.error('Fatal CLI error:', err);
+      process.exit(1);
+    });
   } else {
-    if (process.stdin.isTTY) {
-      runCli([]).catch((err) => {
-        console.error('Fatal CLI error:', err);
-        process.exit(1);
-      });
-    } else {
-      runServer().catch((err) => {
-        console.error('Fatal MCP Server error:', err);
-        process.exit(1);
-      });
-    }
+    runServer().catch((err) => {
+      console.error('Fatal MCP Server error:', err);
+      process.exit(1);
+    });
   }
 }
+

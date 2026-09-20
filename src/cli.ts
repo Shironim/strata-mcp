@@ -16,6 +16,7 @@ import {
   closeAllDatabases,
 } from './engine/database';
 import { handleStrataInit } from './cli/commands/init';
+import { STRATA_VERSION } from './version';
 import type { PatchRefactorType, RouteFramework } from './types';
 
 function printHelp() {
@@ -23,38 +24,65 @@ function printHelp() {
 strata — Multi-Framework Frontend Structural Code Search & Intelligence CLI
 
 Usage:
-  strata serve [options]
-  strata init [target-dir]
-  strata search <pattern> [options]
-  strata find-component-usage <component-name> [options]
-  strata contract <component-file> [options]
-  strata tree [entry-file] [--route <path>] [options]
-  strata patch-plan <component-file> --refactor <type> --old <name> [--new <name>]
-  strata apis [target-dir] [options]
-  strata routes [target-dir] [options]
-  strata impact <state-identifier> [options]
-  strata unused-state [target-dir] [options]
-  strata sync [target-dir]
-  strata unused [target-dir] [options]
-  strata rule <rule-file-or-yaml> [options]
+  strata <command> [options]
 
-Options:
-  --path <dir|file>       Target directory or file (default: .)
-  --route <route-path>    URL route path to resolve for tree command (e.g. "/catalog")
-  --prefix <prefix>       Filter routes by URL prefix (e.g. "/services", "/auth")
-  --view <mode>           Route view mode: summary | full | tree (default: auto)
-  --depth <number>        Max tree depth for tree command (default: 3)
-  --direction <dir>       Tree traversal direction: downward | upward (default: downward)
-  --framework <hint>      Framework hint for routes command (next-app, nuxt, astro, inertia)
-  --alias <prefix=path>   Alias map for tree command, comma-separated (e.g. "@/=resources/js/")
-  --scope-filter <scope>  Domain or package filter for tree command (e.g. "apps/web")
-  --ignore <pattern>      Glob pattern to ignore (can repeat or comma-separated)
-  --include-pages         Include file-based page views in unused component audit
-  --lang <lang>           Language hint (default: ts)
-  --scope <scope>         Component scope: template | script | both (default: both)
-  --json                  Output raw JSON instead of text
-  --help, -h              Show this help message
+Commands:
+  serve                                   Start MCP stdio daemon server
+  init [target-dir]                       Initialize strata configuration and agent rules
+  search, find <pattern>                  AST structural code search across codebase
+  find-component-usage, usage <component> Find all usages and callers of a component
+  contract, extract-contract <file>       Extract public component contract (props, emits, slots)
+  tree, component-tree [entry-file]       Inspect component dependency hierarchy
+  patch-plan, patch <file>                Generate precision refactoring patch plan
+  apis, api-contracts [target-dir]        Extract backend/frontend API integration contracts
+  routes, scan-routes [target-dir]        Scan and resolve file-based routing paths
+  impact, state-impact <state-id>         Trace blast radius and state consumers
+  unused-state, dead-state [target-dir]   Audit unused stores, composables, or state variables
+  sync [target-dir]                       Synchronize project cache and index database
+  unused, audit [target-dir]              Audit dead or unreferenced components
+  rule <rule-file-or-yaml>                Execute custom ast-grep lint and audit rules
+
+Global Options:
+  -p, --path <dir|file>                   Target directory or file (default: .)
+  -v, --version                           Show version number
+  --json                                  Output raw JSON instead of formatted text
+  -h, --help                              Show this help message
+
+Command-specific Options:
+  init:
+    --force                               Overwrite existing config files and instructions
+
+  patch-plan:
+    --refactor <type>                     Refactor operation: rename_prop | remove_prop | rename_event (default: rename_prop)
+    --old <name>                          Current/old identifier or property name
+    --new <name>                          New identifier or property name
+
+  tree:
+    --route <route-path>                  URL route path to resolve (e.g. "/catalog")
+    --depth <number>                      Max hierarchy tree depth (default: 3)
+    --direction <dir>                     Traversal direction: downward | upward (default: downward)
+    --alias <prefix=path>                 Path alias mapping, comma-separated (e.g. "@/=resources/js/")
+    --scope-filter <scope>                Domain or package filter (e.g. "apps/web")
+
+  routes:
+    --prefix <prefix>                     Filter routes by URL prefix (e.g. "/api", "/auth")
+    --view <mode>                         View layout: summary | full | tree (default: auto)
+    --framework <hint>                    Framework hint (next-app, nuxt, astro, inertia)
+
+  unused:
+    --ignore <pattern>                    Glob pattern to ignore (comma-separated)
+    --include-pages                       Include file-based page views in audit
+
+  search:
+    --lang <lang>                         Target language hint (default: ts)
+
+  find-component-usage:
+    --scope <scope>                       Component scope: template | script | both (default: both)
 `);
+}
+
+function toCamelCase(str: string): string {
+  return str.replace(/-([a-z0-9])/g, (_, char) => char.toUpperCase());
 }
 
 function parseArgs(args: string[]) {
@@ -65,16 +93,22 @@ function parseArgs(args: string[]) {
     const arg = args[i];
     if (arg === '--json') {
       flags.json = true;
+    } else if (arg === '--version' || arg === '-v') {
+      flags.version = true;
     } else if (arg === '--help' || arg === '-h') {
       flags.help = true;
     } else if (arg.startsWith('--')) {
       const key = arg.slice(2);
+      const camelKey = toCamelCase(key);
       const next = args[i + 1];
+      let val: string | boolean = true;
       if (next && !next.startsWith('-')) {
-        flags[key] = next;
+        val = next;
         i++;
-      } else {
-        flags[key] = true;
+      }
+      flags[key] = val;
+      if (camelKey !== key) {
+        flags[camelKey] = val;
       }
     } else if (arg === '-p') {
       const next = args[i + 1];
@@ -113,6 +147,11 @@ function parseAliasMap(raw: string | boolean | undefined): Record<string, string
 export async function main(argv: string[] = process.argv.slice(2)) {
   const { flags, positional } = parseArgs(argv);
   const command = positional[0];
+
+  if (flags.version) {
+    console.log(`strata v${STRATA_VERSION}`);
+    return;
+  }
 
   if (flags.help || !command) {
     printHelp();

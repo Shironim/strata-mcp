@@ -11,6 +11,7 @@
     "outDir": "./dist",
     "rootDir": "./",
     "declaration": true,
+    "resolveJsonModule": true,
     "types": ["node", "bun"]
   },
   "include": ["src/**/*"],
