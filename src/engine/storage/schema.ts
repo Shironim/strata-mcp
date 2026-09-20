@@ -157,7 +157,26 @@ export function initSchema(db: Database): void {
       handlers_json TEXT,
       layout_chain_json TEXT
     );
+  `);
 
+  // Auto-migration: ensure existing databases get new columns before indexing
+  function addColumnIfNotExists(table: string, columnDef: string): void {
+    try {
+      db.run(`ALTER TABLE ${table} ADD COLUMN ${columnDef};`);
+    } catch {
+      // column already exists
+    }
+  }
+
+  addColumnIfNotExists('files', 'render_boundary TEXT');
+  addColumnIfNotExists('files', 'boundary_directive TEXT');
+  addColumnIfNotExists('edges', 'payload_json TEXT');
+  addColumnIfNotExists('state_deps', "access_mode TEXT DEFAULT 'read' CHECK(access_mode IN ('read', 'write', 'watch'))");
+  addColumnIfNotExists('state_deps', 'line_number INTEGER DEFAULT 0');
+  addColumnIfNotExists('state_deps', 'usage_snippet TEXT');
+
+  // Create indexes safely after tables and columns are guaranteed to exist
+  db.run(`
     CREATE INDEX IF NOT EXISTS idx_files_path ON files(path);
     CREATE INDEX IF NOT EXISTS idx_components_name ON components(name);
     CREATE INDEX IF NOT EXISTS idx_edges_parent ON edges(parent_file_id);
@@ -166,28 +185,4 @@ export function initSchema(db: Database): void {
     CREATE INDEX IF NOT EXISTS idx_state_deps_ident_mode ON state_deps(identifier, access_mode);
     CREATE INDEX IF NOT EXISTS idx_routes_url ON routes(url_path);
   `);
-
-  // Auto-migration: ensure existing databases get payload_json column
-  try {
-    db.run('ALTER TABLE edges ADD COLUMN payload_json TEXT;');
-  } catch {
-    // column already exists
-  }
-
-  // Auto-migration: ensure existing databases get access_mode, line_number, usage_snippet columns
-  try {
-    db.run("ALTER TABLE state_deps ADD COLUMN access_mode TEXT DEFAULT 'read' CHECK(access_mode IN ('read', 'write', 'watch'));");
-  } catch {
-    // column already exists
-  }
-  try {
-    db.run('ALTER TABLE state_deps ADD COLUMN line_number INTEGER DEFAULT 0;');
-  } catch {
-    // column already exists
-  }
-  try {
-    db.run('ALTER TABLE state_deps ADD COLUMN usage_snippet TEXT;');
-  } catch {
-    // column already exists
-  }
 }
