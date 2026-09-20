@@ -38,7 +38,7 @@ Always operate in two distinct phases:
 | **Route Map & Topology** | \`get_routes\` | \`targetPath?: "...", framework?: "next-app"|"nuxt"|"astro"|"inertia"\` | Instant file-based routing topology, layouts, dynamic parameters, and page handlers. |
 | **Outbound API Contracts** | \`get_api_contracts\` | \`targetPath?: "..."\` | Maps API endpoints, HTTP methods, TanStack/Inertia/Axios network boundaries, and payload contracts. |
 | **Trace State & Composables** | \`trace_state\` | \`identifier: "...", depth: 1|2+\` | Map consuming components for Pinia/Zustand stores, contexts, composables. |
-| **Topology, Dead Code & APIs** | \`audit_frontend\` | \`target: "routes"|"dead-components"|"api-contracts"|"all"\` | Manifest of URL routes, layout wrappers, orphan components, and outbound API endpoints. |
+| **Health, Duplication & APIs** | \`audit_frontend\` | \`target?: "all"|"routes"|"dead-components"|"dead-state"|"similar-templates"|"design-tokens"|"bundle-health"|"api-contracts"\` | Diagnostic manifest of dead components/state, duplicated templates, design token drift, hydration weight, and routes/APIs. |
 | **Prescriptive Patch Plan** | \`generate_patch_plan\` | \`component_path: "...", refactor_type: "rename_prop", old_name: "...", new_name: "..."\` | Prescriptive AST patch recommendations (file, line, column, replacement snippet) across all consumers. |
 | **Structural AST Search** | \`find_code\` | \`pattern: "..."\` or \`component: "..."\` | ast-grep pattern matches or component usage occurrences across repo. |
 

@@ -31,20 +31,53 @@ Prioritaskan penggunaan tool MCP \`strata-mcp\` daripada melakukan pencarian tek
 
 export const STRATA_INSPECT_SKILL = `---
 name: strata-inspect
-description: Deep frontend AST component inspection, component trees, reactivity tracking, and contract validation using strata-mcp.
+description: Deep frontend AST component inspection, component trees, reactivity tracking, routes, API contracts, architectural health audits, and deterministic patch planning using strata-mcp.
 ---
 
 # Skill: Strata Frontend Inspector (\`strata-inspect\`)
 
-> Gunakan skill ini saat perlu memeriksa hierarki komponen frontend, memvalidasi prop/emit contract, atau melacak reaktivitas state tanpa membaca seluruh file UI secara mentah.
+> Gunakan skill ini saat perlu menganalisis arsitektur frontend (Vue, React/Next.js, Astro), memvalidasi prop/emit contracts, memetakan rute & API backend, melacak reaktivitas state, atau mengaudit kesehatan kode tanpa membaca seluruh file UI secara mentah.
 
-## Quick Workflow
-1. **Periksa Kontrak Komponen:**
-   Gunakan MCP tool \`inspect_component\` dengan path file target.
-2. **Telusuri Hierarki Pohon UI:**
-   Gunakan MCP tool \`get_component_tree\` untuk menelusuri downward/upward traversal dari root halaman atau layout.
-3. **Analisis Dampak State:**
-   Gunakan MCP tool \`trace_state\` untuk memetakan komponen mana yang membaca atau memodifikasi state tertentu.
+## Core Capabilities & Workflows
+
+1. **Pemeriksaan Kontrak Komponen & Precision Slicing:**
+   - Ambil props, emits, slots, dan models publik:
+     \`inspect_component(path: "path/to/Component.vue")\`
+   - Iris fungsi/simbol spesifik dengan nomor baris presisi tanpa membaca seluruh file:
+     \`inspect_component(path: "...", symbol: "handleAction")\`
+   - Quality gate pasca-edit (broken template handlers & reactivity smells):
+     \`inspect_component(path: "...", audit_events: true)\`
+
+2. **Hierarki Pohon UI & Blast Radius:**
+   - Petakan hierarki child components & props drilling:
+     \`get_component_tree(entry_path: "path/to/Page.tsx", direction: "downward")\`
+   - Analisis blast radius (siapa saja parent/page yang mengimpor komponen ini):
+     \`get_component_tree(entry_path: "path/to/SharedButton.vue", direction: "upward")\`
+
+3. **Pemetaan URL Routes & Layouts:**
+   - Pindai topologi file-based routes (Next.js, Nuxt, Astro, Inertia):
+     \`get_routes(targetPath: ".", framework: "next-app")\`
+
+4. **Ekstraksi Kontrak API Backend:**
+   - Petakan seluruh panggilan network frontend (TanStack, Inertia, Axios, fetch):
+     \`get_api_contracts(targetPath: ".")\`
+
+5. **Pelacakan Aliran State & Composables:**
+   - Petakan consumer stores (Pinia, Zustand, Context):
+     \`trace_state(identifier: "useCartStore", depth: 2)\`
+
+6. **Audit Arsitektur Menyeluruh:**
+   - Audit kesehatan frontend secara komprehensif atau terarah:
+     \`audit_frontend(target: "all")\`
+     Pilihan target: \`routes\`, \`dead-components\`, \`dead-state\`, \`similar-templates\`, \`design-tokens\`, \`bundle-health\`, \`api-contracts\`.
+
+7. **Perencanaan Refactoring Presisi (Patch Plan):**
+   - Hasilkan rekomendasi patch AST deterministik di semua consumer:
+     \`generate_patch_plan(component_path: "...", refactor_type: "rename_prop", old_name: "title", new_name: "headline")\`
+
+8. **Pencarian AST Struktural:**
+   - Temukan pola kode atau penggunaan komponen yang kebal terhadap variasi formatting:
+     \`find_code(pattern: "<Button $PROPS>$$$CHILDREN</Button>")\`
 `;
 
 export const STRATA_POST_WRITE_HOOK = `#!/usr/bin/env bash
