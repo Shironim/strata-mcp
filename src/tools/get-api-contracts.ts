@@ -1,5 +1,5 @@
 import { extractWorkspaceApiContracts, formatApiContractsAsText } from '../engine/api-contract';
-import { resolveWorkspacePath } from '../engine/path-resolver';
+import { resolveToolTargetPath } from '../engine/path-resolver';
 import type { McpToolDefinition } from './types';
 
 export const getApiContractsTool: McpToolDefinition = {
@@ -11,14 +11,27 @@ export const getApiContractsTool: McpToolDefinition = {
     properties: {
       targetPath: {
         type: 'string',
-        description: 'Workspace root or directory to scan for API call sites (default: active workspace).',
+        description: 'Workspace root or directory to scan for API call sites (alias: target_path, path).',
+      },
+      target_path: {
+        type: 'string',
+        description: 'Alias for targetPath',
+      },
+      path: {
+        type: 'string',
+        description: 'Alias for targetPath',
+      },
+      output_format: {
+        type: 'string',
+        enum: ['text', 'json'],
+        description: 'Output format: text or json (default: "text")',
       },
     },
     required: [],
   },
   handler: async (args: Record<string, any>) => {
-    const rawPath = typeof args.targetPath === 'string' ? args.targetPath : '.';
-    const targetPath = resolveWorkspacePath(rawPath);
+    const targetPath = resolveToolTargetPath(args);
+    const isJson = args.output_format === 'json';
 
     try {
       const result = await extractWorkspaceApiContracts({ targetPath });
@@ -26,7 +39,7 @@ export const getApiContractsTool: McpToolDefinition = {
         content: [
           {
             type: 'text',
-            text: formatApiContractsAsText(result),
+            text: isJson ? JSON.stringify(result, null, 2) : formatApiContractsAsText(result),
           },
         ],
       };

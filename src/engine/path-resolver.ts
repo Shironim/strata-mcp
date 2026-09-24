@@ -26,13 +26,28 @@ export const PROJECT_ROOT_MARKERS = [
 
 /**
  * In-memory session store for the most recently identified or active project root.
- * Enables zero-config relative path resolution across consecutive tool calls.
  */
 let lastKnownProjectRoot: string | undefined;
 
+/**
+ * Canonicalizes a file or directory path for cross-platform consistency:
+ * - Resolves to absolute path and normalizes separators.
+ * - Uppercases Windows drive letters (e.g. "c:\" -> "C:\") to eliminate map lookup misses.
+ */
+export function canonicalizePath(targetPath: string): string {
+  if (!targetPath || typeof targetPath !== 'string') {
+    return targetPath;
+  }
+  let abs = normalize(resolve(targetPath));
+  if (process.platform === 'win32') {
+    abs = abs.replace(/^[a-zA-Z]:/, (m) => m.toUpperCase());
+  }
+  return abs;
+}
+
 export function setLastKnownProjectRoot(root: string): void {
   if (root && typeof root === 'string') {
-    lastKnownProjectRoot = normalize(resolve(root));
+    lastKnownProjectRoot = canonicalizePath(root);
   }
 }
 
@@ -90,12 +105,12 @@ export function findProjectRoot(fromPath: string): string {
  */
 export function resolveWorkspacePath(rawPath: string, rootHint?: string): string {
   if (!rawPath || typeof rawPath !== 'string') {
-    return lastKnownProjectRoot || process.cwd();
+    return lastKnownProjectRoot || canonicalizePath(process.cwd());
   }
 
   const trimmed = rawPath.trim().replace(/^['"]|['"]$/g, '');
   if (!trimmed) {
-    return lastKnownProjectRoot || process.cwd();
+    return lastKnownProjectRoot || canonicalizePath(process.cwd());
   }
 
   // Cross-platform: convert Windows backslashes to forward slashes for segment resolution
@@ -107,7 +122,7 @@ export function resolveWorkspacePath(rawPath: string, rootHint?: string): string
 
   // If candidate is a genuine full absolute path
   if (isWindowsAbsolute || isPosixAbsolute) {
-    const norm = normalize(resolve(trimmed));
+    const norm = canonicalizePath(trimmed);
     if (existsSync(norm)) {
       const detectedRoot = findProjectRoot(norm);
       if (detectedRoot) {
@@ -119,15 +134,15 @@ export function resolveWorkspacePath(rawPath: string, rootHint?: string): string
 
   // Candidate 1: Check against rootHint if provided (handles both "src/..." and "/src/...")
   if (rootHint) {
-    const resolvedHint = resolve(rootHint.trim().replace(/^['"]|['"]$/g, ''));
+    const resolvedHint = canonicalizePath(rootHint.trim().replace(/^['"]|['"]$/g, ''));
     const relativePart = normalizedSlashes.replace(/^[/\\]+/, '');
-    const candidate = normalize(resolve(resolvedHint, relativePart));
+    const candidate = canonicalizePath(resolve(resolvedHint, relativePart));
     if (existsSync(candidate)) {
       setLastKnownProjectRoot(resolvedHint);
       return candidate;
     }
     // Also test direct join without stripping if rootHint was a directory
-    const directCandidate = normalize(resolve(resolvedHint, normalizedSlashes));
+    const directCandidate = canonicalizePath(resolve(resolvedHint, normalizedSlashes));
     if (existsSync(directCandidate)) {
       setLastKnownProjectRoot(resolvedHint);
       return directCandidate;
@@ -137,7 +152,7 @@ export function resolveWorkspacePath(rawPath: string, rootHint?: string): string
   // Candidate 2: Check against lastKnownProjectRoot
   if (lastKnownProjectRoot) {
     const relativePart = normalizedSlashes.replace(/^[/\\]+/, '');
-    const candidate = normalize(resolve(lastKnownProjectRoot, relativePart));
+    const candidate = canonicalizePath(resolve(lastKnownProjectRoot, relativePart));
     if (existsSync(candidate)) {
       return candidate;
     }
@@ -145,7 +160,7 @@ export function resolveWorkspacePath(rawPath: string, rootHint?: string): string
 
   // Candidate 3: Check against process.cwd()
   const cwdRelative = normalizedSlashes.replace(/^[/\\]+/, '');
-  const cwdCandidate = normalize(resolve(process.cwd(), cwdRelative));
+  const cwdCandidate = canonicalizePath(resolve(process.cwd(), cwdRelative));
   if (existsSync(cwdCandidate)) {
     const detectedRoot = findProjectRoot(cwdCandidate);
     if (detectedRoot) {
@@ -156,7 +171,7 @@ export function resolveWorkspacePath(rawPath: string, rootHint?: string): string
 
   // Candidate 4: Standard Node isAbsolute check fallback
   if (isAbsolute(trimmed)) {
-    const norm = normalize(resolve(trimmed));
+    const norm = canonicalizePath(trimmed);
     if (existsSync(norm)) {
       return norm;
     }
@@ -164,11 +179,11 @@ export function resolveWorkspacePath(rawPath: string, rootHint?: string): string
 
   // Fallback: If not found on disk, resolve against best available root
   const baseDir = rootHint
-    ? resolve(rootHint.trim().replace(/^['"]|['"]$/g, ''))
-    : (lastKnownProjectRoot || process.cwd());
+    ? canonicalizePath(rootHint.trim().replace(/^['"]|['"]$/g, ''))
+    : (lastKnownProjectRoot || canonicalizePath(process.cwd()));
 
   const relativePart = normalizedSlashes.replace(/^[/\\]+/, '');
-  return normalize(resolve(baseDir, relativePart));
+  return canonicalizePath(resolve(baseDir, relativePart));
 }
 
 /**
@@ -180,7 +195,7 @@ export function resolveProjectRoot(targetPath?: string): string {
     const resolved = resolveWorkspacePath(targetPath);
     if (existsSync(resolved)) {
       const stat = statSync(resolved);
-      const dir = stat.isDirectory() ? resolved : dirname(resolved);
+      const dir = canonicalizePath(stat.isDirectory() ? resolved : dirname(resolved));
       setLastKnownProjectRoot(dir);
       return dir;
     }
@@ -197,5 +212,24 @@ export function resolveProjectRoot(targetPath?: string): string {
     return detectedFromCwd;
   }
 
-  return process.cwd();
+  return canonicalizePath(process.cwd());
+}
+
+/**
+ * Ergonomically resolves a workspace target path from MCP tool arguments.
+ * Supports camelCase (targetPath) and snake_case (target_path, path) aliases.
+ */
+export function resolveToolTargetPath(
+  args: Record<string, any>,
+  defaultPath = '.'
+): string {
+  const rawPath =
+    typeof args?.targetPath === 'string'
+      ? args.targetPath
+      : typeof args?.target_path === 'string'
+      ? args.target_path
+      : typeof args?.path === 'string'
+      ? args.path
+      : defaultPath;
+  return resolveWorkspacePath(rawPath);
 }

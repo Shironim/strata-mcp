@@ -1,6 +1,7 @@
 import { Database } from 'bun:sqlite';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
+import { canonicalizePath } from '../path-resolver';
 import {
   startWorkspaceWatcher,
   stopWorkspaceWatcher,
@@ -30,7 +31,7 @@ export const dbRegistry = new Map<string, Database>();
  * Reuses existing open database instances for the same workspace.
  */
 export function getWorkspaceDatabase(workspaceRoot: string): Database {
-  const absRoot = resolve(workspaceRoot);
+  const absRoot = canonicalizePath(workspaceRoot);
   const existing = dbRegistry.get(absRoot);
   if (existing) {
     return existing;
@@ -70,7 +71,7 @@ export function getWorkspaceDatabase(workspaceRoot: string): Database {
  * Closes the SQLite database for a specific workspace if open.
  */
 export function closeWorkspaceDatabase(workspaceRoot: string): void {
-  const absRoot = resolve(workspaceRoot);
+  const absRoot = canonicalizePath(workspaceRoot);
   stopWorkspaceWatcher(absRoot);
   const db = dbRegistry.get(absRoot);
   if (db) {
