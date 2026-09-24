@@ -28,3 +28,4 @@ Desktop.ini
 # Septum local database and cache
 .septum/*.db*
 .septum/
+.verity/
