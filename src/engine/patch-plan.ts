@@ -65,128 +65,149 @@ function scanVueTemplateProps(
     return patches;
   }
 
+  function handleAttributeProp(
+    prop: any,
+    el: ElementNode,
+    absLine: number,
+    absCol: number,
+    rawPropText: string
+  ): void {
+    if (prop.name !== oldKebab && prop.name !== oldCamel && prop.name !== oldName) return;
+
+    if (refactorType === 'rename_prop' && newName) {
+      const targetReplacementAttr = prop.name.includes('-') ? newKebab : newCamel;
+      const newSnippet = rawPropText.replace(new RegExp(`^${prop.name}`), targetReplacementAttr);
+      patches.push({
+        file: filePath,
+        line: absLine,
+        column: absCol,
+        targetTag: el.tag,
+        oldSnippet: rawPropText,
+        newSnippet,
+        description: `Rename static prop attribute "${prop.name}" to "${targetReplacementAttr}" on <${el.tag}>`,
+      });
+    } else if (refactorType === 'remove_prop') {
+      patches.push({
+        file: filePath,
+        line: absLine,
+        column: absCol,
+        targetTag: el.tag,
+        oldSnippet: rawPropText,
+        newSnippet: '',
+        description: `Remove obsolete static prop "${prop.name}" on <${el.tag}>`,
+      });
+    }
+  }
+
+  function handleDirectiveProp(
+    prop: any,
+    el: ElementNode,
+    absLine: number,
+    absCol: number,
+    rawPropText: string
+  ): void {
+    if (prop.name !== 'bind' && prop.name) return;
+    const argContent = prop.arg && 'content' in prop.arg ? prop.arg.content : '';
+    if (argContent !== oldKebab && argContent !== oldCamel && argContent !== oldName) return;
+
+    if (refactorType === 'rename_prop' && newName) {
+      const targetReplacementAttr = argContent.includes('-') ? newKebab : newCamel;
+      const isShorthand = rawPropText.startsWith(':');
+      const prefix = isShorthand ? ':' : 'v-bind:';
+      const expPart = prop.exp && 'content' in prop.exp ? `="${prop.exp.content}"` : '';
+      const newSnippet = `${prefix}${targetReplacementAttr}${expPart}`;
+
+      patches.push({
+        file: filePath,
+        line: absLine,
+        column: absCol,
+        targetTag: el.tag,
+        oldSnippet: rawPropText,
+        newSnippet,
+        description: `Rename bound prop "${argContent}" to "${targetReplacementAttr}" on <${el.tag}>`,
+      });
+    } else if (refactorType === 'remove_prop') {
+      patches.push({
+        file: filePath,
+        line: absLine,
+        column: absCol,
+        targetTag: el.tag,
+        oldSnippet: rawPropText,
+        newSnippet: '',
+        description: `Remove bound prop "${argContent}" on <${el.tag}>`,
+      });
+    }
+  }
+
+  function handleEventDirective(
+    prop: any,
+    el: ElementNode,
+    absLine: number,
+    absCol: number,
+    rawPropText: string
+  ): void {
+    if (prop.name !== 'on') return;
+    const eventName = prop.arg && 'content' in prop.arg ? prop.arg.content : '';
+    if (eventName !== oldKebab && eventName !== oldCamel && eventName !== oldName) return;
+
+    if (refactorType === 'rename_event' && newName) {
+      const targetReplacementEvent = eventName.includes('-') ? newKebab : newCamel;
+      const isShorthand = rawPropText.startsWith('@');
+      const prefix = isShorthand ? '@' : 'v-on:';
+      const expPart = prop.exp && 'content' in prop.exp ? `="${prop.exp.content}"` : '';
+      const newSnippet = `${prefix}${targetReplacementEvent}${expPart}`;
+
+      patches.push({
+        file: filePath,
+        line: absLine,
+        column: absCol,
+        targetTag: el.tag,
+        oldSnippet: rawPropText,
+        newSnippet,
+        description: `Rename event listener "${eventName}" to "${targetReplacementEvent}" on <${el.tag}>`,
+      });
+    } else if (refactorType === 'remove_event') {
+      patches.push({
+        file: filePath,
+        line: absLine,
+        column: absCol,
+        targetTag: el.tag,
+        oldSnippet: rawPropText,
+        newSnippet: '',
+        description: `Remove event listener "${eventName}" on <${el.tag}>`,
+      });
+    }
+  }
+
   function walk(node: RootNode | TemplateChildNode): void {
-    if (node.type === NodeTypes.ELEMENT) {
-      const el = node as ElementNode;
-      const tagMatches = targetTags.has(el.tag) || targetTags.has(toKebabCase(el.tag));
+    if (node.type !== NodeTypes.ELEMENT) return;
+    const el = node as ElementNode;
+    const tagMatches = targetTags.has(el.tag) || targetTags.has(toKebabCase(el.tag));
 
-      if (tagMatches) {
-        for (const prop of el.props) {
-          const absLine = templateStartLine + prop.loc.start.line - 1;
-          const absCol =
-            prop.loc.start.line === 1
-              ? templateStartCol + prop.loc.start.column - 1
-              : prop.loc.start.column;
+    if (tagMatches) {
+      for (const prop of el.props) {
+        const absLine = templateStartLine + prop.loc.start.line - 1;
+        const absCol =
+          prop.loc.start.line === 1
+            ? templateStartCol + prop.loc.start.column - 1
+            : prop.loc.start.column;
+        const rawPropText = prop.loc.source;
 
-          const rawPropText = prop.loc.source;
-
-          // Prop renaming or removal
-          if (refactorType === 'rename_prop' || refactorType === 'remove_prop') {
-            if (prop.type === NodeTypes.ATTRIBUTE) {
-              // Static attribute e.g. title="Hello"
-              if (prop.name === oldKebab || prop.name === oldCamel || prop.name === oldName) {
-                if (refactorType === 'rename_prop' && newName) {
-                  const targetReplacementAttr = prop.name.includes('-') ? newKebab : newCamel;
-                  const newSnippet = rawPropText.replace(
-                    new RegExp(`^${prop.name}`),
-                    targetReplacementAttr
-                  );
-                  patches.push({
-                    file: filePath,
-                    line: absLine,
-                    column: absCol,
-                    targetTag: el.tag,
-                    oldSnippet: rawPropText,
-                    newSnippet,
-                    description: `Rename static prop attribute "${prop.name}" to "${targetReplacementAttr}" on <${el.tag}>`,
-                  });
-                } else if (refactorType === 'remove_prop') {
-                  patches.push({
-                    file: filePath,
-                    line: absLine,
-                    column: absCol,
-                    targetTag: el.tag,
-                    oldSnippet: rawPropText,
-                    newSnippet: '',
-                    description: `Remove obsolete static prop "${prop.name}" on <${el.tag}>`,
-                  });
-                }
-              }
-            } else if (prop.type === NodeTypes.DIRECTIVE && (prop.name === 'bind' || !prop.name)) {
-              // Dynamic prop binding e.g. :title="myTitle" or v-bind:title="myTitle"
-              const argContent = prop.arg && 'content' in prop.arg ? prop.arg.content : '';
-              if (argContent === oldKebab || argContent === oldCamel || argContent === oldName) {
-                if (refactorType === 'rename_prop' && newName) {
-                  const targetReplacementAttr = argContent.includes('-') ? newKebab : newCamel;
-                  const isShorthand = rawPropText.startsWith(':');
-                  const prefix = isShorthand ? ':' : 'v-bind:';
-                  const expPart = prop.exp && 'content' in prop.exp ? `="${prop.exp.content}"` : '';
-                  const newSnippet = `${prefix}${targetReplacementAttr}${expPart}`;
-
-                  patches.push({
-                    file: filePath,
-                    line: absLine,
-                    column: absCol,
-                    targetTag: el.tag,
-                    oldSnippet: rawPropText,
-                    newSnippet,
-                    description: `Rename bound prop "${argContent}" to "${targetReplacementAttr}" on <${el.tag}>`,
-                  });
-                } else if (refactorType === 'remove_prop') {
-                  patches.push({
-                    file: filePath,
-                    line: absLine,
-                    column: absCol,
-                    targetTag: el.tag,
-                    oldSnippet: rawPropText,
-                    newSnippet: '',
-                    description: `Remove bound prop "${argContent}" on <${el.tag}>`,
-                  });
-                }
-              }
-            }
+        if (refactorType === 'rename_prop' || refactorType === 'remove_prop') {
+          if (prop.type === NodeTypes.ATTRIBUTE) {
+            handleAttributeProp(prop, el, absLine, absCol, rawPropText);
+          } else if (prop.type === NodeTypes.DIRECTIVE) {
+            handleDirectiveProp(prop, el, absLine, absCol, rawPropText);
           }
-
-          // Event renaming or removal
-          if (refactorType === 'rename_event' || refactorType === 'remove_event') {
-            if (prop.type === NodeTypes.DIRECTIVE && prop.name === 'on') {
-              const eventName = prop.arg && 'content' in prop.arg ? prop.arg.content : '';
-              if (eventName === oldKebab || eventName === oldCamel || eventName === oldName) {
-                if (refactorType === 'rename_event' && newName) {
-                  const targetReplacementEvent = eventName.includes('-') ? newKebab : newCamel;
-                  const isShorthand = rawPropText.startsWith('@');
-                  const prefix = isShorthand ? '@' : 'v-on:';
-                  const expPart = prop.exp && 'content' in prop.exp ? `="${prop.exp.content}"` : '';
-                  const newSnippet = `${prefix}${targetReplacementEvent}${expPart}`;
-
-                  patches.push({
-                    file: filePath,
-                    line: absLine,
-                    column: absCol,
-                    targetTag: el.tag,
-                    oldSnippet: rawPropText,
-                    newSnippet,
-                    description: `Rename event listener "${eventName}" to "${targetReplacementEvent}" on <${el.tag}>`,
-                  });
-                } else if (refactorType === 'remove_event') {
-                  patches.push({
-                    file: filePath,
-                    line: absLine,
-                    column: absCol,
-                    targetTag: el.tag,
-                    oldSnippet: rawPropText,
-                    newSnippet: '',
-                    description: `Remove event listener "${eventName}" on <${el.tag}>`,
-                  });
-                }
-              }
-            }
+        } else if (refactorType === 'rename_event' || refactorType === 'remove_event') {
+          if (prop.type === NodeTypes.DIRECTIVE) {
+            handleEventDirective(prop, el, absLine, absCol, rawPropText);
           }
         }
       }
-
-      el.children?.forEach(walk);
     }
+
+    el.children?.forEach(walk);
   }
 
   walk(ast);

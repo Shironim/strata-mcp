@@ -97,6 +97,40 @@ export async function buildComponentCatalog(rootDir: string): Promise<Map<string
 
 /**
  * Extracts custom component tags rendered in a template or JSX (e.g. <AppHeader>, <app-button>).
+ */
+function resolveDynamicComponentTag(
+  prop: any,
+  getTsSourceFile: () => ts.SourceFile,
+  tags: Set<string>
+): void {
+  if (
+    prop.type !== NodeTypes.DIRECTIVE ||
+    prop.name !== 'bind' ||
+    !prop.arg ||
+    !('content' in prop.arg) ||
+    prop.arg.content !== 'is' ||
+    !prop.exp ||
+    !('content' in prop.exp)
+  ) {
+    return;
+  }
+
+  const exp = prop.exp.content.trim();
+  const directMatch = exp.match(/^([A-Z][A-Za-z0-9_$]*)$/);
+  if (directMatch) {
+    tags.add(directMatch[1]);
+    return;
+  }
+
+  const mapMatch = exp.match(/^([A-Za-z0-9_$]+)(?:\[|\.)/);
+  if (mapMatch) {
+    extractDictionaryComponentsFromTsAst(getTsSourceFile(), mapMatch[1], tags);
+  }
+}
+
+/**
+ * Traverses Vue/Nuxt SFC template AST, TSX JSX elements, and Astro component templates
+ * to extract all rendered child custom component tags with 100% precision.
  * Also resolves dynamic components rendered via Vue/Nuxt `<component :is="...">` and dictionary maps
  * using official AST traversals (@vue/compiler-dom and TypeScript Compiler API).
  */
@@ -127,30 +161,13 @@ export function extractRenderedCustomTags(content: string): string[] {
       const ast = parseDom(templateSource, { comments: false });
       walkVueDom(ast, (el) => {
         if (el.tag === 'component') {
-          // Dynamic component: <component :is="...">
           for (const prop of el.props) {
-            if (
-              prop.type === NodeTypes.DIRECTIVE &&
-              prop.name === 'bind' &&
-              prop.arg &&
-              'content' in prop.arg &&
-              prop.arg.content === 'is' &&
-              prop.exp &&
-              'content' in prop.exp
-            ) {
-              const exp = prop.exp.content.trim();
-              const directMatch = exp.match(/^([A-Z][A-Za-z0-9_$]*)$/);
-              if (directMatch) {
-                tags.add(directMatch[1]);
-              } else {
-                const mapMatch = exp.match(/^([A-Za-z0-9_$]+)(?:\[|\.)/);
-                if (mapMatch) {
-                  extractDictionaryComponentsFromTsAst(getTsSourceFile(), mapMatch[1], tags);
-                }
-              }
-            }
+            resolveDynamicComponentTag(prop, getTsSourceFile, tags);
           }
-        } else if (
+          return;
+        }
+
+        if (
           /^[A-Z][A-Za-z0-9_]*$/.test(el.tag) ||
           /^[a-z][a-z0-9_]*-[a-z0-9_-]*$/.test(el.tag)
         ) {
