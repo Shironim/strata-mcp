@@ -17,6 +17,7 @@ import {
 } from './engine/database';
 import { handleStrataInit } from './cli/commands/init';
 import { STRATA_VERSION } from './version';
+import { StrataTelemetry, formatSummaryAsText } from './engine/telemetry';
 import type { PatchRefactorType, RouteFramework } from './types';
 
 function printHelp() {
@@ -38,6 +39,7 @@ Commands:
   routes, scan-routes [target-dir]        Scan and resolve file-based routing paths
   impact, state-impact <state-id>         Trace blast radius and state consumers
   unused-state, dead-state [target-dir]   Audit unused stores, composables, or state variables
+  stats, telemetry [target-dir]           Show tool latency percentiles, error rates, and telemetry stats
   sync [target-dir]                       Synchronize project cache and index database
   unused, audit [target-dir]              Audit dead or unreferenced components
   rule <rule-file-or-yaml>                Execute custom ast-grep lint and audit rules
@@ -416,6 +418,18 @@ export async function main(argv: string[] = process.argv.slice(2)) {
         console.log(JSON.stringify(result, null, 2));
       } else {
         console.log(formatApiContractsAsText(result));
+      }
+      return;
+    }
+
+    if (command === 'stats' || command === 'telemetry') {
+      const scanPath = positional[1] || targetPath;
+      const summary = StrataTelemetry.getSummary(scanPath);
+
+      if (isJson) {
+        console.log(JSON.stringify(summary, null, 2));
+      } else {
+        console.log(formatSummaryAsText(summary));
       }
       return;
     }

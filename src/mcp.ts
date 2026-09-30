@@ -45,11 +45,16 @@ export function createMcpServer(): Server {
     const startTime = performance.now();
     const tool = findTool(name);
 
+    const traceId = args.trace_id || args.traceId ? String(args.trace_id || args.traceId) : undefined;
+    const sessionId = args.session_id || args.sessionId ? String(args.session_id || args.sessionId) : undefined;
+
     if (!tool) {
       const errorMsg = `Unknown tool name: ${name}. Available tools: ${TOOLS.map((t) => t.name).join(', ')}.`;
       StrataTelemetry.recordToolCall({
         event: 'tool_call_failed',
         tool: name,
+        trace_id: traceId,
+        session_id: sessionId,
         duration_ms: Math.round(performance.now() - startTime),
         input: args,
         status: 'error',
@@ -72,11 +77,47 @@ export function createMcpServer(): Server {
 
       let bytesOut = 0;
       let linesOut = 0;
+      let itemsFound = 0;
+
       if (Array.isArray(response?.content)) {
         for (const item of response.content) {
           if (typeof item.text === 'string') {
             bytesOut += Buffer.byteLength(item.text, 'utf8');
             linesOut += item.text.split('\n').length;
+
+            // Attempt to parse JSON response for precise domain items count
+            try {
+              const parsed = JSON.parse(item.text);
+              if (Array.isArray(parsed)) {
+                itemsFound += parsed.length;
+              } else if (typeof parsed === 'object' && parsed !== null) {
+                if (typeof parsed.totalEndpointsFound === 'number') {
+                  itemsFound += parsed.totalEndpointsFound;
+                } else if (typeof parsed.totalRoutesFound === 'number') {
+                  itemsFound += parsed.totalRoutesFound;
+                } else if (typeof parsed.totalFilesAudited === 'number') {
+                  itemsFound += parsed.totalFilesAudited;
+                } else if (typeof parsed.totalPatches === 'number') {
+                  itemsFound += parsed.totalPatches;
+                } else if (Array.isArray(parsed.matches)) {
+                  itemsFound += parsed.matches.length;
+                } else if (Array.isArray(parsed.props)) {
+                  itemsFound += parsed.props.length;
+                } else if (Array.isArray(parsed.endpoints)) {
+                  itemsFound += parsed.endpoints.length;
+                } else if (Array.isArray(parsed.routes)) {
+                  itemsFound += parsed.routes.length;
+                } else if (Array.isArray(parsed.children)) {
+                  itemsFound += parsed.children.length;
+                }
+              }
+            } catch {
+              // Text output heuristic: count markdown bullet points
+              const bulletMatches = item.text.match(/^\s*[-*•]\s+/gm);
+              if (bulletMatches) {
+                itemsFound += bulletMatches.length;
+              }
+            }
           }
         }
       }
@@ -84,9 +125,11 @@ export function createMcpServer(): Server {
       StrataTelemetry.recordToolCall({
         event: 'tool_call_completed',
         tool: name,
+        trace_id: traceId,
+        session_id: sessionId,
         duration_ms: durationMs,
         input: args,
-        metrics: { bytes_out: bytesOut, lines_out: linesOut },
+        metrics: { bytes_out: bytesOut, lines_out: linesOut, items_found: itemsFound },
         status: response?.isError ? 'error' : 'success',
       });
 
@@ -98,6 +141,8 @@ export function createMcpServer(): Server {
       StrataTelemetry.recordToolCall({
         event: 'tool_call_failed',
         tool: name,
+        trace_id: traceId,
+        session_id: sessionId,
         duration_ms: durationMs,
         input: args,
         status: 'error',
