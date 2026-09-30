@@ -12,7 +12,7 @@ import type { McpToolDefinition } from './types';
 export const inspectComponentTool: McpToolDefinition = {
   name: 'inspect_component',
   description:
-    'Deep component inspection (.vue, .tsx, .jsx, .astro). Extracts interface contracts (props/emits/slots), data fetching boundaries (Inertia, TanStack Query, Axios endpoints & payload keys), form schemas & file uploads, reactivity smells (props destructuring, direct mutations), and slices symbols with blast radius.',
+    'Deep component inspection (.vue, .tsx, .jsx, .astro). Extracts interface contracts (props/emits/slots), layout structure & dynamic classes (:class, Tailwind layout tokens, v-show/v-if), data fetching boundaries (Inertia, TanStack Query, Axios endpoints & backend target hints), form schemas, and reactivity smells.',
   inputSchema: {
     type: 'object',
     properties: {

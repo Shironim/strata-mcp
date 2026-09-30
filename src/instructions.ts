@@ -30,13 +30,13 @@ Always operate in two distinct phases:
 
 | Investigation Need | Recommended Tool | Key Arguments | Delivered Value |
 |---|---|---|---|
-| **Component Interface Contract** | \`inspect_component\` | \`path: "..."\` | Public props, emits, slots, models, variants without HTML bloat. |
+| **Component Interface Contract** | \`inspect_component\` | \`path: "..."\` | Public props, emits, slots, models, variants, layout token classes, and bidirectional data transport hazard analysis without HTML bloat. |
 | **Precision Function Slicing** | \`inspect_component\` | \`path: "...", symbol: "..."\` | Isolated method/symbol body with exact line numbers & callers. |
 | **Audit Events & Reactivity** | \`inspect_component\` | \`path: "...", audit_events: true\` | Detect broken template-to-script handlers & Vue/React reactivity smells. |
 | **Downward Component Hierarchy** | \`get_component_tree\` | \`entry_path\` or \`route\`, \`direction: "downward"\` | Complete rendered child tree & props drilling detection. |
 | **Upward Blast Radius** | \`get_component_tree\` | \`entry_path: "...", direction: "upward"\` | All parent components and pages impacted by modifying a leaf file. |
 | **Route Map & Topology** | \`get_routes\` | \`targetPath?: "...", framework?: "next-app"|"nuxt"|"astro"|"inertia"\` | Instant file-based routing topology, layouts, dynamic parameters, and page handlers. |
-| **Outbound API Contracts** | \`get_api_contracts\` | \`targetPath?: "..."\` | Maps API endpoints, HTTP methods, TanStack/Inertia/Axios network boundaries, and payload contracts. |
+| **Outbound API Contracts** | \`get_api_contracts\` | \`targetPath?: "..."\` | Maps API endpoints, HTTP methods, network boundaries, and \`backendTargetHint\` (universal route-to-controller resolution). |
 | **Trace State & Composables** | \`trace_state\` | \`identifier: "...", depth: 1|2+\` | Map consuming components for Pinia/Zustand stores, contexts, composables. |
 | **Health, Duplication & APIs** | \`audit_frontend\` | \`target?: "all"|"routes"|"dead-components"|"dead-state"|"similar-templates"|"design-tokens"|"bundle-health"|"api-contracts"\` | Diagnostic manifest of dead components/state, duplicated templates, design token drift, hydration weight, and routes/APIs. |
 | **Prescriptive Patch Plan** | \`generate_patch_plan\` | \`component_path: "...", refactor_type: "rename_prop", old_name: "...", new_name: "..."\` | Prescriptive AST patch recommendations (file, line, column, replacement snippet) across all consumers. |

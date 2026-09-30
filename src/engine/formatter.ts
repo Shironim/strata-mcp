@@ -223,7 +223,10 @@ export function formatContractAsText(contract: ComponentContract): string {
     for (const b of contract.boundaryContracts) {
       const lineStr = b.loc ? `Line ${b.loc.line}: ` : '';
       const payloadStr = b.payloadKeys && b.payloadKeys.length > 0 ? ` [payload: ${b.payloadKeys.join(', ')}]` : '';
-      lines.push(`  - ${lineStr}[${b.boundaryType}] ${b.method} ${b.targetEndpoint}${payloadStr}`);
+      const hintStr = b.backendTargetHint
+        ? ` -> [Backend Target: ${b.backendTargetHint.targetIntent} | ${b.backendTargetHint.suggestedSymbols[0]}]`
+        : '';
+      lines.push(`  - ${lineStr}[${b.boundaryType}] ${b.method} ${b.targetEndpoint}${payloadStr}${hintStr}`);
     }
   }
 
@@ -236,6 +239,104 @@ export function formatContractAsText(contract: ComponentContract): string {
       for (const field of f.fields) {
         const reqStr = field.required ? ' [REQUIRED]' : '';
         lines.push(`      • ${field.key} (${field.type})${reqStr}`);
+      }
+    }
+  }
+
+  if (contract.layoutStructure) {
+    const { rootWrapper, dynamicBindings, visibilityDirectives } = contract.layoutStructure;
+    const hasData = rootWrapper || dynamicBindings.length > 0 || visibilityDirectives.length > 0;
+    if (hasData) {
+      lines.push('');
+      lines.push('Layout & Dynamic Styling Structure:');
+      if (rootWrapper) {
+        const tokensStr = rootWrapper.layoutTokens.length > 0
+          ? ` (Tokens: ${rootWrapper.layoutTokens.join(' ')})`
+          : '';
+        lines.push(`  - Root Wrapper: <${rootWrapper.tag}>${tokensStr}`);
+      }
+      if (dynamicBindings.length > 0) {
+        lines.push(`  - Dynamic Class Bindings (${dynamicBindings.length}):`);
+        for (const db of dynamicBindings) {
+          lines.push(`      • L${db.line} <${db.tag} ${db.directive}>: [${db.tokens.join(', ')}] when (${db.condition})`);
+        }
+      }
+      if (visibilityDirectives.length > 0) {
+        lines.push(`  - Visibility Directives (${visibilityDirectives.length}):`);
+        for (const vd of visibilityDirectives) {
+          lines.push(`      • L${vd.line} <${vd.tag} ${vd.directive}="${vd.expression}">`);
+        }
+      }
+    }
+  }
+
+  if (contract.transportContract) {
+    const { egress, ingress, transportRisks } = contract.transportContract;
+    const hasData = egress.length > 0 || ingress.length > 0 || transportRisks.length > 0;
+    if (hasData) {
+      lines.push('');
+      lines.push('Bidirectional Data Transport & Boundary Contracts:');
+
+      if (egress.length > 0) {
+        lines.push(`  - Outbound Egress Payloads (${egress.length}):`);
+        for (const e of egress) {
+          const keysStr = e.payloadKeys.length > 0 ? ` { ${e.payloadKeys.join(', ')} }` : '';
+          lines.push(
+            `      • [${e.method}] ${e.endpoint} via ${e.clientKind} (${e.serialization}, casing: ${e.casing})${keysStr}`
+          );
+        }
+      }
+
+      if (ingress.length > 0) {
+        lines.push(`  - Inbound Ingress Shapes (${ingress.length}):`);
+        for (const i of ingress) {
+          lines.push(
+            `      • prop '${i.rootPropName}' (expected: ${i.expectedShape}, accessed fields: ${i.accessedProperties.length})`
+          );
+        }
+      }
+
+      if (contract.transportContract.validationSchemas && contract.transportContract.validationSchemas.length > 0) {
+        lines.push(`  - Validation Schemas (${contract.transportContract.validationSchemas.length}):`);
+        for (const s of contract.transportContract.validationSchemas) {
+          lines.push(
+            `      • ${s.name} (${s.schemaLibrary}): ${s.fields
+              .map((f) => `${f.field}:${f.baseType}${f.isOptional ? '?' : ''}`)
+              .join(', ')}`
+          );
+        }
+      }
+
+      if (contract.transportContract.errorHandling) {
+        const eh = contract.transportContract.errorHandling;
+        const errSourcesStr = eh.errorSources.length > 0 ? ` (Sources: ${eh.errorSources.join(', ')})` : '';
+        lines.push(`  - Error Handling & 422 Rejection Audit${errSourcesStr}:`);
+        lines.push(
+          `      • Bound Error Fields: ${eh.boundErrorFields.length > 0 ? eh.boundErrorFields.join(', ') : '(none)'}`
+        );
+        if (eh.unhandledPayloadKeys.length > 0) {
+          lines.push(`      • Unhandled Payload Keys: ${eh.unhandledPayloadKeys.join(', ')} [Silent 422 Risk]`);
+        }
+      }
+
+      if (contract.transportContract.invalidationGraph) {
+        const ig = contract.transportContract.invalidationGraph;
+        if (ig.invalidations.length > 0) {
+          lines.push(`  - Cache Invalidation Triggers (${ig.invalidations.length}):`);
+          for (const inv of ig.invalidations) {
+            lines.push(`      • L${inv.line} [${inv.mechanism}] -> ${inv.targetKeyOrUrl}`);
+          }
+        }
+        if (ig.hasDanglingMutation) {
+          lines.push(`      • Dangling Mutations (No Invalidation): ${ig.danglingMutations.join(', ')}`);
+        }
+      }
+
+      if (transportRisks.length > 0) {
+        lines.push(`  - Transport Risk Warnings (${transportRisks.length}):`);
+        for (const r of transportRisks) {
+          lines.push(`      ⚠️ ${r}`);
+        }
       }
     }
   }

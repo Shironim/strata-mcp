@@ -248,6 +248,10 @@ export function extractStyleTokens(content: string): ComponentStyleTokens | unde
  * Extracts Vue component contract from .vue source code.
  */
 
+import { extractLayoutStructure } from './layout-extractor';
+import { synthesizeBackendTargetHint } from './api-contract';
+import { analyzeBidirectionalTransport } from './transport-analyzer';
+
 export function extractRenderBoundary(
   filePath: string,
   content: string,
@@ -919,7 +923,8 @@ export function extractBoundaryContracts(
         endpointSource,
         payloadKeys: payloadKeys.length > 0 ? payloadKeys : undefined,
         optimisticUpdate: false,
-        loc: { line }
+        loc: { line },
+        backendTargetHint: synthesizeBackendTargetHint(method, targetEndpoint),
       });
     }
   }
@@ -948,6 +953,7 @@ export function extractBoundaryContracts(
       endpointSource,
       payloadKeys: payloadKeys && payloadKeys.length > 0 ? payloadKeys : undefined,
       optimisticUpdate: false,
+      backendTargetHint: synthesizeBackendTargetHint(method, targetEndpoint),
       loc: { line }
     });
   }
@@ -1186,6 +1192,13 @@ export async function extractComponentContract(
 
   const boundaryContracts = extractBoundaryContracts(content, framework);
   const formContracts = extractFormContracts(content);
+  const layoutStructure = extractLayoutStructure(resolvedPath, content, framework);
+  const transportContract = analyzeBidirectionalTransport(
+    boundaryContracts,
+    formContracts,
+    baseContract.props,
+    content
+  );
 
   const shouldInferProps = options.inferProps !== false;
   const shouldResolveGlobals = options.resolveGlobals !== false;
@@ -1203,6 +1216,11 @@ export async function extractComponentContract(
     renderBoundary,
     stateDependencies,
     dataDependencies,
+    layoutStructure,
+    transportContract:
+      transportContract.egress.length > 0 || transportContract.ingress.length > 0
+        ? transportContract
+        : undefined,
     boundaryContracts: boundaryContracts.length > 0 ? boundaryContracts : undefined,
     formContracts: formContracts.length > 0 ? formContracts : undefined,
     inferredProps: inferredProps && inferredProps.length > 0 ? inferredProps : undefined,

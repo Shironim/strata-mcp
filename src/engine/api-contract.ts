@@ -2,12 +2,156 @@ import { promises as fs } from 'node:fs';
 import { resolve, relative, basename } from 'node:path';
 import { collectFiles } from './collector';
 import { findProjectRoot } from './path-resolver';
+import { STRATA_VERSION } from '../version';
 import type {
   ApiClientKind,
   ApiContractItem,
   ApiContractResult,
   ApiMethod,
+  BackendTargetHint,
 } from '../types';
+
+function capitalize(str: string): string {
+  if (!str) return '';
+  return str.charAt(0).toUpperCase() + str.slice(1);
+}
+
+function singularize(word: string): string {
+  if (!word) return '';
+  const lower = word.toLowerCase();
+  if (
+    lower === 'checkout' ||
+    lower === 'status' ||
+    lower === 'news' ||
+    lower === 'business' ||
+    lower === 'process'
+  ) {
+    return word;
+  }
+  if (lower.endsWith('ies') && lower.length > 4) {
+    return word.slice(0, -3) + 'y';
+  }
+  if (
+    lower.endsWith('es') &&
+    (lower.endsWith('xes') || lower.endsWith('shes') || lower.endsWith('ches')) &&
+    lower.length > 3
+  ) {
+    return word.slice(0, -2);
+  }
+  if (lower.endsWith('s') && !lower.endsWith('ss') && lower.length > 2) {
+    return word.slice(0, -1);
+  }
+  return word;
+}
+
+/**
+ * Synthesizes a bridge hint for downstream backend analysis tools or agent vertical-slice tracers.
+ * Transforms frontend outbound endpoints (e.g. POST /api/v1/checkout or route('orders.store'))
+ * into backend controller, action, and route intent candidates.
+ */
+export function synthesizeBackendTargetHint(
+  method: ApiMethod | string,
+  endpoint: string
+): BackendTargetHint {
+  const normMethod = (method || 'GET').toUpperCase();
+  const trimmedEndpoint = endpoint.trim();
+
+  // 1. Detect Ziggy named routes e.g. route('checkout.store') or 'orders.index'
+  const ziggyMatch = trimmedEndpoint.match(/^(?:route\s*\(\s*)?['"]?([a-zA-Z0-9_.-]+)['"]?\s*\)?$/);
+  const isNamedRoute = Boolean(
+    ziggyMatch &&
+    !trimmedEndpoint.startsWith('/') &&
+    !trimmedEndpoint.startsWith('http') &&
+    ziggyMatch[1].includes('.')
+  );
+
+  if (isNamedRoute && ziggyMatch) {
+    const namedRoute = ziggyMatch[1];
+    const parts = namedRoute.split('.');
+    const resource = parts[0];
+    const action = parts[parts.length - 1];
+    const entityName = capitalize(singularize(resource));
+    const targetIntent = `${normMethod} ${namedRoute}`;
+
+    return {
+      targetIntent,
+      routePattern: namedRoute,
+      namedRoute,
+      suggestedSymbols: [
+        `${entityName}Controller`,
+        `${entityName}Controller@${action}`,
+        `${entityName}Action`,
+        `${entityName}Service`,
+      ],
+    };
+  }
+
+  // 2. Normalize REST path
+  // Strip protocol, host, and query params
+  const cleanPath = trimmedEndpoint
+    .replace(/^https?:\/\/[^/]+/i, '')
+    .split('?')[0]
+    .replace(/^\/+/, '')
+    .replace(/\/+$/, '');
+
+  // Strip common prefix like api/v1/ or api/
+  const strippedPath = cleanPath.replace(/^api\/(?:v[0-9]+\/)?/i, '');
+  const segments = strippedPath.split('/').filter(Boolean);
+
+  // Extract non-parameter resource segments (e.g. 'users', 'posts', 'checkout')
+  const resourceSegments = segments.filter((s) => !s.startsWith(':') && !s.startsWith('{'));
+  const lastResource = resourceSegments[resourceSegments.length - 1] || 'Default';
+  const hasParamAtEnd =
+    segments[segments.length - 1]?.startsWith(':') ||
+    segments[segments.length - 1]?.startsWith('{');
+
+  const entityName = capitalize(singularize(lastResource));
+
+  // Determine standard REST action from HTTP method & path shape
+  let suggestedAction = 'handle';
+  const lowerResource = lastResource.toLowerCase();
+  const knownActionVerbs = [
+    'checkout',
+    'login',
+    'logout',
+    'register',
+    'verify',
+    'upload',
+    'search',
+    'export',
+    'import',
+    'cancel',
+    'process',
+    'sync',
+  ];
+
+  if (knownActionVerbs.includes(lowerResource)) {
+    suggestedAction = lowerResource;
+  } else if (normMethod === 'GET') {
+    suggestedAction = hasParamAtEnd ? 'show' : 'index';
+  } else if (normMethod === 'POST') {
+    suggestedAction = 'store';
+  } else if (normMethod === 'PUT' || normMethod === 'PATCH') {
+    suggestedAction = 'update';
+  } else if (normMethod === 'DELETE') {
+    suggestedAction = 'destroy';
+  }
+
+  const suggestedSymbols = [
+    `${entityName}Controller`,
+    `${entityName}Controller@${suggestedAction}`,
+    `${entityName}Action`,
+    `${entityName}Service`,
+  ];
+
+  const targetIntent = `${normMethod} ${cleanPath || trimmedEndpoint}`;
+
+  return {
+    targetIntent,
+    routePattern: cleanPath || trimmedEndpoint,
+    suggestedSymbols,
+  };
+}
 
 /**
  * Normalizes an API URL template (e.g. `/api/users/${id}` or `/api/v1/posts/` + id) into REST-style `/api/users/:id`.
@@ -82,19 +226,27 @@ export function extractApiContractsFromCode(code: string, filePath: string): Api
 
   // 1. axios.<method>(url, data?, config?)
   const AXIOS_METHOD_REGEX =
-    /\baxios\.(get|post|put|patch|delete|head|options)\s*(?:<[^>]+>)?\s*\(\s*(`[^`]+`|'[^']+'|"[^"]+")(?:\s*,\s*([^)]*))?\)/gi;
+    /\baxios\.(get|post|put|patch|delete|head|options)\s*(?:<[^>]+>)?\s*\(\s*(`[^`]+`|'[^']+'|"[^"]+")(?:\s*\+\s*([a-zA-Z0-9_$.]+))?(?:\s*,\s*([^)]*))?\)/gi;
 
   // 2. $fetch(url, options?) or useFetch(url, options?)
   const NUXT_FETCH_REGEX =
-    /\b(\$fetch|useFetch)\s*(?:<[^>]+>)?\s*\(\s*(`[^`]+`|'[^']+'|"[^"]+")(?:\s*,\s*(\{[\s\S]*?\}))?\)/gi;
+    /\b(\$fetch|useFetch)\s*(?:<[^>]+>)?\s*\(\s*(`[^`]+`|'[^']+'|"[^"]+")(?:\s*\+\s*([a-zA-Z0-9_$.]+))?(?:\s*,\s*(\{[\s\S]*?\}))?\)/gi;
 
   // 3. fetch(url, options?)
   const NATIVE_FETCH_REGEX =
-    /\bfetch\s*\(\s*(`[^`]+`|'[^']+'|"[^"]+")(?:\s*,\s*(\{[\s\S]*?\}))?\)/gi;
+    /\bfetch\s*\(\s*(`[^`]+`|'[^']+'|"[^"]+")(?:\s*\+\s*([a-zA-Z0-9_$.]+))?(?:\s*,\s*(\{[\s\S]*?\}))?\s*\)/gi;
 
   // 4. useQuery({ queryKey: [...], queryFn: ... })
   const USE_QUERY_REGEX =
     /\buseQuery\s*\(\s*\{[\s\S]*?queryKey\s*:\s*\[([^\]]+)\]/gi;
+
+  // 5. SWR: useSWR(url, fetcher?)
+  const SWR_REGEX =
+    /\buseSWR(?:<[^>]+>)?\s*\(\s*(`[^`]+`|'[^']+'|"[^"]+")/gi;
+
+  // 6. Inertia router calls: router.post(url, data)
+  const INERTIA_ROUTER_REGEX =
+    /\brouter\.(post|put|patch|delete|get|visit)\s*\(\s*(?:route\s*\(\s*['"]([^'"]+)['"]\s*\)|(`[^`]+`|'[^']+'|"[^"]+"))/gi;
 
   // Helper to compute line and column from regex index
   function getLineCol(index: number): { line: number; column: number } {
@@ -114,17 +266,21 @@ export function extractApiContractsFromCode(code: string, filePath: string): Api
   while ((match = AXIOS_METHOD_REGEX.exec(code)) !== null) {
     const rawMethod = match[1].toUpperCase() as ApiMethod;
     const rawUrl = match[2];
-    const dataOrOptions = match[3];
+    const concatVar = match[3];
+    const dataOrOptions = match[4];
     const loc = getLineCol(match.index);
+    const fullUrl = concatVar ? `${rawUrl} + ${concatVar}` : rawUrl;
+    const endpoint = normalizeEndpointUrl(fullUrl);
 
     items.push({
       file: filePath,
       line: loc.line,
       column: loc.column,
-      endpoint: normalizeEndpointUrl(rawUrl),
+      endpoint,
       method: rawMethod,
       clientKind: 'axios',
       payloadParams: extractPayloadParams(dataOrOptions),
+      backendTargetHint: synthesizeBackendTargetHint(rawMethod, endpoint),
     });
   }
 
@@ -132,17 +288,22 @@ export function extractApiContractsFromCode(code: string, filePath: string): Api
   while ((match = NUXT_FETCH_REGEX.exec(code)) !== null) {
     const clientKind = match[1] === '$fetch' ? '$fetch' : 'useFetch';
     const rawUrl = match[2];
-    const optionsStr = match[3];
+    const concatVar = match[3];
+    const optionsStr = match[4];
     const loc = getLineCol(match.index);
+    const fullUrl = concatVar ? `${rawUrl} + ${concatVar}` : rawUrl;
+    const endpoint = normalizeEndpointUrl(fullUrl);
+    const method = extractMethodFromOptions(optionsStr);
 
     items.push({
       file: filePath,
       line: loc.line,
       column: loc.column,
-      endpoint: normalizeEndpointUrl(rawUrl),
-      method: extractMethodFromOptions(optionsStr),
+      endpoint,
+      method,
       clientKind,
       payloadParams: extractPayloadParams(optionsStr),
+      backendTargetHint: synthesizeBackendTargetHint(method, endpoint),
     });
   }
 
@@ -155,17 +316,22 @@ export function extractApiContractsFromCode(code: string, filePath: string): Api
     }
 
     const rawUrl = match[1];
-    const optionsStr = match[2];
+    const concatVar = match[2];
+    const optionsStr = match[3];
     const loc = getLineCol(match.index);
+    const fullUrl = concatVar ? `${rawUrl} + ${concatVar}` : rawUrl;
+    const endpoint = normalizeEndpointUrl(fullUrl);
+    const method = extractMethodFromOptions(optionsStr);
 
     items.push({
       file: filePath,
       line: loc.line,
       column: loc.column,
-      endpoint: normalizeEndpointUrl(rawUrl),
-      method: extractMethodFromOptions(optionsStr),
+      endpoint,
+      method,
       clientKind: 'fetch',
       payloadParams: extractPayloadParams(optionsStr),
+      backendTargetHint: synthesizeBackendTargetHint(method, endpoint),
     });
   }
 
@@ -175,13 +341,52 @@ export function extractApiContractsFromCode(code: string, filePath: string): Api
     const urlMatch = keyContent.match(/['"`]([^'"`]+)['"`]/);
     if (urlMatch && (urlMatch[1].startsWith('/') || urlMatch[1].startsWith('http') || urlMatch[1].includes('api'))) {
       const loc = getLineCol(match.index);
+      const endpoint = normalizeEndpointUrl(urlMatch[1]);
       items.push({
         file: filePath,
         line: loc.line,
         column: loc.column,
-        endpoint: normalizeEndpointUrl(urlMatch[1]),
+        endpoint,
         method: 'GET',
         clientKind: 'useQuery',
+        backendTargetHint: synthesizeBackendTargetHint('GET', endpoint),
+      });
+    }
+  }
+
+  // Scan SWR: useSWR(url, fetcher)
+  while ((match = SWR_REGEX.exec(code)) !== null) {
+    const rawUrl = match[1];
+    const loc = getLineCol(match.index);
+    const endpoint = normalizeEndpointUrl(rawUrl);
+    items.push({
+      file: filePath,
+      line: loc.line,
+      column: loc.column,
+      endpoint,
+      method: 'GET',
+      clientKind: 'custom',
+      backendTargetHint: synthesizeBackendTargetHint('GET', endpoint),
+    });
+  }
+
+  // Scan Inertia router calls: router.post, router.visit, router.get, etc.
+  while ((match = INERTIA_ROUTER_REGEX.exec(code)) !== null) {
+    const rawMethod = match[1].toUpperCase();
+    const method: ApiMethod = rawMethod === 'VISIT' ? 'GET' : (rawMethod as ApiMethod);
+    const isZiggy = Boolean(match[2]);
+    const rawEndpoint = isZiggy ? `route('${match[2]}')` : match[3];
+    if (rawEndpoint) {
+      const loc = getLineCol(match.index);
+      const endpoint = isZiggy ? rawEndpoint : normalizeEndpointUrl(rawEndpoint);
+      items.push({
+        file: filePath,
+        line: loc.line,
+        column: loc.column,
+        endpoint,
+        method,
+        clientKind: 'custom',
+        backendTargetHint: synthesizeBackendTargetHint(method, endpoint),
       });
     }
   }
@@ -196,8 +401,8 @@ export async function extractWorkspaceApiContracts(options?: {
   targetPath?: string;
   scopePath?: string;
 }): Promise<ApiContractResult> {
-  const root = options?.targetPath ? resolve(options.targetPath) : (findProjectRoot() ?? process.cwd());
-  const files = await collectFiles(root, options?.scopePath);
+  const root = options?.targetPath ? resolve(options.targetPath) : (findProjectRoot(process.cwd()) ?? process.cwd());
+  const files = await collectFiles(root, options?.scopePath ? { scopePath: options.scopePath } : undefined);
 
   const allEndpoints: ApiContractItem[] = [];
   const endpointSummary: Record<string, { methods: ApiMethod[]; callers: string[] }> = {};
@@ -235,8 +440,7 @@ export async function extractWorkspaceApiContracts(options?: {
     endpoints: allEndpoints,
     endpointSummary,
     _meta: {
-      framework: 'multi-framework',
-      version: '0.7.3',
+      version: STRATA_VERSION,
     },
   };
 }
@@ -275,6 +479,11 @@ export function formatApiContractsAsText(result: ApiContractResult): string {
     lines.push(
       `- **\`${item.method}\`** \`${item.endpoint}\` via *${item.clientKind}* at [${basename(item.file)}#L${item.line}](file://${item.file}#L${item.line})${payloadStr}`
     );
+    if (item.backendTargetHint) {
+      lines.push(
+        `  - *Backend Target Hint:* \`${item.backendTargetHint.targetIntent}\` ➔ \`${item.backendTargetHint.suggestedSymbols[0]}\``
+      );
+    }
   }
 
   if (result.endpoints.length > 30) {

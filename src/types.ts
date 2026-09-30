@@ -156,6 +156,33 @@ export interface ComponentStyleTokens {
   positioning: string[];
 }
 
+export interface DynamicClassBinding {
+  line: number;
+  tag: string;
+  directive: ':class' | 'className';
+  condition: string;
+  tokens: string[];
+}
+
+export interface VisibilityDirective {
+  line: number;
+  tag: string;
+  directive: 'v-show' | 'v-if' | 'v-else-if' | 'v-else';
+  expression: string;
+}
+
+export interface RootWrapperLayout {
+  tag: string;
+  layoutTokens: string[];
+  rawClass?: string;
+}
+
+export interface ComponentLayoutStructure {
+  rootWrapper?: RootWrapperLayout;
+  dynamicBindings: DynamicClassBinding[];
+  visibilityDirectives: VisibilityDirective[];
+}
+
 export interface InferredPropProperty {
   property: string;
   inferredType?: string;
@@ -171,6 +198,73 @@ export interface GlobalSymbolInfo {
   name: string;
   category: 'ziggy-route' | 'auto-import' | 'global-helper' | 'inferred-global';
   hint?: string;
+}
+
+export type SerializationFormat = 'json' | 'multipart/form-data' | 'query-params' | 'unknown';
+
+export interface EgressTransportContract {
+  endpoint: string;
+  method: string;
+  clientKind: string;
+  serialization: SerializationFormat;
+  payloadKeys: string[];
+  casing: 'camelCase' | 'snake_case' | 'mixed' | 'unknown';
+  potentialRisks: string[];
+}
+
+export interface IngressTransportContract {
+  source: 'page-props' | 'tanstack-query' | 'swr' | 'fetch-response' | 'inertia-shared';
+  rootPropName: string;
+  expectedShape: 'paginated-collection' | 'array' | 'entity-object' | 'primitive' | 'unknown';
+  accessedProperties: Array<{
+    path: string;
+    inferredType: string;
+    hasNullGuard: boolean;
+  }>;
+  potentialRisks: string[];
+}
+
+export interface ValidationFieldRule {
+  field: string;
+  baseType: string;
+  isOptional: boolean;
+  isNullable: boolean;
+  constraints: string[];
+}
+
+export interface ValidationSchemaContract {
+  name: string;
+  schemaLibrary: 'zod' | 'valibot' | 'yup' | 'typescript-interface';
+  fields: ValidationFieldRule[];
+}
+
+export interface ErrorHandlingAudit {
+  hasErrorBinding: boolean;
+  errorSources: string[];
+  boundErrorFields: string[];
+  unhandledPayloadKeys: string[];
+}
+
+export interface InvalidationNode {
+  line: number;
+  mechanism: 'tanstack-invalidate' | 'swr-mutate' | 'inertia-reload' | 'custom';
+  targetKeyOrUrl: string;
+  triggerAction?: string;
+}
+
+export interface InvalidationGraphContract {
+  invalidations: InvalidationNode[];
+  hasDanglingMutation: boolean;
+  danglingMutations: string[];
+}
+
+export interface BidirectionalTransportContract {
+  egress: EgressTransportContract[];
+  ingress: IngressTransportContract[];
+  validationSchemas?: ValidationSchemaContract[];
+  errorHandling?: ErrorHandlingAudit;
+  invalidationGraph?: InvalidationGraphContract;
+  transportRisks: string[];
 }
 
 export interface ComponentContract {
@@ -190,6 +284,8 @@ export interface ComponentContract {
   inferredProps?: InferredPropDetail[];
   globalSymbols?: GlobalSymbolInfo[];
   styleTokens?: ComponentStyleTokens;
+  layoutStructure?: ComponentLayoutStructure;
+  transportContract?: BidirectionalTransportContract;
   reactivitySmells?: ReactivitySmell[];
   boundaryContracts?: BoundaryContract[];
   formContracts?: FormContract[];
@@ -575,6 +671,7 @@ export interface BoundaryContract {
   payloadKeys?: string[];
   optimisticUpdate?: boolean;
   loc?: { line: number; column?: number };
+  backendTargetHint?: BackendTargetHint;
 }
 
 // ---------------------------------------------------------------------------
@@ -716,6 +813,13 @@ export type ApiClientKind =
   | '$fetch'
   | 'custom';
 
+export interface BackendTargetHint {
+  targetIntent: string;
+  routePattern: string;
+  suggestedSymbols: string[];
+  namedRoute?: string;
+}
+
 export interface ApiContractItem {
   file: string;
   line: number;
@@ -725,6 +829,7 @@ export interface ApiContractItem {
   clientKind: ApiClientKind;
   payloadParams?: string[];
   callerFunction?: string;
+  backendTargetHint?: BackendTargetHint;
 }
 
 export interface ApiContractResult {
