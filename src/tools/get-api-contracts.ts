@@ -9,31 +9,36 @@ export const getApiContractsTool: McpToolDefinition = {
   inputSchema: {
     type: 'object',
     properties: {
-      targetPath: {
+      path: {
         type: 'string',
-        description: 'Workspace root or directory to scan for API call sites (alias: target_path, path).',
+        description: 'Workspace root or directory to scan for API call sites (alias: target_path, targetPath).',
       },
       target_path: {
         type: 'string',
-        description: 'Alias for targetPath',
+        description: 'Alias for path',
       },
-      path: {
+      targetPath: {
         type: 'string',
-        description: 'Alias for targetPath',
+        description: 'Alias for path',
       },
       scope_path: {
         type: 'string',
-        description: 'Sub-directory or workspace scope filter within targetPath (e.g. "apps/web") to avoid scanning entire monorepos',
+        description: 'Sub-directory or workspace scope filter within path (e.g. "apps/web") to avoid scanning entire monorepos',
       },
       exclude_dirs: {
         type: 'array',
         items: { type: 'string' },
         description: 'List of directory names or paths to ignore during traversal',
       },
+      format: {
+        type: 'string',
+        enum: ['text', 'json'],
+        description: 'Output format: text or json (default: "text", alias: output_format)',
+      },
       output_format: {
         type: 'string',
         enum: ['text', 'json'],
-        description: 'Output format: text or json (default: "text")',
+        description: 'Alias for format',
       },
     },
     required: [],
@@ -46,7 +51,7 @@ export const getApiContractsTool: McpToolDefinition = {
       : typeof args.exclude_dirs === 'string'
         ? (args.exclude_dirs as string).split(',').map((s) => s.trim()).filter(Boolean)
         : undefined;
-    const isJson = args.output_format === 'json';
+    const isJson = args.output_format === 'json' || args.format === 'json';
 
     try {
       const result = await extractWorkspaceApiContracts({ targetPath, scopePath, excludeDirs });

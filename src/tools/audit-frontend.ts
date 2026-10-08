@@ -22,13 +22,13 @@ export const auditFrontendTool: McpToolDefinition = {
   inputSchema: {
     type: 'object',
     properties: {
-      target_path: {
-        type: 'string',
-        description: 'Project root directory (alias: path, default: ".")',
-      },
       path: {
         type: 'string',
-        description: 'Alias for target_path',
+        description: 'Project root directory (alias: target_path, default: ".")',
+      },
+      target_path: {
+        type: 'string',
+        description: 'Alias for path',
       },
       scope_path: {
         type: 'string',

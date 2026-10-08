@@ -11,25 +11,29 @@ export const componentTreeTool: McpToolDefinition = {
   inputSchema: {
     type: 'object',
     properties: {
+      path: {
+        type: 'string',
+        description: 'Root component file path or project directory (alias: entry_path, file_path, filePath, component, component_path)',
+      },
       entry_path: {
         type: 'string',
-        description: 'Path to the root component/page file (alias: path, file_path, filePath, component, component_path)',
+        description: 'Alias for path',
       },
       file_path: {
         type: 'string',
-        description: 'Alias for entry_path',
+        description: 'Alias for path',
       },
       filePath: {
         type: 'string',
-        description: 'Alias for entry_path',
+        description: 'Alias for path',
       },
       component_path: {
         type: 'string',
-        description: 'Alias for entry_path',
+        description: 'Alias for path',
       },
       component: {
         type: 'string',
-        description: 'Alias for entry_path',
+        description: 'Alias for path',
       },
       route: {
         type: 'string',
@@ -42,10 +46,6 @@ export const componentTreeTool: McpToolDefinition = {
       target_path: {
         type: 'string',
         description: 'Project root or pages directory (default: ".")',
-      },
-      path: {
-        type: 'string',
-        description: 'Root component file path or project directory',
       },
       max_depth: {
         type: 'number',
@@ -72,10 +72,15 @@ export const componentTreeTool: McpToolDefinition = {
         description:
           'When true (default), displays props and data bindings passed down to child components [props: childProp <- parentExpr]',
       },
+      format: {
+        type: 'string',
+        enum: ['text', 'json'],
+        description: 'Output format: text (indented tree) or json (default: "text", alias: output_format)',
+      },
       output_format: {
         type: 'string',
         enum: ['text', 'json'],
-        description: 'Output format: text (indented tree) or json (default: "text")',
+        description: 'Alias for format',
       },
     },
   },
@@ -143,7 +148,7 @@ export const componentTreeTool: McpToolDefinition = {
       stripProps(tree.root);
     }
 
-    const isJson = args.output_format === 'json';
+    const isJson = args.output_format === 'json' || args.format === 'json';
     return {
       content: [
         {

@@ -10,17 +10,17 @@ export const getRoutesTool: McpToolDefinition = {
   inputSchema: {
     type: 'object',
     properties: {
-      targetPath: {
+      path: {
         type: 'string',
-        description: 'Workspace root or frontend directory to scan for routes (alias: target_path, path, default: active workspace).',
+        description: 'Workspace root or frontend directory to scan for routes (alias: target_path, targetPath, default: active workspace).',
       },
       target_path: {
         type: 'string',
-        description: 'Alias for targetPath',
+        description: 'Alias for path',
       },
-      path: {
+      targetPath: {
         type: 'string',
-        description: 'Alias for targetPath',
+        description: 'Alias for path',
       },
       framework: {
         type: 'string',
@@ -36,10 +36,15 @@ export const getRoutesTool: McpToolDefinition = {
         enum: ['summary', 'full', 'tree'],
         description: 'Output format style (default: "summary" for high-level token efficiency).',
       },
+      format: {
+        type: 'string',
+        enum: ['text', 'json'],
+        description: 'Output format: text or json (default: "text", alias: output_format)',
+      },
       output_format: {
         type: 'string',
         enum: ['text', 'json'],
-        description: 'Output format: text or json (default: "text")',
+        description: 'Alias for format',
       },
     },
     required: [],

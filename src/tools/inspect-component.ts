@@ -57,10 +57,15 @@ export const inspectComponentTool: McpToolDefinition = {
         description:
           'When true (default), identifies un-imported global symbols, Ziggy route() helpers, and auto-imported composables',
       },
+      format: {
+        type: 'string',
+        enum: ['text', 'json'],
+        description: 'Output format: text or json (default: "text", alias: output_format)',
+      },
       output_format: {
         type: 'string',
         enum: ['text', 'json'],
-        description: 'Output format: text or json (default: "text")',
+        description: 'Alias for format',
       },
     },
   },
@@ -107,7 +112,7 @@ export const inspectComponentTool: McpToolDefinition = {
       }
     } catch {}
 
-    const isJson = args.output_format === 'json';
+    const isJson = args.output_format === 'json' || args.format === 'json';
     const symbolName = args.symbol || args.symbol_name;
 
     // Sub-action A: Symbol slicing

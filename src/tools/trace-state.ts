@@ -31,13 +31,13 @@ export const traceStateTool: McpToolDefinition = {
         type: 'string',
         description: 'Alias for identifier',
       },
-      target_path: {
-        type: 'string',
-        description: 'Project root directory or file path (alias: path, file_path, filePath, default: ".")',
-      },
       path: {
         type: 'string',
-        description: 'Alias for target_path',
+        description: 'Project root directory or file path (alias: target_path, file_path, filePath, default: ".")',
+      },
+      target_path: {
+        type: 'string',
+        description: 'Alias for path',
       },
       file_path: {
         type: 'string',

@@ -10,25 +10,25 @@ export const patchPlanTool: McpToolDefinition = {
   inputSchema: {
     type: 'object',
     properties: {
+      path: {
+        type: 'string',
+        description: 'Path to the component file being refactored (alias: component_path, file_path, filePath, component, e.g. "src/components/Button.vue")',
+      },
       component_path: {
         type: 'string',
-        description: 'Path to the component file being refactored (alias: path, file_path, filePath, component, e.g. "src/components/Button.vue")',
+        description: 'Alias for path',
       },
       file_path: {
         type: 'string',
-        description: 'Alias for component_path',
+        description: 'Alias for path',
       },
       filePath: {
         type: 'string',
-        description: 'Alias for component_path',
+        description: 'Alias for path',
       },
       component: {
         type: 'string',
-        description: 'Alias for component_path',
-      },
-      path: {
-        type: 'string',
-        description: 'Alias for component_path',
+        description: 'Alias for path',
       },
       refactor_type: {
         type: 'string',
