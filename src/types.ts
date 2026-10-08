@@ -309,6 +309,7 @@ export interface ComponentTreeNode {
   alias?: string;
   isDynamic?: boolean;
   isAutoImported?: boolean;
+  isCircular?: boolean;
   isPage?: boolean;
   isExternalScope?: boolean;
   warning?: string;
@@ -330,7 +331,7 @@ export interface ComponentTreeResult {
   root: ComponentTreeNode;
   totalComponents: number;
   maxDepthReached: number;
-  direction?: 'downward' | 'upward';
+  direction?: 'downward' | 'upward' | 'down' | 'up';
   propsDrilling: PropsDrillingAlert[];
   contextGraph?: ContextDependencyGraph;
   resolvedRoute?: {
@@ -348,7 +349,7 @@ export interface ComponentTreeOptions {
   targetPath?: string;
   scopeFilter?: string | string[];
   maxDepth?: number;
-  direction?: 'downward' | 'upward';
+  direction?: 'downward' | 'upward' | 'down' | 'up';
   outputFormat?: 'text' | 'json';
   aliasMap?: Record<string, string>;
   includeLayouts?: boolean;
@@ -373,9 +374,11 @@ export interface ResolveRouteEntryResult {
 }
 
 export interface EngineMetadata {
-  engine: 'in-memory-ast' | 'sqlite-graph-cache' | 'ast-grep' | 'template-similarity-comparator';
-  durationMs: number;
+  engine?: 'in-memory-ast' | 'sqlite-graph-cache' | 'ast-grep' | 'template-similarity-comparator' | string;
+  durationMs?: number;
   cached?: boolean;
+  version?: string;
+  framework?: string;
 }
 
 export interface UnusedComponentInfo {
@@ -619,7 +622,7 @@ export interface ArbitraryTokenViolation {
   file: string;
   line: number;
   token: string;
-  category: 'color' | 'spacing' | 'radius' | 'size' | 'other';
+  category: 'color' | 'spacing' | 'radius' | 'size' | 'layout-trap' | 'other';
   recommendation: string;
 }
 
@@ -759,7 +762,11 @@ export type PatchRefactorType =
   | 'rename_prop'
   | 'remove_prop'
   | 'rename_event'
-  | 'remove_event';
+  | 'remove_event'
+  | 'rename_model'
+  | 'remove_model'
+  | 'rename_slot'
+  | 'remove_slot';
 
 export interface ComponentPatchItem {
   file: string;
