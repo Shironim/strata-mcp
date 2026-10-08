@@ -1,10 +1,11 @@
+import fs from 'node:fs';
 import {
   queryStateImpact,
   formatStateImpactAsText,
   traceStateChain,
   formatStateChainAsText,
 } from '../engine/database';
-import { resolveProjectRoot } from '../engine/path-resolver';
+import { resolveProjectRoot, resolveWorkspacePath } from '../engine/path-resolver';
 import type { McpToolDefinition } from './types';
 
 export const traceStateTool: McpToolDefinition = {
@@ -16,15 +17,35 @@ export const traceStateTool: McpToolDefinition = {
     properties: {
       identifier: {
         type: 'string',
-        description: 'State identifier to trace (e.g. "useCartStore", "useRouter", "usePenjualanForm")',
+        description: 'State identifier to trace (alias: state, store, composable, name, e.g. "useCartStore", "useRouter")',
+      },
+      state: {
+        type: 'string',
+        description: 'Alias for identifier',
+      },
+      store: {
+        type: 'string',
+        description: 'Alias for identifier',
+      },
+      composable: {
+        type: 'string',
+        description: 'Alias for identifier',
       },
       target_path: {
         type: 'string',
-        description: 'Project root directory (alias: path, default: ".")',
+        description: 'Project root directory or file path (alias: path, file_path, filePath, default: ".")',
       },
       path: {
         type: 'string',
         description: 'Alias for target_path',
+      },
+      file_path: {
+        type: 'string',
+        description: 'Alias for path',
+      },
+      filePath: {
+        type: 'string',
+        description: 'Alias for path',
       },
       depth: {
         type: 'number',
@@ -47,20 +68,54 @@ export const traceStateTool: McpToolDefinition = {
         description: 'Output format: text or json (default: "text")',
       },
     },
-    required: ['identifier'],
   },
   handler: async (args: Record<string, any>) => {
-    const identifier = args.identifier ? String(args.identifier).trim() : '';
+    let identifier = (args.identifier || args.state || args.state_name || args.store || args.store_name || args.composable || args.name || args.symbol)
+      ? String(args.identifier || args.state || args.state_name || args.store || args.store_name || args.composable || args.name || args.symbol).trim()
+      : '';
+
+    const rawTargetPath = (args.target_path || args.path || args.file_path || args.filePath)
+      ? String(args.target_path || args.path || args.file_path || args.filePath)
+      : undefined;
+
+    // If identifier is missing but a file path was supplied, attempt to auto-detect store/composable identifiers
+    if (!identifier && rawTargetPath) {
+      try {
+        const fullPath = resolveWorkspacePath(rawTargetPath);
+        if (fs.existsSync(fullPath) && fs.statSync(fullPath).isFile()) {
+          const content = fs.readFileSync(fullPath, 'utf8');
+          const storeMatches = [...content.matchAll(/defineStore\(\s*['"`]([^'"`]+)['"`]/g)].map((m) => m[1]);
+          const composableMatches = [...content.matchAll(/export\s+(?:const|function)\s+(use[A-Za-z0-9_]+)/g)].map((m) => m[1]);
+          const candidates = [...new Set([...storeMatches, ...composableMatches])];
+          if (candidates.length === 1) {
+            identifier = candidates[0];
+          } else if (candidates.length > 1) {
+            return {
+              isError: true,
+              content: [
+                {
+                  type: 'text',
+                  text: `Missing required argument: 'identifier'. Multiple potential state identifiers detected in '${rawTargetPath}': [${candidates.join(', ')}]. Please rerun trace_state with identifier set to one of these.`,
+                },
+              ],
+            };
+          }
+        }
+      } catch (_) {}
+    }
+
     if (!identifier) {
       return {
         isError: true,
-        content: [{ type: 'text', text: "Missing required argument: 'identifier'" }],
+        content: [
+          {
+            type: 'text',
+            text: "Missing required argument: 'identifier'. Please provide the store/state or composable name (e.g. 'useCartStore', 'useAuth').",
+          },
+        ],
       };
     }
 
-    const rawTargetPath = (args.target_path || args.path)
-      ? String(args.target_path || args.path)
-      : undefined;
     const targetPath = resolveProjectRoot(rawTargetPath);
     const depth = args.depth ? Number(args.depth) : 1;
     const isJson = args.output_format === 'json';

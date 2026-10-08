@@ -12,7 +12,19 @@ export const patchPlanTool: McpToolDefinition = {
     properties: {
       component_path: {
         type: 'string',
-        description: 'Path to the component file being refactored (e.g. "src/components/Button.vue")',
+        description: 'Path to the component file being refactored (alias: path, file_path, filePath, component, e.g. "src/components/Button.vue")',
+      },
+      file_path: {
+        type: 'string',
+        description: 'Alias for component_path',
+      },
+      filePath: {
+        type: 'string',
+        description: 'Alias for component_path',
+      },
+      component: {
+        type: 'string',
+        description: 'Alias for component_path',
       },
       path: {
         type: 'string',
@@ -20,12 +32,21 @@ export const patchPlanTool: McpToolDefinition = {
       },
       refactor_type: {
         type: 'string',
-        enum: ['rename_prop', 'remove_prop', 'rename_event', 'remove_event'],
-        description: 'The type of refactoring operation being performed',
+        enum: [
+          'rename_prop',
+          'remove_prop',
+          'rename_event',
+          'remove_event',
+          'rename_model',
+          'remove_model',
+          'rename_slot',
+          'remove_slot',
+        ],
+        description: 'The type of refactoring operation being performed (prop, event, model, or slot)',
       },
       old_name: {
         type: 'string',
-        description: 'Current prop or event name (e.g. "is-active", "type", "on-click")',
+        description: 'Current prop, model, slot, or event name (e.g. "is-active", "title", "header", "on-click")',
       },
       new_name: {
         type: 'string',
@@ -35,18 +56,28 @@ export const patchPlanTool: McpToolDefinition = {
         type: 'string',
         description: 'Workspace or project root directory (default: ".")',
       },
+      output_format: {
+        type: 'string',
+        enum: ['text', 'json'],
+        description: 'Output format: text or json (default: "text")',
+      },
     },
     required: ['refactor_type', 'old_name'],
   },
   handler: async (args: Record<string, any>) => {
-    const rawPath = args.component_path ?? args.path;
+    const rawPath =
+      args.component_path ??
+      args.path ??
+      args.file_path ??
+      args.filePath ??
+      args.component;
     if (!rawPath) {
       return {
         isError: true,
         content: [
           {
             type: 'text',
-            text: 'Error: Either "component_path" or "path" argument must be specified.',
+            text: 'Error: Either "component_path" or "path" (or "file_path") argument must be specified.',
           },
         ],
       };

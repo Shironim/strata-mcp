@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import { sliceSymbol, formatSymbolSliceAsText } from '../engine/slicer';
 import {
   auditEventHandlers,
@@ -18,7 +19,15 @@ export const inspectComponentTool: McpToolDefinition = {
     properties: {
       path: {
         type: 'string',
-        description: 'Target component or file path (alias: target_path)',
+        description: 'Target component or file path (alias: file_path, filePath, target_path)',
+      },
+      file_path: {
+        type: 'string',
+        description: 'Alias for path',
+      },
+      filePath: {
+        type: 'string',
+        description: 'Alias for path',
       },
       target_path: {
         type: 'string',
@@ -54,24 +63,49 @@ export const inspectComponentTool: McpToolDefinition = {
         description: 'Output format: text or json (default: "text")',
       },
     },
-    required: ['path'],
   },
   handler: async (args: Record<string, any>) => {
-    const targetPathHint = (args.target_path || args.project_root || args.root)
-      ? String(args.target_path || args.project_root || args.root)
+    const targetPathHint = (args.target_path || args.targetPath || args.project_root || args.root)
+      ? String(args.target_path || args.targetPath || args.project_root || args.root)
       : undefined;
-    const rawPath = args.path
-      ? String(args.path)
+    const rawPath = (args.path || args.file_path || args.filePath || args.target_path || args.targetPath || args.component || args.component_path)
+      ? String(args.path || args.file_path || args.filePath || args.target_path || args.targetPath || args.component || args.component_path)
       : (targetPathHint || '');
 
     if (!rawPath) {
       return {
         isError: true,
-        content: [{ type: 'text', text: "Missing required argument: 'path' (or 'target_path')" }],
+        content: [{ type: 'text', text: "Missing required argument: 'path' (or 'file_path', 'target_path')" }],
       };
     }
 
     const filePath = resolveWorkspacePath(rawPath, targetPathHint);
+
+    if (!fs.existsSync(filePath)) {
+      return {
+        isError: true,
+        content: [
+          {
+            type: 'text',
+            text: `Component file not found: ${filePath}`,
+          },
+        ],
+      };
+    }
+
+    try {
+      if (fs.statSync(filePath).isDirectory()) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: 'text',
+              text: `Target path '${filePath}' is a directory. 'inspect_component' requires a component file (e.g. .vue, .tsx, .jsx, .astro). Use 'audit_frontend' or 'get_component_tree' to inspect directories.`,
+            },
+          ],
+        };
+      }
+    } catch {}
 
     const isJson = args.output_format === 'json';
     const symbolName = args.symbol || args.symbol_name;

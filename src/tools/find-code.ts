@@ -17,7 +17,15 @@ export const findCodeTool: McpToolDefinition = {
     properties: {
       path: {
         type: 'string',
-        description: 'Target directory or file path to search (alias: target_path)',
+        description: 'Target directory or file path to search (alias: file_path, filePath, target_path)',
+      },
+      file_path: {
+        type: 'string',
+        description: 'Alias for path',
+      },
+      filePath: {
+        type: 'string',
+        description: 'Alias for path',
       },
       target_path: {
         type: 'string',
@@ -25,7 +33,15 @@ export const findCodeTool: McpToolDefinition = {
       },
       pattern: {
         type: 'string',
-        description: 'ast-grep pattern (e.g. "console.log($$$)", "ref($$$)")',
+        description: 'ast-grep pattern (alias: query, search, e.g. "console.log($$$)", "ref($$$)")',
+      },
+      query: {
+        type: 'string',
+        description: 'Alias for pattern',
+      },
+      search: {
+        type: 'string',
+        description: 'Alias for pattern',
       },
       component: {
         type: 'string',
@@ -82,11 +98,16 @@ export const findCodeTool: McpToolDefinition = {
   handler: async (args: Record<string, any>) => {
     const isJson = args.output_format === 'json';
     const codeSnippet = (args.code || args.code_snippet) ? String(args.code || args.code_snippet) : undefined;
-    const rawTargetPath = (args.path || args.target_path) ? String(args.path || args.target_path) : undefined;
+    const rawTargetPath = (args.path || args.file_path || args.filePath || args.target_path || args.targetPath)
+      ? String(args.path || args.file_path || args.filePath || args.target_path || args.targetPath)
+      : undefined;
+    const pattern = (args.pattern || args.query || args.search)
+      ? String(args.pattern || args.query || args.search)
+      : undefined;
     const language = args.language ? String(args.language) : undefined;
 
     // Mode A: dump_ast
-    if (args.action === 'dump_ast' || (!rawTargetPath && codeSnippet && !args.pattern && !args.rule_yaml)) {
+    if (args.action === 'dump_ast' || (!rawTargetPath && codeSnippet && !pattern && !args.rule_yaml)) {
       if (!codeSnippet) {
         return {
           isError: true,
@@ -100,9 +121,9 @@ export const findCodeTool: McpToolDefinition = {
     }
 
     // Mode B: In-memory test of pattern or rule
-    if (codeSnippet && (args.rule_yaml || args.pattern)) {
+    if (codeSnippet && (args.rule_yaml || pattern)) {
       const rawMatches = await executeAstGrep({
-        pattern: args.pattern ? String(args.pattern) : undefined,
+        pattern: pattern ? String(pattern) : undefined,
         rule: args.rule_yaml ? String(args.rule_yaml) : undefined,
         code: codeSnippet,
         language: language || 'ts',
@@ -164,9 +185,9 @@ export const findCodeTool: McpToolDefinition = {
     }
 
     // Mode E: Pattern search
-    if (args.pattern) {
+    if (pattern) {
       const matches = await findCode({
-        pattern: String(args.pattern),
+        pattern: String(pattern),
         targetPath,
         language,
         maxResults: args.max_results ? Number(args.max_results) : undefined,

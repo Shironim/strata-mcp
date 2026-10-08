@@ -60,7 +60,7 @@ export const auditFrontendTool: McpToolDefinition = {
       },
       framework: {
         type: 'string',
-        enum: ['next-app', 'next-pages', 'nuxt', 'astro', 'inertia', 'unknown'],
+        enum: ['next-app', 'next-pages', 'nuxt', 'astro', 'inertia', 'vue-router', 'unknown'],
         description: 'Optional framework hint for route scanner',
       },
       ignore_patterns: {
@@ -171,7 +171,7 @@ export const auditFrontendTool: McpToolDefinition = {
     }
 
     if (target === 'bundle-health' || target === 'bundle') {
-      const result = await auditBundleHealth({ targetPath, scopePath });
+      const result = await auditBundleHealth({ targetPath, scopePath, excludeDirs });
       return {
         content: [
           {
@@ -183,7 +183,7 @@ export const auditFrontendTool: McpToolDefinition = {
     }
 
     if (target === 'api-contracts' || target === 'api' || target === 'apis') {
-      const result = await extractWorkspaceApiContracts({ targetPath, scopePath });
+      const result = await extractWorkspaceApiContracts({ targetPath, scopePath, excludeDirs });
       return {
         content: [
           {

@@ -11,7 +11,6 @@ import { main as runCli } from './cli';
 import { STRATA_INSTRUCTIONS } from './instructions';
 import { STRATA_VERSION } from './version';
 import { closeAllDatabases, getDatabase } from './engine/database';
-import { WorkspaceWatcher } from './engine/watcher';
 import { StrataTelemetry } from './engine/telemetry';
 
 export { TOOLS, findTool } from './tools';
@@ -41,7 +40,9 @@ export function createMcpServer(): Server {
   });
 
   server.setRequestHandler(CallToolRequestSchema, async (request): Promise<any> => {
-    const { name, arguments: args = {} } = request.params;
+    const name = request.params.name;
+    const rawArgs = request.params.arguments;
+    const args = rawArgs && typeof rawArgs === 'object' ? rawArgs : {};
     const startTime = performance.now();
     const tool = findTool(name);
 
@@ -176,33 +177,18 @@ export async function runServer(): Promise<void> {
   const server = createMcpServer();
   const transport = new StdioServerTransport();
 
-  // Initialize and start in-process background watcher for transparent delta-sync
-  let watcher: WorkspaceWatcher | null = null;
+  // Initialize workspace database (getDatabase starts transparent background delta-sync watcher)
   try {
-    const db = getDatabase(process.cwd());
-    watcher = new WorkspaceWatcher(process.cwd(), db, {
-      onError: (err) => {
-        process.stderr.write(`[strata-watcher] Warning: ${err.message}\n`);
-      },
-    });
-    watcher.start();
+    getDatabase(process.cwd());
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    process.stderr.write(`[strata-watcher] Failed to start background watcher: ${msg}\n`);
+    process.stderr.write(`[strata-watcher] Failed to initialize database: ${msg}\n`);
   }
 
   let isShuttingDown = false;
   const gracefulShutdown = async (signal: string) => {
     if (isShuttingDown) return;
     isShuttingDown = true;
-
-    if (watcher) {
-      try {
-        watcher.close();
-      } catch {
-        // Ignore watcher close errors during shutdown
-      }
-    }
 
     try {
       await server.close();

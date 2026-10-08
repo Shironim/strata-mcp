@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import { getComponentTree, formatTreeAsText } from '../engine/tree';
 import { resolveWorkspacePath, resolveProjectRoot } from '../engine/path-resolver';
 import type { ComponentTreeNode, ComponentTreeOptions } from '../types';
@@ -12,7 +13,23 @@ export const componentTreeTool: McpToolDefinition = {
     properties: {
       entry_path: {
         type: 'string',
-        description: 'Path to the root component/page file (or use route)',
+        description: 'Path to the root component/page file (alias: path, file_path, filePath, component, component_path)',
+      },
+      file_path: {
+        type: 'string',
+        description: 'Alias for entry_path',
+      },
+      filePath: {
+        type: 'string',
+        description: 'Alias for entry_path',
+      },
+      component_path: {
+        type: 'string',
+        description: 'Alias for entry_path',
+      },
+      component: {
+        type: 'string',
+        description: 'Alias for entry_path',
       },
       route: {
         type: 'string',
@@ -28,7 +45,7 @@ export const componentTreeTool: McpToolDefinition = {
       },
       path: {
         type: 'string',
-        description: 'Alias for target_path',
+        description: 'Root component file path or project directory',
       },
       max_depth: {
         type: 'number',
@@ -36,9 +53,9 @@ export const componentTreeTool: McpToolDefinition = {
       },
       direction: {
         type: 'string',
-        enum: ['downward', 'upward'],
+        enum: ['downward', 'upward', 'down', 'up'],
         description:
-          'Traversal direction: "downward" (root -> children) or "upward" (leaf -> consumers/pages blast radius). Default: "downward".',
+          'Traversal direction: "downward" / "down" (root -> children) or "upward" / "up" (leaf -> consumers/pages blast radius). Default: "downward".',
       },
       alias_map: {
         type: 'object',
@@ -64,9 +81,36 @@ export const componentTreeTool: McpToolDefinition = {
   },
   handler: async (args: Record<string, any>) => {
     const routePath = (args.route || args.route_path) ? String(args.route || args.route_path) : undefined;
-    const rawTargetPath = (args.target_path || args.path) ? String(args.target_path || args.path) : undefined;
+
+    let rawEntryPath = (args.entry_path || args.entryPath || args.file_path || args.filePath || args.component || args.component_path)
+      ? String(args.entry_path || args.entryPath || args.file_path || args.filePath || args.component || args.component_path)
+      : undefined;
+
+    let rawTargetPath = (args.target_path || args.targetPath) ? String(args.target_path || args.targetPath) : undefined;
+
+    // Disambiguate generic `path`: is it an entry component file or project root?
+    if (args.path && !rawEntryPath) {
+      const candidate = String(args.path);
+      const isFileLike = /\.(vue|tsx|jsx|svelte|astro|ts|js)$/i.test(candidate);
+      let isActualFile = false;
+      try {
+        const fullCandidate = resolveWorkspacePath(candidate);
+        if (fs.existsSync(fullCandidate) && fs.statSync(fullCandidate).isFile()) {
+          isActualFile = true;
+        }
+      } catch {}
+
+      if (isFileLike || isActualFile) {
+        rawEntryPath = candidate;
+      } else if (!rawTargetPath) {
+        rawTargetPath = candidate;
+      }
+    } else if (args.path && !rawTargetPath) {
+      rawTargetPath = String(args.path);
+    }
+
     const resolvedTargetPath = resolveProjectRoot(rawTargetPath);
-    const entryPath = args.entry_path ? resolveWorkspacePath(String(args.entry_path), resolvedTargetPath) : undefined;
+    const entryPath = rawEntryPath ? resolveWorkspacePath(rawEntryPath, resolvedTargetPath) : undefined;
     const targetPath = resolvedTargetPath;
 
     if (!entryPath && !routePath) {

@@ -21,6 +21,15 @@ export const getApiContractsTool: McpToolDefinition = {
         type: 'string',
         description: 'Alias for targetPath',
       },
+      scope_path: {
+        type: 'string',
+        description: 'Sub-directory or workspace scope filter within targetPath (e.g. "apps/web") to avoid scanning entire monorepos',
+      },
+      exclude_dirs: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'List of directory names or paths to ignore during traversal',
+      },
       output_format: {
         type: 'string',
         enum: ['text', 'json'],
@@ -31,10 +40,16 @@ export const getApiContractsTool: McpToolDefinition = {
   },
   handler: async (args: Record<string, any>) => {
     const targetPath = resolveToolTargetPath(args);
+    const scopePath = args.scope_path ? String(args.scope_path) : undefined;
+    const excludeDirs = Array.isArray(args.exclude_dirs)
+      ? args.exclude_dirs.map(String)
+      : typeof args.exclude_dirs === 'string'
+        ? (args.exclude_dirs as string).split(',').map((s) => s.trim()).filter(Boolean)
+        : undefined;
     const isJson = args.output_format === 'json';
 
     try {
-      const result = await extractWorkspaceApiContracts({ targetPath });
+      const result = await extractWorkspaceApiContracts({ targetPath, scopePath, excludeDirs });
       return {
         content: [
           {

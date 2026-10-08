@@ -4,8 +4,8 @@ import { join } from 'node:path';
 
 const FIXTURES_DIR = join(import.meta.dir, '../fixtures');
 
-describe('MCP Server & 5 Core Tools', () => {
-  it('registers exactly 5 Core MCP tools in tool definitions', async () => {
+describe('MCP Server & Core Tools', () => {
+  it('registers all 8 Core MCP tools in tool definitions', async () => {
     const server = createMcpServer();
     expect(server).toBeDefined();
 

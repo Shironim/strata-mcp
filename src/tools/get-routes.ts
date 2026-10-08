@@ -1,5 +1,5 @@
 import { scanRoutes, formatRoutesAsText } from '../engine/routes';
-import { resolveWorkspacePath } from '../engine/path-resolver';
+import { resolveToolTargetPath } from '../engine/path-resolver';
 import type { RouteFramework } from '../types';
 import type { McpToolDefinition } from './types';
 
@@ -12,11 +12,19 @@ export const getRoutesTool: McpToolDefinition = {
     properties: {
       targetPath: {
         type: 'string',
-        description: 'Workspace root or frontend directory to scan for routes (default: active workspace).',
+        description: 'Workspace root or frontend directory to scan for routes (alias: target_path, path, default: active workspace).',
+      },
+      target_path: {
+        type: 'string',
+        description: 'Alias for targetPath',
+      },
+      path: {
+        type: 'string',
+        description: 'Alias for targetPath',
       },
       framework: {
         type: 'string',
-        enum: ['next-app', 'nuxt', 'astro', 'inertia'],
+        enum: ['next-app', 'next-pages', 'nuxt', 'astro', 'inertia', 'vue-router', 'unknown'],
         description: 'Optional framework hint to optimize route discovery.',
       },
       prefix: {
@@ -28,29 +36,34 @@ export const getRoutesTool: McpToolDefinition = {
         enum: ['summary', 'full', 'tree'],
         description: 'Output format style (default: "summary" for high-level token efficiency).',
       },
+      output_format: {
+        type: 'string',
+        enum: ['text', 'json'],
+        description: 'Output format: text or json (default: "text")',
+      },
     },
     required: [],
   },
   handler: async (args: Record<string, any>) => {
-    const rawPath = typeof args.targetPath === 'string' ? args.targetPath : '.';
-    const targetPath = resolveWorkspacePath(rawPath);
+    const targetPath = resolveToolTargetPath(args);
     const framework = args.framework as RouteFramework | undefined;
     const prefix = typeof args.prefix === 'string' ? args.prefix : undefined;
     const view = args.view === 'full' || args.view === 'tree' ? args.view : 'summary';
+    const isJson = args.output_format === 'json' || args.format === 'json';
 
     try {
       const manifest = await scanRoutes({
         targetPath,
         frameworkHint: framework,
-        urlPrefix: prefix,
-        viewMode: view,
+        prefix,
+        view,
       });
 
       return {
         content: [
           {
             type: 'text',
-            text: formatRoutesAsText(manifest),
+            text: isJson ? JSON.stringify(manifest, null, 2) : formatRoutesAsText(manifest),
           },
         ],
       };
