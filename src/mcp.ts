@@ -12,8 +12,135 @@ import { STRATA_INSTRUCTIONS } from './instructions';
 import { STRATA_VERSION } from './version';
 import { closeAllDatabases, getDatabase } from './engine/database';
 import { StrataTelemetry } from './engine/telemetry';
+import { setLastKnownProjectRoot } from './engine/path-resolver';
 
 export { TOOLS, findTool } from './tools';
+
+/**
+ * Pillar 1 & 2: Universal Fault-Tolerant Coercion (Single-Arity Coercion)
+ * Normalizes bare string arguments and non-standard aliases to canonical tool parameters.
+ */
+export function coerceToolArguments(toolName: string, rawArgs: any): Record<string, any> {
+  if (rawArgs === null || rawArgs === undefined) {
+    return {};
+  }
+
+  // Single-arity bare string handling
+  if (typeof rawArgs === 'string') {
+    const trimmed = rawArgs.trim();
+    switch (toolName) {
+      case 'inspect_component':
+      case 'get_component_tree':
+      case 'audit_frontend':
+      case 'get_routes':
+      case 'get_api_contracts':
+      case 'generate_patch_plan':
+        return { path: trimmed };
+      case 'find_code':
+        return { pattern: trimmed };
+      case 'trace_state':
+        if (
+          trimmed.startsWith('.') ||
+          trimmed.startsWith('/') ||
+          /\.(vue|tsx|jsx|astro|ts|js)$/i.test(trimmed)
+        ) {
+          return { path: trimmed };
+        }
+        return { identifier: trimmed };
+      default:
+        return { path: trimmed };
+    }
+  }
+
+  if (typeof rawArgs !== 'object' || Array.isArray(rawArgs)) {
+    return {};
+  }
+
+  const args: Record<string, any> = { ...rawArgs };
+
+  // 1. Canonical Entity Aliasing: path
+  if (!args.path) {
+    const pathAlias =
+      args.file_path ||
+      args.filePath ||
+      args.target_path ||
+      args.targetPath ||
+      args.file ||
+      args.entry_path ||
+      args.entryPath ||
+      args.component_path ||
+      args.componentPath;
+    if (pathAlias) {
+      args.path = String(pathAlias);
+    }
+  }
+
+  // Bi-directional alias sync: populate legacy targetPath/target_path/entry_path/component_path from canonical path
+  if (args.path) {
+    if (!args.targetPath) args.targetPath = args.path;
+    if (!args.target_path) args.target_path = args.path;
+    if (!args.entry_path && toolName === 'get_component_tree') args.entry_path = args.path;
+    if (!args.component_path && toolName === 'generate_patch_plan') args.component_path = args.path;
+    if (!args.filePath && toolName === 'trace_state') args.filePath = args.path;
+  }
+
+  // 2. Canonical Entity Aliasing: format
+  if (!args.format) {
+    const formatAlias = args.output_format || args.outputFormat;
+    if (formatAlias) {
+      args.format = String(formatAlias);
+    }
+  }
+  if (!args.output_format && args.format) {
+    args.output_format = args.format;
+  }
+
+  // 3. Canonical Entity Aliasing: pattern
+  if (!args.pattern) {
+    const patternAlias = args.query || args.search;
+    if (patternAlias) {
+      args.pattern = String(patternAlias);
+    }
+  }
+
+  // 4. Canonical Entity Aliasing: symbol
+  if (!args.symbol) {
+    const symbolAlias = args.symbol_name || args.symbolName || args.name;
+    if (symbolAlias && toolName !== 'get_routes' && toolName !== 'audit_frontend') {
+      args.symbol = String(symbolAlias);
+    }
+  }
+
+  // 5. Canonical Entity Aliasing: identifier (for trace_state)
+  if (!args.identifier && toolName === 'trace_state') {
+    const idAlias = args.state || args.store || args.composable || args.symbol || args.name;
+    if (idAlias) {
+      args.identifier = String(idAlias);
+    }
+  }
+
+  // 6. Canonical Entity Aliasing: component
+  if (!args.component) {
+    const compAlias = args.component_name || args.componentName;
+    if (compAlias) {
+      args.component = String(compAlias);
+    }
+  }
+
+  // 7. Canonical Entity Aliasing: root (Pillar 4: Multi-root workspace consistency)
+  if (!args.root) {
+    const rootAlias =
+      args.workspace_root ||
+      args.workspaceRoot ||
+      args.project_root ||
+      args.projectRoot;
+    if (rootAlias) {
+      args.root = String(rootAlias);
+    }
+  }
+
+  return args;
+}
 
 export function createMcpServer(): Server {
   const server = new Server(
@@ -42,9 +169,15 @@ export function createMcpServer(): Server {
   server.setRequestHandler(CallToolRequestSchema, async (request): Promise<any> => {
     const name = request.params.name;
     const rawArgs = request.params.arguments;
-    const args = rawArgs && typeof rawArgs === 'object' ? rawArgs : {};
+    const args = coerceToolArguments(name, rawArgs);
     const startTime = performance.now();
     const tool = findTool(name);
+
+    // Multi-root consistency: set last known root if passed
+    if (args.root && typeof args.root === 'string') {
+      setLastKnownProjectRoot(args.root);
+    }
+
 
     const traceId = args.trace_id || args.traceId ? String(args.trace_id || args.traceId) : undefined;
     const sessionId = args.session_id || args.sessionId ? String(args.session_id || args.sessionId) : undefined;
