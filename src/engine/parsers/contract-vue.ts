@@ -1,5 +1,5 @@
-import { promises as fs } from 'node:fs';
-import { basename, extname } from 'node:path';
+import { existsSync, promises as fs } from 'node:fs';
+import { basename, dirname, extname, resolve } from 'node:path';
 import { parse as parseDom, NodeTypes, type RootNode, type TemplateChildNode } from '@vue/compiler-dom';
 import ts from 'typescript';
 import { executeAstGrep, isBinaryExecutionError } from '../astgrep';
@@ -24,7 +24,7 @@ const SHORTHAND_TYPE_PATTERN = /^[A-Za-z0-9_$]+$/;
 const DEFAULT_VALUE_PATTERN = /default\s*:\s*([^,\n}]+)/;
 const PROPERTY_SIGNATURE_PATTERN = /^([A-Za-z0-9_$]+)(\?)?:\s*(.+)$/;
 const WITH_DEFAULTS_SECOND_ARG_PATTERN = /withDefaults\s*\([^,]+,\s*(\{[\s\S]*?\})\s*\)/;
-const NAMED_PROPS_TYPE_PATTERN = /defineProps<([A-Za-z0-9_$]+)>\(\)/;
+const NAMED_PROPS_TYPE_PATTERN = /defineProps<\s*([A-Za-z0-9_$]+)(?:<[^>]+>)?\s*>\s*\(\)/;
 const EMIT_CALL_SIGNATURE_PATTERN = /\(\s*(?:e\s*:\s*)?['"]([^'"]+)['"](?:\s*,\s*(.+?))?\s*\)/;
 const QUOTED_STRING_PATTERN = /['"]([^'"]+)['"]/g;
 const EXPOSED_NAME_PATTERN = /([A-Za-z0-9_$]+)\s*[,}]/g;
@@ -476,6 +476,26 @@ export async function extractVueContract(filePath: string, content: string): Pro
       // ignore
     }
 
+    // A2. Reactive destructuring defaults (Vue 3.3 / Vue 3.5): const { a = val, b = val } = defineProps(...)
+    try {
+      const destructureMatches = fullScript.match(/(?:const|let)\s*\{([^}]+)\}\s*=\s*(?:withDefaults\s*\(\s*)?defineProps/);
+      if (destructureMatches && destructureMatches[1]) {
+        const bindings = destructureMatches[1].split(',');
+        for (const binding of bindings) {
+          const parts = binding.split('=');
+          if (parts.length >= 2) {
+            const propName = parts[0].trim();
+            const defaultVal = parts.slice(1).join('=').trim();
+            if (propName && defaultVal && !defaultsMap[propName]) {
+              defaultsMap[propName] = defaultVal;
+            }
+          }
+        }
+      }
+    } catch {
+      // ignore
+    }
+
     // B. Type-based defineProps<{ ... }>()
     try {
       const typePropsMatches = await executeAstGrep({
@@ -490,24 +510,97 @@ export async function extractVueContract(filePath: string, content: string): Pro
         const namedMatch = snippet.match(NAMED_PROPS_TYPE_PATTERN);
         if (namedMatch && namedMatch[1]) {
           const typeName = namedMatch[1];
-          // Search for interface or type definition
-          const ifaceMatches = await executeAstGrep({
+          // Search for interface or type definition locally (non-generic or generic)
+          let ifaceMatches = await executeAstGrep({
             code: fullScript,
             pattern: `interface ${typeName} { $$$ }`,
             language: lang,
           });
+          if (ifaceMatches.length === 0) {
+            ifaceMatches = await executeAstGrep({
+              code: fullScript,
+              pattern: `interface ${typeName}<$$$> { $$$ }`,
+              language: lang,
+            });
+          }
+
           if (ifaceMatches.length > 0) {
             const extracted = await extractPropertySignatures(ifaceMatches[0].text, lang);
             props.push(...extracted);
           } else {
-            const typeAliasMatches = await executeAstGrep({
+            let typeAliasMatches = await executeAstGrep({
               code: fullScript,
               pattern: `type ${typeName} = { $$$ }`,
               language: lang,
             });
+            if (typeAliasMatches.length === 0) {
+              typeAliasMatches = await executeAstGrep({
+                code: fullScript,
+                pattern: `type ${typeName}<$$$> = { $$$ }`,
+                language: lang,
+              });
+            }
+
             if (typeAliasMatches.length > 0) {
               const extracted = await extractPropertySignatures(typeAliasMatches[0].text, lang);
               props.push(...extracted);
+            } else {
+              // 1-Level Local Module Resolution: check if interface is imported from a relative path
+              try {
+                const importRegex = new RegExp(
+                  `import\\s+(?:type\\s+)?(?:\\{[^}]*\\b${typeName}\\b[^}]*\\}|${typeName})\\s+from\\s+['"]([^'"]+)['"]`
+                );
+                const importMatch = fullScript.match(importRegex);
+                if (importMatch && importMatch[1]) {
+                  const importPath = importMatch[1];
+                  if (importPath.startsWith('.')) {
+                    const resolvedBase = resolve(dirname(filePath), importPath);
+                    const candidateExtensions = ['', '.ts', '.d.ts', '.tsx', '/index.ts', '/index.d.ts'];
+                    for (const ext of candidateExtensions) {
+                      const fullImportPath = resolvedBase + ext;
+                      if (existsSync(fullImportPath)) {
+                        const externalCode = await fs.readFile(fullImportPath, 'utf8');
+                        let extIface = await executeAstGrep({
+                          code: externalCode,
+                          pattern: `interface ${typeName} { $$$ }`,
+                          language: 'ts',
+                        });
+                        if (extIface.length === 0) {
+                          extIface = await executeAstGrep({
+                            code: externalCode,
+                            pattern: `interface ${typeName}<$$$> { $$$ }`,
+                            language: 'ts',
+                          });
+                        }
+                        if (extIface.length > 0) {
+                          const extracted = await extractPropertySignatures(extIface[0].text, 'ts');
+                          props.push(...extracted);
+                          break;
+                        }
+                        let extType = await executeAstGrep({
+                          code: externalCode,
+                          pattern: `type ${typeName} = { $$$ }`,
+                          language: 'ts',
+                        });
+                        if (extType.length === 0) {
+                          extType = await executeAstGrep({
+                            code: externalCode,
+                            pattern: `type ${typeName}<$$$> = { $$$ }`,
+                            language: 'ts',
+                          });
+                        }
+                        if (extType.length > 0) {
+                          const extracted = await extractPropertySignatures(extType[0].text, 'ts');
+                          props.push(...extracted);
+                          break;
+                        }
+                      }
+                    }
+                  }
+                }
+              } catch {
+                // ignore
+              }
             }
           }
         } else {

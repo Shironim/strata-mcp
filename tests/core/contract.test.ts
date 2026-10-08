@@ -193,4 +193,38 @@ describe('Component Contract Extractor (Phase 2 RFC)', () => {
     const resAstro = extractStateDependencies(astroPage, 'astro');
     expect(resAstro.stores).toContain('$cart');
   });
+
+  it('extracts default props from Vue 3.5 reactive destructuring defineProps', async () => {
+    const sfc = `
+      <template><button :class="variant">{{ count }}</button></template>
+      <script setup lang="ts">
+      interface ButtonProps {
+        count?: number;
+        variant?: string;
+      }
+      const { count = 0, variant = 'primary' } = defineProps<ButtonProps>();
+      </script>
+    `;
+    const contract = await extractComponentContract('ButtonDestructure.vue', sfc);
+    expect(contract.props.length).toBe(2);
+    const countProp = contract.props.find((p) => p.name === 'count');
+    const variantProp = contract.props.find((p) => p.name === 'variant');
+    expect(countProp?.default).toBe('0');
+    expect(variantProp?.default).toBe("'primary'");
+  });
+
+  it('extracts props when defineProps uses generic type parameters or whitespace', async () => {
+    const sfc = `
+      <template><div>{{ item }}</div></template>
+      <script setup lang="ts">
+      interface ItemProps<T> {
+        item: T;
+      }
+      defineProps< ItemProps<string> >();
+      </script>
+    `;
+    const contract = await extractComponentContract('GenericItem.vue', sfc);
+    expect(contract.props.length).toBe(1);
+    expect(contract.props[0].name).toBe('item');
+  });
 });
