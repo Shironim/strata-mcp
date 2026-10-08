@@ -120,21 +120,33 @@ export function resolveWorkspacePath(rawPath: string, rootHint?: string): string
   const isWindowsAbsolute = /^[A-Za-z]:[\\/]/.test(trimmed) || trimmed.startsWith('\\\\');
   const isPosixAbsolute = trimmed.startsWith('/') && !process.platform.startsWith('win');
 
+  // Helper to determine if path is genuinely a system root absolute path
+  const isSystemRootAbsolute =
+    isWindowsAbsolute ||
+    /^\/(?:home|Users|var|tmp|root|opt|etc|mnt|media)\b/i.test(trimmed) ||
+    (isAbsolute(trimmed) && rootHint && canonicalizePath(trimmed).startsWith(canonicalizePath(rootHint))) ||
+    (isAbsolute(trimmed) && lastKnownProjectRoot && canonicalizePath(trimmed).startsWith(canonicalizePath(lastKnownProjectRoot))) ||
+    (isAbsolute(trimmed) && canonicalizePath(trimmed).startsWith(canonicalizePath(process.cwd()))) ||
+    (isAbsolute(trimmed) && !rootHint);
+
   // If candidate is a genuine full absolute path
-  if (isWindowsAbsolute || isPosixAbsolute) {
+  if (isSystemRootAbsolute) {
     const norm = canonicalizePath(trimmed);
     if (existsSync(norm)) {
       const detectedRoot = findProjectRoot(norm);
       if (detectedRoot) {
         setLastKnownProjectRoot(detectedRoot);
       }
-      return norm;
     }
+    return norm;
   }
 
   // Candidate 1: Check against rootHint if provided (handles both "src/..." and "/src/...")
   if (rootHint) {
     const resolvedHint = canonicalizePath(rootHint.trim().replace(/^['"]|['"]$/g, ''));
+    if (canonicalizePath(trimmed).startsWith(resolvedHint)) {
+      return canonicalizePath(trimmed);
+    }
     const relativePart = normalizedSlashes.replace(/^[/\\]+/, '');
     const candidate = canonicalizePath(resolve(resolvedHint, relativePart));
     if (existsSync(candidate)) {
@@ -169,13 +181,6 @@ export function resolveWorkspacePath(rawPath: string, rootHint?: string): string
     return cwdCandidate;
   }
 
-  // Candidate 4: Standard Node isAbsolute check fallback
-  if (isAbsolute(trimmed)) {
-    const norm = canonicalizePath(trimmed);
-    if (existsSync(norm)) {
-      return norm;
-    }
-  }
 
   // Fallback: If not found on disk, resolve against best available root
   const baseDir = rootHint

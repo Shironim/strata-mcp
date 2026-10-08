@@ -52,4 +52,19 @@ describe('Sprint 1 — Path Resolver & Project Root Auto-Discovery', () => {
     expect(root).toBe(fixtureDir);
     expect(getLastKnownProjectRoot()).toBe(fixtureDir);
   });
+
+  it('returns canonical absolute path without path duplication when file does not exist on disk', () => {
+    const fakeAbs = '/home/shironim/Project/toko-km/resources/js/Components/NonExistent.vue';
+    const rootHint = '/home/shironim/Project/toko-km';
+
+    // With rootHint matching prefix
+    const resolvedWithHint = resolveWorkspacePath(fakeAbs, rootHint);
+    expect(resolvedWithHint).toBe(fakeAbs);
+    expect(resolvedWithHint).not.toContain('toko-km/home/shironim');
+
+    // Without rootHint
+    const resolvedWithoutHint = resolveWorkspacePath(fakeAbs);
+    expect(resolvedWithoutHint).toBe(fakeAbs);
+    expect(resolvedWithoutHint).not.toContain(process.cwd() + fakeAbs);
+  });
 });
