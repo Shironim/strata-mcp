@@ -263,11 +263,9 @@ export function transactionCommitter(
   `);
 
   const deleteFileStmt = db.prepare(`DELETE FROM files WHERE id = ?;`);
-  const cleanRelationsStmt = db.prepare(`
-    DELETE FROM components WHERE file_id = $id;
-    DELETE FROM edges WHERE parent_file_id = $id;
-    DELETE FROM state_deps WHERE file_id = $id;
-  `);
+  const deleteComponentsStmt = db.prepare(`DELETE FROM components WHERE file_id = $id;`);
+  const deleteEdgesStmt = db.prepare(`DELETE FROM edges WHERE parent_file_id = $id;`);
+  const deleteStateDepsStmt = db.prepare(`DELETE FROM state_deps WHERE file_id = $id;`);
 
   const toProcess = [...delta.added, ...delta.modified];
   const fileIdMap = new Map<string, number>();
@@ -307,7 +305,9 @@ export function transactionCommitter(
           $render_boundary: renderBoundary,
           $boundary_directive: boundaryDirective,
         });
-        cleanRelationsStmt.run({ $id: fileId });
+        deleteComponentsStmt.run({ $id: fileId });
+        deleteEdgesStmt.run({ $id: fileId });
+        deleteStateDepsStmt.run({ $id: fileId });
       } else {
         const res = insertFileStmt.get({
           $path: path,

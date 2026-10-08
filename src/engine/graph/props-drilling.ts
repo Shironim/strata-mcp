@@ -258,10 +258,11 @@ export function detectPropsDrilling(root: ComponentTreeNode): PropsDrillingAlert
 
           // Check if this prop matches or forwards an active prop chain received by `node`
           const matchedChain = activeChains.find((c) => {
-            if (c.propName === propName) return true;
             if (c.propName === expr) return true;
+            if (expr === `props.${c.propName}`) return true;
             if (c.expression && c.expression === expr) return true;
             if (expr.startsWith(`${c.propName}.`) || expr.startsWith(`${c.propName}[`)) return true;
+            if (expr.startsWith(`props.${c.propName}.`) || expr.startsWith(`props.${c.propName}[`)) return true;
             if (c.expression && (expr.startsWith(`${c.expression}.`) || expr.startsWith(`${c.expression}[`))) return true;
             return false;
           });

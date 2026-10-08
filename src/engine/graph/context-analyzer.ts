@@ -151,7 +151,12 @@ export function extractComponentContextNodes(
             let valueSnippet: string | undefined;
 
             for (const attr of node.attributes.properties) {
-              if (ts.isJsxAttribute(attr) && attr.name.text === 'value' && attr.initializer) {
+              if (
+                ts.isJsxAttribute(attr) &&
+                ts.isIdentifier(attr.name) &&
+                attr.name.text === 'value' &&
+                attr.initializer
+              ) {
                 if (ts.isJsxExpression(attr.initializer) && attr.initializer.expression) {
                   valueSnippet = attr.initializer.expression.getText(sourceFile).trim();
                 } else {

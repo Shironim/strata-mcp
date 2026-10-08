@@ -4,6 +4,7 @@ import { executeAstGrep } from './astgrep';
 import { createDocumentAdapter } from '../adapters/factory';
 import { remapPosition } from './remapper';
 import { getWorkspaceDatabase } from './database';
+import { findProjectRoot } from './path-resolver';
 import { escapeRegExp } from './patterns';
 import type { RawMatch, SliceSymbolOptions, SymbolKind, SymbolSliceResult } from '../types';
 
@@ -217,7 +218,7 @@ export async function sliceSymbol(options: SliceSymbolOptions): Promise<SymbolSl
     // Blast radius resolution
     let blastRadius: SymbolSliceResult['blastRadius'];
     if (options.includeBlastRadius !== false) {
-      const workspaceRoot = options.workspaceRoot || dirname(targetFile);
+      const workspaceRoot = options.workspaceRoot || findProjectRoot(targetFile) || dirname(targetFile);
       try {
         const db = getWorkspaceDatabase(workspaceRoot);
         const callersList: Array<{ filePath: string; line?: number }> = [];

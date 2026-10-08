@@ -206,9 +206,8 @@ export class WorkspaceWatcher {
         process.stderr.write(
           `[strata-watcher] Event storm detected (${pathsToProcess.length} files). Triggering batch re-sync.\n`
         );
-        const { syncWorkspaceDelta, hashChecker } = await import('./database');
-        const delta = await hashChecker(this.absRoot, this.db);
-        await syncWorkspaceDelta(this.db, this.absRoot, delta);
+        const { syncWorkspace } = await import('./storage/delta-sync');
+        await syncWorkspace(this.absRoot);
         this.options.onSyncComplete(pathsToProcess);
         return;
       }
@@ -260,7 +259,7 @@ export class WorkspaceWatcher {
               for (const r of manifest.routes) {
                 insertRouteStmt.run({
                   $route_path: r.path,
-                  $file_path: r.componentPath,
+                  $file_path: r.filePath,
                   $framework: r.framework,
                   $dynamic_params: JSON.stringify(r.params ?? []),
                 });
@@ -298,26 +297,24 @@ export class WorkspaceWatcher {
   ): Promise<void> {
     const code = await fs.readFile(fullPath, 'utf-8');
     const framework = detectFramework(fullPath, code);
-    const boundary = extractRenderBoundary(fullPath, code);
-    const stateDeps = extractStateDependencies(fullPath, code);
+    const boundary = extractRenderBoundary(fullPath, code, framework);
+    const stateDeps = extractStateDependencies(code, framework);
     const isPage = isPageFile(fullPath);
     const isLayout = isLayoutFile(fullPath);
 
     let compName = basename(fullPath, extname(fullPath));
-    let contract = null;
+    let contract: any = null;
     try {
-      contract = await extractComponentContract(fullPath, { framework });
-      if (contract?.name) {
-        compName = contract.name;
+      contract = await extractComponentContract(fullPath);
+      if (contract?.name || contract?.componentName) {
+        compName = contract.name || contract.componentName;
       }
     } catch {
       // Syntax might be transiently invalid during active typing in editor.
       // Do not abort; proceed with file metadata to keep tracking mtime.
     }
 
-    const imports = extractLocalImports(fullPath, code, {
-      aliases: { '@': join(this.absRoot, 'src') },
-    });
+    const imports = extractLocalImports(code);
     const { providers, consumers } = extractComponentContextNodes(fullPath, code);
 
     const edges: Array<{ targetPath: string; isDynamic: boolean; payload?: EdgePayload }> = [];

@@ -159,16 +159,51 @@ export async function detectRouteFramework(
     }
   }
 
-  // 8. Standalone Inertia root Pages directory (if not Nuxt/Next)
+  // 8. Vue Router SPA (src/views or views convention)
+  for (const candidate of [join(normTarget, 'src', 'views'), join(normTarget, 'views')]) {
+    if (existsSync(candidate)) {
+      const files = await collectFiles(candidate);
+      const hasVueFiles = files.some((f) => f.endsWith('.vue'));
+      if (hasVueFiles) {
+        return { framework: 'vue-router', baseDir: candidate };
+      }
+    }
+  }
+
+  // 9. Vue Router with explicit router config (src/router or router)
+  const hasRouterConfig = [
+    join(normTarget, 'src', 'router', 'index.ts'),
+    join(normTarget, 'src', 'router', 'index.js'),
+    join(normTarget, 'src', 'router.ts'),
+    join(normTarget, 'src', 'router.js'),
+    join(normTarget, 'router', 'index.ts'),
+    join(normTarget, 'router', 'index.js'),
+  ].some((f) => existsSync(f));
+
+  if (hasRouterConfig) {
+    for (const candidate of [
+      join(normTarget, 'src', 'views'),
+      join(normTarget, 'views'),
+      join(normTarget, 'src', 'pages'),
+      join(normTarget, 'pages'),
+    ]) {
+      if (existsSync(candidate)) {
+        return { framework: 'vue-router', baseDir: candidate };
+      }
+    }
+  }
+
+  // 10. Standalone Inertia root Pages directory (if not Nuxt/Next)
   const rootPages = join(normTarget, 'Pages');
   if (!hasNuxtConfig && !hasNextConfig && existsSync(rootPages)) {
     return { framework: 'inertia', baseDir: rootPages };
   }
 
-  // 6. Direct folder check if user targeted a specific routes/pages directory
+  // 11. Direct folder check if user targeted a specific routes/pages directory
   const baseName = basename(normTarget).toLowerCase();
   if (baseName === 'app') return { framework: 'next-app', baseDir: normTarget };
   if (baseName === 'pages') return { framework: 'next-pages', baseDir: normTarget };
+  if (baseName === 'views') return { framework: 'vue-router', baseDir: normTarget };
 
   return { framework: 'unknown', baseDir: normTarget };
 }
@@ -406,6 +441,58 @@ async function scanInertiaPages(baseDir: string): Promise<RouteInfo[]> {
 }
 
 /**
+ * Scans a Vue Router SPA directory (e.g. src/views or views) and builds its route manifest.
+ */
+async function scanVueRouterPages(baseDir: string): Promise<RouteInfo[]> {
+  const files = await collectFiles(baseDir);
+  const routes: RouteInfo[] = [];
+
+  for (const file of files) {
+    if (!file.endsWith('.vue') && !file.endsWith('.tsx') && !file.endsWith('.jsx')) continue;
+
+    const rel = relative(baseDir, file).replace(/\\/g, '/');
+    const cleanRel = rel.replace(/\.[a-z0-9]+$/, '');
+
+    const segments = cleanRel.split('/');
+    const isPrivateOrPartial = segments.some((seg) => {
+      const lower = seg.toLowerCase();
+      return (
+        lower === 'partials' ||
+        lower === 'components' ||
+        lower === 'private' ||
+        seg.startsWith('_')
+      );
+    });
+    if (isPrivateOrPartial) continue;
+
+    const mappedSegments: string[] = [];
+    for (let i = 0; i < segments.length; i++) {
+      let seg = segments[i];
+      if (seg.endsWith('View') && seg.length > 4) {
+        seg = seg.slice(0, -4);
+      }
+      if (seg === 'Index' || seg.toLowerCase() === 'index') {
+        continue;
+      }
+      mappedSegments.push(seg.toLowerCase());
+    }
+
+    let routePath = '/' + mappedSegments.filter(Boolean).join('/');
+    if (!routePath) routePath = '/';
+
+    routes.push({
+      path: routePath,
+      filePath: normalize(file),
+      type: 'page',
+      framework: 'vue-router',
+      params: extractRouteParams(routePath),
+    });
+  }
+
+  return routes;
+}
+
+/**
  * Computes top-level namespace summaries for a list of routes.
  */
 export function computeRouteSummaries(routes: RouteInfo[]): Record<string, number> {
@@ -426,7 +513,35 @@ export async function scanRoutes(options: ScanRoutesOptions): Promise<RouteManif
   const targetPath = resolve(options.targetPath);
   const detection = await detectRouteFramework(targetPath);
   const framework = options.frameworkHint || detection.framework;
-  const baseDir = detection.baseDir;
+  let baseDir = detection.baseDir;
+
+  if (options.frameworkHint && options.frameworkHint !== detection.framework) {
+    const hintCandidates: Record<string, string[]> = {
+      'next-app': [join(targetPath, 'src', 'app'), join(targetPath, 'app')],
+      'next-pages': [join(targetPath, 'pages'), join(targetPath, 'src', 'pages')],
+      'nuxt': [join(targetPath, 'pages'), join(targetPath, 'src', 'pages')],
+      'astro': [join(targetPath, 'src', 'pages'), join(targetPath, 'pages')],
+      'inertia': [
+        join(targetPath, 'resources', 'js', 'Pages'),
+        join(targetPath, 'resources', 'js', 'pages'),
+        join(targetPath, 'resources', 'scripts', 'Pages'),
+        join(targetPath, 'src', 'pages'),
+      ],
+      'vue-router': [
+        join(targetPath, 'src', 'views'),
+        join(targetPath, 'views'),
+        join(targetPath, 'src', 'pages'),
+        join(targetPath, 'pages'),
+      ],
+    };
+    const candidates = hintCandidates[options.frameworkHint];
+    if (candidates) {
+      const found = candidates.find((c) => existsSync(c));
+      if (found) {
+        baseDir = found;
+      }
+    }
+  }
 
   let routes: RouteInfo[] = [];
 
@@ -443,16 +558,38 @@ export async function scanRoutes(options: ScanRoutesOptions): Promise<RouteManif
     case 'inertia':
       routes = await scanInertiaPages(baseDir);
       break;
+    case 'vue-router':
+      routes = await scanVueRouterPages(baseDir);
+      break;
     case 'next-pages':
     default: {
-      const files = await collectFiles(baseDir);
+      let scanTarget = baseDir;
+      if (framework === 'unknown') {
+        const candidatePageDirs = [
+          join(baseDir, 'src', 'pages'),
+          join(baseDir, 'pages'),
+          join(baseDir, 'src', 'views'),
+          join(baseDir, 'views'),
+          join(baseDir, 'src', 'routes'),
+          join(baseDir, 'routes'),
+        ];
+        const matchedCandidate = candidatePageDirs.find((dir) => existsSync(dir));
+        if (matchedCandidate) {
+          scanTarget = matchedCandidate;
+        } else {
+          // No standard page directory found; avoid scanning root to prevent false positive route pollution
+          break;
+        }
+      }
+
+      const files = await collectFiles(scanTarget);
       for (const file of files) {
         const ext = extname(file);
         if (!['.tsx', '.jsx', '.js', '.ts', '.vue'].includes(ext)) continue;
         const b = basename(file);
         if (b.startsWith('_')) continue; // skip _app, _document
 
-        const rel = relative(baseDir, file).replace(/\\/g, '/');
+        const rel = relative(scanTarget, file).replace(/\\/g, '/');
         let routePath = '/' + rel.replace(new RegExp(`${ext}$`), '');
         if (routePath.endsWith('/index')) routePath = routePath.slice(0, -6) || '/';
 
@@ -565,7 +702,7 @@ function routePatternToRegex(pattern: string): { regex: RegExp; paramNames: stri
     const optCatchAll = seg.match(/^\[\[\.\.\.([A-Za-z0-9_$]+)\]\]$/);
     if (optCatchAll) {
       paramNames.push(optCatchAll[1]);
-      return '(?:/(.*))?';
+      return '__OPT_CATCH_ALL__';
     }
 
     // 2. Catch-all [...param]
@@ -594,9 +731,10 @@ function routePatternToRegex(pattern: string): { regex: RegExp; paramNames: stri
 
   // Handle leading slash
   let regexStr = '^' + regexSegments.join('/');
-  // If pattern has optional catch-all at end, adjust slash handling
-  if (pattern.includes('[[...')) {
-    regexStr = '^' + regexSegments.filter(Boolean).join('/');
+  if (regexStr.includes('/__OPT_CATCH_ALL__')) {
+    regexStr = regexStr.replace('/__OPT_CATCH_ALL__', '(?:/(.*))?');
+  } else if (regexStr.includes('__OPT_CATCH_ALL__')) {
+    regexStr = regexStr.replace('__OPT_CATCH_ALL__', '(?:/?(.*))?');
   }
   regexStr += '$';
 

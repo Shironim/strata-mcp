@@ -400,9 +400,11 @@ export function extractApiContractsFromCode(code: string, filePath: string): Api
 export async function extractWorkspaceApiContracts(options?: {
   targetPath?: string;
   scopePath?: string;
+  excludeDirs?: string[];
 }): Promise<ApiContractResult> {
   const root = options?.targetPath ? resolve(options.targetPath) : (findProjectRoot(process.cwd()) ?? process.cwd());
-  const files = await collectFiles(root, options?.scopePath ? { scopePath: options.scopePath } : undefined);
+  const scanTarget = options?.scopePath ? resolve(root, options.scopePath) : root;
+  const files = await collectFiles(scanTarget, { excludeDirs: options?.excludeDirs });
 
   const allEndpoints: ApiContractItem[] = [];
   const endpointSummary: Record<string, { methods: ApiMethod[]; callers: string[] }> = {};

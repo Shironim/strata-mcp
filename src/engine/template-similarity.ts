@@ -2,6 +2,7 @@ import { promises as fs } from 'node:fs';
 import { basename, dirname, extname, relative, resolve } from 'node:path';
 import { collectFiles } from './collector';
 import { extractRenderedCustomTags } from './tree';
+import { parseSfc } from './splitter';
 import type { TemplateSimilarityCluster, TemplateSimilarityResult } from '../types';
 
 interface TemplateFingerprint {
@@ -21,9 +22,19 @@ interface TemplateFingerprint {
 function extractFingerprint(filePath: string, content: string, rootDir: string): TemplateFingerprint | null {
   // Extract template block if SFC
   let templateContent = content;
-  const templateMatch = content.match(/<template\b[^>]*>([\s\S]*?)<\/template>/i);
-  if (templateMatch) {
-    templateContent = templateMatch[1];
+  if (filePath.endsWith('.vue')) {
+    try {
+      const sfc = parseSfc(content, filePath);
+      if (!sfc.template) return null;
+      templateContent = sfc.template.content;
+    } catch {
+      const templateMatch = content.match(/<template\b[^>]*>([\s\S]*?)<\/template>/i);
+      if (templateMatch) {
+        templateContent = templateMatch[1];
+      } else {
+        return null;
+      }
+    }
   } else if (!filePath.endsWith('.tsx') && !filePath.endsWith('.jsx')) {
     // Non-template file without template block
     return null;
