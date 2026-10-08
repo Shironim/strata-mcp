@@ -170,16 +170,25 @@ export function normalizeEndpointUrl(rawUrl: string): string {
 
   // Convert template interpolations ${id} -> :id
   cleaned = cleaned.replace(/\$\{([^}]+)\}/g, (_match, expr) => {
-    const cleanExpr = expr.trim().replace(/^params\./, '').replace(/^route\.params\./, '');
+    let cleanExpr = expr
+      .trim()
+      .replace(/\.value\b/g, '')
+      .replace(/^(?:params|route\.params|props|item|user|record|data)\./, '');
+    if (cleanExpr.includes('.')) {
+      cleanExpr = cleanExpr.split('.').pop() || cleanExpr;
+    }
     const safeName = cleanExpr.replace(/[^a-zA-Z0-9_]/g, '_');
     return `:${safeName}`;
   });
 
   // Convert string concatenations e.g. "/api/items/" + itemId -> /api/items/:itemId
   cleaned = cleaned.replace(/['"]\s*\+\s*([a-zA-Z0-9_$.]+)/g, (_match, expr) => {
-    const cleanExpr = expr.replace(/^.*\./, '');
+    let cleanExpr = expr.replace(/\.value\b/g, '').replace(/^.*\./, '');
     return `:${cleanExpr}`;
   });
+
+  // Strip any leftover dangling quotes at head or tail
+  cleaned = cleaned.replace(/^['"`]+|['"`]+$/g, '');
 
   // Clean trailing punctuation or double slashes
   cleaned = cleaned.replace(/([^:])\/{2,}/g, '$1/');
