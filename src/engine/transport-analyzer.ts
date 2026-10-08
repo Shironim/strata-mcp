@@ -161,7 +161,13 @@ export function analyzeIngressTransport(
       hasDirectIteration = true;
     }
 
-    let expectedShape: IngressTransportContract['expectedShape'] = 'entity-object';
+    const isScalarPrimitive = Boolean(
+      prop.type &&
+      /^(?:string|number|boolean|symbol|bigint|String|Number|Boolean)$/i.test(prop.type.trim())
+    );
+
+    let expectedShape: IngressTransportContract['expectedShape'] =
+      isScalarPrimitive && accessedProps.length === 0 ? 'primitive' : 'entity-object';
     if (hasDataUnwrap || hasPaginationMeta) {
       expectedShape = 'paginated-collection';
     } else if (hasDirectIteration || prop.type?.includes('[]') || prop.type?.includes('Array')) {

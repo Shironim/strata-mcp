@@ -298,20 +298,25 @@ async function scanNuxtPages(baseDir: string, projectRoot: string): Promise<Rout
     }
 
     let pageLayouts: string[] | undefined;
+    let explicitlyDisabledLayout = false;
     try {
       const content = await fs.readFile(file, 'utf8');
-      const layoutMatch = content.match(/layout:\s*['"]([^'"]+)['"]/);
-      if (layoutMatch) {
-        const customLayout = join(projectRoot, 'layouts', `${layoutMatch[1]}.vue`);
-        if (existsSync(customLayout)) {
-          pageLayouts = [normalize(customLayout)];
+      if (/layout:\s*false\b/.test(content)) {
+        explicitlyDisabledLayout = true;
+      } else {
+        const layoutMatch = content.match(/layout:\s*['"]([^'"]+)['"]/);
+        if (layoutMatch) {
+          const customLayout = join(projectRoot, 'layouts', `${layoutMatch[1]}.vue`);
+          if (existsSync(customLayout)) {
+            pageLayouts = [normalize(customLayout)];
+          }
         }
       }
     } catch {
       // ignore
     }
 
-    if (!pageLayouts && hasDefaultLayout) {
+    if (!pageLayouts && !explicitlyDisabledLayout && hasDefaultLayout) {
       pageLayouts = [normalize(defaultLayout)];
     }
 

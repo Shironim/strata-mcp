@@ -79,6 +79,7 @@ export async function findUnusedComponents(
     '**/views/**',
     '**/routes/**',
     '**/app/**',
+    '**/layouts/**',
     '**/*.stories.*',
     '**/*.test.*',
     '**/*.spec.*',
@@ -89,7 +90,7 @@ export async function findUnusedComponents(
     : defaultIgnores;
 
   function shouldIgnore(filePath: string): boolean {
-    const relPath = relative(targetDir, filePath);
+    const relPath = relative(targetDir, filePath).replace(/\\/g, '/');
     const baseName = basename(filePath);
 
     for (const pat of ignorePatterns) {

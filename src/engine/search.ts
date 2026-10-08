@@ -196,8 +196,14 @@ export async function findCode(options: SearchOptions): Promise<ResolvedMatch[]>
       const content = await fs.readFile(file, 'utf8');
 
       // Fast-Path Candidate Pruning (Engine B): skip file if required literal keywords are missing
-      if (keywords.length > 0 && !keywords.every((kw) => content.includes(kw))) {
-        return [];
+      if (keywords.length > 0) {
+        const hasAlternation = Boolean(options.pattern && (options.pattern.includes('||') || options.pattern.includes('|')));
+        const satisfiesKeywords = hasAlternation
+          ? keywords.some((kw) => content.includes(kw))
+          : keywords.every((kw) => content.includes(kw));
+        if (!satisfiesKeywords) {
+          return [];
+        }
       }
 
       const adapter = createDocumentAdapter(file, content);
