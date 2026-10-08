@@ -228,7 +228,17 @@ export function extractStyleTokens(content: string): ComponentStyleTokens | unde
         }
       } else if (/^(?:inset-0|pointer-events-none|modal|drawer)$/.test(t)) {
         layoutTraps.add(t);
+      } else if (/^(?:backdrop-(?:blur|filter)(?:-\w+)?|transform|filter)$/.test(t)) {
+        layoutTraps.add(t);
       }
+    }
+
+    const hasFixed = tokens.some((t) => t === 'fixed' || t === 'sticky');
+    const hasTransformOrBackdrop = tokens.some((t) =>
+      /^(?:transform|backdrop-(?:blur|filter)(?:-\w+)?|filter|scale-\d+|rotate-\d+|-?translate-[xy]-\S+)$/.test(t)
+    );
+    if (hasFixed && hasTransformOrBackdrop) {
+      layoutTraps.add('layout-clash:fixed-in-transform-stacking-context');
     }
   }
 

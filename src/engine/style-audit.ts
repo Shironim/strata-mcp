@@ -123,6 +123,21 @@ export async function auditDesignTokens(
             radiusDistribution[radToken] = (radiusDistribution[radToken] || 0) + 1;
           }
         }
+
+        // Layout Clash: Fixed/Sticky combined with Transform/Backdrop-Filter
+        const fixedToken = tokens.find((t) => t === 'fixed' || t === 'sticky');
+        const transformToken = tokens.find((t) =>
+          /^(?:transform|backdrop-blur(?:-\w+)?|backdrop-filter|filter|scale-\d+|rotate-\d+|-?translate-[xy]-\S+)$/.test(t)
+        );
+        if (fixedToken && transformToken) {
+          arbitraryTokens.push({
+            file: relFile,
+            line: lineNum,
+            token: `${fixedToken} + ${transformToken}`,
+            category: 'layout-trap',
+            recommendation: `Element combines '${fixedToken}' with '${transformToken}', breaking CSS viewport stacking context. Move fixed element outside the transformed container.`,
+          });
+        }
       }
     }
 
