@@ -3,15 +3,23 @@ import { parseSfc } from '../../src/engine/splitter';
 import { findComponentInTemplateBlock, isComponentNameMatch, toKebabCase } from '../../src/engine/template';
 
 describe('Template Matcher (Task 3 DoD)', () => {
-  it('converts PascalCase to kebab-case properly', () => {
+  it('converts PascalCase to kebab-case properly including acronyms', () => {
     expect(toKebabCase('OldButton')).toBe('old-button');
     expect(toKebabCase('UserProfileCard')).toBe('user-profile-card');
+    expect(toKebabCase('UIModal')).toBe('ui-modal');
+    expect(toKebabCase('SVGIcon')).toBe('svg-icon');
+    expect(toKebabCase('XMLParser')).toBe('xml-parser');
+    expect(toKebabCase('BaseURLInput')).toBe('base-url-input');
   });
 
-  it('matches component names across PascalCase and kebab-case', () => {
+  it('matches component names across PascalCase, kebab-case, and acronyms', () => {
     expect(isComponentNameMatch('OldButton', 'OldButton')).toBe(true);
     expect(isComponentNameMatch('old-button', 'OldButton')).toBe(true);
     expect(isComponentNameMatch('OldButton', 'old-button')).toBe(true);
+    expect(isComponentNameMatch('ui-modal', 'UIModal')).toBe(true);
+    expect(isComponentNameMatch('UIModal', 'ui-modal')).toBe(true);
+    expect(isComponentNameMatch('svg-icon', 'SVGIcon')).toBe(true);
+    expect(isComponentNameMatch('SVGIcon', 'svg-icon')).toBe(true);
     expect(isComponentNameMatch('NewButton', 'OldButton')).toBe(false);
   });
 

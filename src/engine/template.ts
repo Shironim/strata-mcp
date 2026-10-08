@@ -11,10 +11,13 @@ import { remapMatches } from './remapper';
 import { stripQuotes } from './patterns';
 
 /**
- * Converts PascalCase to kebab-case (e.g., OldButton -> old-button).
+ * Converts PascalCase to kebab-case (e.g., OldButton -> old-button, UIModal -> ui-modal).
  */
 export function toKebabCase(str: string): string {
-  return str.replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase();
+  return str
+    .replace(/([A-Z]+)([A-Z][a-z0-9])/g, '$1-$2')
+    .replace(/([a-z0-9])([A-Z])/g, '$1-$2')
+    .toLowerCase();
 }
 
 /**
@@ -26,22 +29,43 @@ export function toPascalCase(str: string): string {
     .replace(/[-_]/g, '');
 }
 
+const KNOWN_ACRONYMS = new Set([
+  'ui', 'url', 'svg', 'xml', 'html', 'css', 'api', 'id', 'json', 'http', 'sdk', 'db', 'io', 'cta', 'seo', 'pdf', 'qr', 'ai',
+]);
+
 /**
- * Returns all common naming variations for a component name (PascalCase and kebab-case).
+ * Returns all common naming variations for a component name (PascalCase, kebab-case, acronyms).
  */
 export function getCandidateNames(name: string): string[] {
   const names = new Set<string>();
   names.add(name);
   names.add(toPascalCase(name));
   names.add(toKebabCase(name));
+  names.add(toPascalCase(toKebabCase(name)));
+
+  if (name.includes('-') || name.includes('_')) {
+    const parts = name.split(/[-_]/).filter(Boolean);
+    if (parts.length > 1) {
+      const acrParts = parts.map((p) => {
+        const lower = p.toLowerCase();
+        if (KNOWN_ACRONYMS.has(lower)) {
+          return lower.toUpperCase();
+        }
+        return p.charAt(0).toUpperCase() + p.slice(1).toLowerCase();
+      });
+      names.add(acrParts.join(''));
+    }
+  }
+
   return Array.from(names).filter(Boolean);
 }
 
 /**
- * Checks if two component tag names match in either PascalCase or kebab-case.
+ * Checks if two component tag names match in either PascalCase, kebab-case, or acronym forms.
  */
 export function isComponentNameMatch(tag: string, targetName: string): boolean {
   if (tag === targetName) return true;
+  if (tag.toLowerCase() === targetName.toLowerCase()) return true;
   return toKebabCase(tag) === toKebabCase(targetName);
 }
 
