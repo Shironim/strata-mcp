@@ -593,6 +593,20 @@ async function getDownwardComponentTree(
         }
 
         node.children.push(childNode);
+      } else {
+        const candidateNames = getCandidateNames(imp.alias || imp.name);
+        const passedProps = extractPassedProps(content, candidateNames);
+        node.children.push({
+          component: imp.alias || imp.name,
+          filePath: childNorm,
+          alias: imp.alias,
+          isDynamic: imp.isDynamic,
+          isPage: isPageFile(childNorm),
+          isCircular: true,
+          depth: depth + 1,
+          passedProps: passedProps.length > 0 ? passedProps : undefined,
+          children: [],
+        });
       }
     }
 
@@ -620,6 +634,19 @@ async function getDownwardComponentTree(
           }
 
           node.children.push(childNode);
+        } else {
+          const candidateNames = getCandidateNames(tag);
+          const passedProps = extractPassedProps(content, candidateNames);
+          node.children.push({
+            component: tag,
+            filePath: catalogTarget,
+            isAutoImported: true,
+            isCircular: true,
+            isPage: isPageFile(catalogTarget),
+            depth: depth + 1,
+            passedProps: passedProps.length > 0 ? passedProps : undefined,
+            children: [],
+          });
         }
       }
     }
@@ -724,10 +751,10 @@ export async function getComponentTree(
     entryPath,
   };
 
-  const result =
-    options.direction === 'upward'
-      ? await getUpwardComponentTree(effectiveOptions)
-      : await getDownwardComponentTree(effectiveOptions);
+  const isUpward = options.direction === 'upward' || options.direction === 'up';
+  const result = isUpward
+    ? await getUpwardComponentTree(effectiveOptions)
+    : await getDownwardComponentTree(effectiveOptions);
 
   if (resolvedRouteInfo) {
     result.resolvedRoute = resolvedRouteInfo;

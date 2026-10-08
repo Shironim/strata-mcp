@@ -59,4 +59,20 @@ describe('Tree Engine Upward Blast Radius & Auto-Import (Phase 2)', () => {
     const consumerNames = result.root.children.map((c) => c.component);
     expect(consumerNames).toContain('AutoImportPage.vue');
   });
+
+  it('resolves upward tree correctly when direction is "up"', async () => {
+    const leafPath = join(FIXTURES_DIR, 'OldButton.vue');
+    const result = await getComponentTree({
+      entryPath: leafPath,
+      direction: 'up',
+      maxDepth: 3,
+    });
+
+    expect(result.direction).toBe('upward');
+    expect(result.root.component).toBe('OldButton.vue');
+    expect(result.root.children.length).toBeGreaterThanOrEqual(1);
+
+    const consumerNames = result.root.children.map((c) => c.component);
+    expect(consumerNames).toContain('PageOne.vue');
+  });
 });
