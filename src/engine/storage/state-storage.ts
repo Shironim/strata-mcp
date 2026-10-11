@@ -281,22 +281,21 @@ export async function findUnusedState(
     }
   }
 
-  // 3. For each declared state, query consumer count using SQLite state_deps
+  // 3. For each declared state, check if any external consumer exists in SQLite state_deps
+  const hasConsumerStmt = db.prepare(`
+    SELECT 1
+    FROM state_deps s
+    JOIN files f ON s.file_id = f.id
+    WHERE s.identifier = ? AND f.path != ?
+    LIMIT 1;
+  `);
+
   const unusedState: UnusedStateItem[] = [];
 
   for (const item of declaredState) {
-    const consumers = db
-      .query(
-        `
-      SELECT DISTINCT f.path
-      FROM state_deps s
-      JOIN files f ON s.file_id = f.id
-      WHERE s.identifier = ? AND f.path != ?;
-    `
-      )
-      .all(item.identifier, item.filePath) as Array<{ path: string }>;
+    const hasConsumer = hasConsumerStmt.get(item.identifier, item.filePath);
 
-    if (consumers.length === 0) {
+    if (!hasConsumer) {
       unusedState.push({
         identifier: item.identifier,
         kind: item.kind,
@@ -375,16 +374,47 @@ export async function traceStateChain(
   const consumers: StateChainNode[] = [];
   const dependencies: StateChainNode[] = [];
 
-  // 1. Find the declaring file
-  const allFiles = db.query('SELECT id, path FROM files').all() as Array<{ id: number; path: string }>;
-  let declaringFile: { id: number; path: string } | undefined;
+  // 1. Find the declaring file directly in SQLite
+  let declaringFile = db
+    .query(`
+      SELECT id, path FROM files
+      WHERE path LIKE '%/' || ? || '.%'
+         OR path LIKE '%/' || ? || '/index.%'
+      LIMIT 1;
+    `)
+    .get(identifier, identifier) as { id: number; path: string } | null;
 
-  for (const f of allFiles) {
-    const base = basename(f.path, extname(f.path));
-    if (base === identifier || base.toLowerCase() === identifier.toLowerCase()) {
-      declaringFile = f;
-      break;
-    }
+  if (!declaringFile) {
+    declaringFile = db
+      .query(`
+        SELECT id, path FROM files
+        WHERE LOWER(path) LIKE '%/' || LOWER(?) || '.%'
+           OR LOWER(path) LIKE '%/' || LOWER(?) || '/index.%'
+        LIMIT 1;
+      `)
+      .get(identifier, identifier) as { id: number; path: string } | null;
+  }
+
+  if (!declaringFile) {
+    declaringFile = db
+      .query(`
+        SELECT f.id, f.path FROM files f
+        JOIN state_deps s ON s.file_id = f.id
+        WHERE s.identifier = ? AND s.access_mode = 'write'
+        LIMIT 1;
+      `)
+      .get(identifier) as { id: number; path: string } | null;
+  }
+
+  if (!declaringFile) {
+    declaringFile = db
+      .query(`
+        SELECT f.id, f.path FROM files f
+        JOIN state_deps s ON s.file_id = f.id
+        WHERE s.identifier = ?
+        LIMIT 1;
+      `)
+      .get(identifier) as { id: number; path: string } | null;
   }
 
   // 2. Consumers (Upward): Files consuming this identifier and components consuming them
@@ -416,18 +446,18 @@ export async function traceStateChain(
       }
     }
 
+    const parentRowsStmt = db.prepare(`
+      SELECT DISTINCT f.id, f.path
+      FROM edges e
+      JOIN files f ON e.parent_file_id = f.id
+      WHERE e.child_file_id = ?
+    `);
+
     // Traverse upwards along edges: who imports these current files?
     for (let d = 2; d <= maxDepth && currentFiles.length > 0; d++) {
       const nextFiles: Array<{ path: string; fileId: number; depth: number }> = [];
       for (const curr of currentFiles) {
-        const parentRows = db
-          .query(`
-            SELECT DISTINCT f.id, f.path
-            FROM edges e
-            JOIN files f ON e.parent_file_id = f.id
-            WHERE e.child_file_id = ?
-          `)
-          .all(curr.fileId) as Array<{ id: number; path: string }>;
+        const parentRows = parentRowsStmt.all(curr.fileId) as Array<{ id: number; path: string }>;
 
         for (const prow of parentRows) {
           if (!visitedConsumers.has(prow.path)) {
@@ -453,29 +483,43 @@ export async function traceStateChain(
     const visitedDeps = new Set<string>();
     let currentDepFiles: Array<{ fileId: number; depth: number }> = [{ fileId: declaringFile.id, depth: 1 }];
 
+    const depRowsStmt = db.prepare(`
+      SELECT DISTINCT s.identifier, s.kind
+      FROM state_deps s
+      WHERE s.file_id = ?
+    `);
+
+    const findDepFileStmt = db.prepare(`
+      SELECT f.id, f.path
+      FROM files f
+      WHERE f.path LIKE '%/' || ? || '.%'
+         OR f.path LIKE '%/' || ? || '/index.%'
+         OR f.path LIKE '%' || ? || '%'
+      ORDER BY
+        CASE
+          WHEN f.path LIKE '%/' || ? || '.%' THEN 1
+          WHEN f.path LIKE '%/' || ? || '/index.%' THEN 2
+          ELSE 3
+        END
+      LIMIT 1;
+    `);
+
     for (let d = 1; d <= maxDepth && currentDepFiles.length > 0; d++) {
       const nextDepFiles: Array<{ fileId: number; depth: number }> = [];
       for (const curr of currentDepFiles) {
-        const depRows = db
-          .query(`
-            SELECT DISTINCT s.identifier, s.kind
-            FROM state_deps s
-            WHERE s.file_id = ?
-          `)
-          .all(curr.fileId) as Array<{ identifier: string; kind: string }>;
+        const depRows = depRowsStmt.all(curr.fileId) as Array<{ identifier: string; kind: string }>;
 
         for (const drow of depRows) {
           if (drow.identifier !== identifier && !visitedDeps.has(drow.identifier)) {
             visitedDeps.add(drow.identifier);
 
-            const depFileRow = db
-              .query(`
-                SELECT f.id, f.path
-                FROM files f
-                WHERE f.path LIKE '%' || ? || '%'
-                LIMIT 1
-              `)
-              .get(drow.identifier) as { id: number; path: string } | null;
+            const depFileRow = findDepFileStmt.get(
+              drow.identifier,
+              drow.identifier,
+              drow.identifier,
+              drow.identifier,
+              drow.identifier
+            ) as { id: number; path: string } | null;
 
             dependencies.push({
               identifier: drow.identifier,

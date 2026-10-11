@@ -16,12 +16,17 @@ export const SUPPORTED_EXTENSIONS = new Set(['.vue', '.astro', '.tsx', '.jsx', '
 export function isLayoutFile(filePath: string): boolean {
   const norm = filePath.replace(/\\/g, '/');
   const base = basename(norm).toLowerCase();
+  const nameWithoutExt = base.replace(/\.[^.]+$/, '');
   return (
-    base.startsWith('layout.') ||
+    nameWithoutExt === 'layout' ||
+    nameWithoutExt.endsWith('layout') ||
     norm.includes('/layouts/') ||
-    norm.includes('/Layouts/') ||
-    base.includes('layout')
+    norm.includes('/Layouts/')
   );
+}
+
+export interface WorkspaceDatabaseOptions {
+  enableWatcher?: boolean;
 }
 
 export const dbRegistry = new Map<string, Database>();
@@ -30,7 +35,10 @@ export const dbRegistry = new Map<string, Database>();
  * Opens or initializes a SQLite database for the workspace with WAL mode.
  * Reuses existing open database instances for the same workspace.
  */
-export function getWorkspaceDatabase(workspaceRoot: string): Database {
+export function getWorkspaceDatabase(
+  workspaceRoot: string,
+  options: WorkspaceDatabaseOptions = {}
+): Database {
   const absRoot = canonicalizePath(workspaceRoot);
   const existing = dbRegistry.get(absRoot);
   if (existing) {
@@ -61,8 +69,10 @@ export function getWorkspaceDatabase(workspaceRoot: string): Database {
   initSchema(db);
   dbRegistry.set(absRoot, db);
 
-  // Start reactive background watcher for instant cache updates
-  startWorkspaceWatcher(absRoot, db);
+  // Start reactive background watcher for instant cache updates if enabled (default: true)
+  if (options.enableWatcher !== false) {
+    startWorkspaceWatcher(absRoot, db);
+  }
 
   return db;
 }
@@ -176,14 +186,24 @@ export function initSchema(db: Database): void {
   addColumnIfNotExists('state_deps', 'line_number INTEGER DEFAULT 0');
   addColumnIfNotExists('state_deps', 'usage_snippet TEXT');
 
+  // Drop legacy redundant indexes if present
+  try {
+    db.run(`
+      DROP INDEX IF EXISTS idx_files_path;
+      DROP INDEX IF EXISTS idx_routes_url;
+      DROP INDEX IF EXISTS idx_state_deps_identifier;
+    `);
+  } catch {
+    // ignore
+  }
+
   // Create indexes safely after tables and columns are guaranteed to exist
   db.run(`
-    CREATE INDEX IF NOT EXISTS idx_files_path ON files(path);
     CREATE INDEX IF NOT EXISTS idx_components_name ON components(name);
     CREATE INDEX IF NOT EXISTS idx_edges_parent ON edges(parent_file_id);
     CREATE INDEX IF NOT EXISTS idx_edges_child ON edges(child_file_id);
-    CREATE INDEX IF NOT EXISTS idx_state_deps_identifier ON state_deps(identifier);
+    CREATE INDEX IF NOT EXISTS idx_state_deps_file ON state_deps(file_id);
     CREATE INDEX IF NOT EXISTS idx_state_deps_ident_mode ON state_deps(identifier, access_mode);
-    CREATE INDEX IF NOT EXISTS idx_routes_url ON routes(url_path);
+    CREATE INDEX IF NOT EXISTS idx_routes_file ON routes(file_id);
   `);
 }

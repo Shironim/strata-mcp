@@ -104,4 +104,28 @@ describe('Persistent SQLite Codebase Graph Cache Engine (bun:sqlite)', () => {
     const formatted = formatUnusedStateAsText(result);
     expect(formatted).toContain('Unused State & Composables Audit');
   });
+
+  it('verifies optimized index layout on state_deps and routes', () => {
+    const db = getWorkspaceDatabase(FIXTURES_DIR);
+    const stateDepsIndexes = db.query("PRAGMA index_list('state_deps');").all() as Array<{ name: string }>;
+    const indexNames = stateDepsIndexes.map((i) => i.name);
+    expect(indexNames).toContain('idx_state_deps_file');
+    expect(indexNames).toContain('idx_state_deps_ident_mode');
+    expect(indexNames).not.toContain('idx_state_deps_identifier');
+
+    const filesIndexes = db.query("PRAGMA index_list('files');").all() as Array<{ name: string }>;
+    const fileIndexNames = filesIndexes.map((i) => i.name);
+    expect(fileIndexNames).not.toContain('idx_files_path');
+  });
+
+  it('verifies tightened isLayoutFile heuristic', async () => {
+    const { isLayoutFile } = await import('../../src/engine/storage/schema');
+    expect(isLayoutFile('src/layouts/default.vue')).toBe(true);
+    expect(isLayoutFile('src/pages/layout.tsx')).toBe(true);
+    expect(isLayoutFile('src/components/AdminLayout.vue')).toBe(true);
+
+    expect(isLayoutFile('src/utils/layoutHelper.ts')).toBe(false);
+    expect(isLayoutFile('src/components/GridLayoutIcon.vue')).toBe(false);
+    expect(isLayoutFile('src/stores/useLayoutStore.ts')).toBe(false);
+  });
 });

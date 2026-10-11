@@ -268,6 +268,7 @@ export function transactionCommitter(
   const deleteStateDepsStmt = db.prepare(`DELETE FROM state_deps WHERE file_id = $id;`);
 
   const toProcess = [...delta.added, ...delta.modified];
+  const modifiedSet = new Set(delta.modified);
   const fileIdMap = new Map<string, number>();
 
   for (const [path, info] of delta.dbMap.entries()) {
@@ -293,7 +294,7 @@ export function transactionCommitter(
       const boundaryDirective = parsed?.boundary.directive || null;
 
       let fileId: number;
-      if (delta.modified.includes(path) && delta.dbMap.has(path)) {
+      if (modifiedSet.has(path) && delta.dbMap.has(path)) {
         fileId = delta.dbMap.get(path)!.id;
         updateFileStmt.run({
           $id: fileId,
@@ -395,24 +396,26 @@ export function transactionCommitter(
     }
 
     // D. Sync routes table
-    if (parsedBatch.routes && parsedBatch.routes.routes.length > 0) {
+    if (parsedBatch.routes) {
       db.run('DELETE FROM routes;');
-      const insertRouteStmt = db.prepare(`
-        INSERT OR REPLACE INTO routes (url_path, file_id, type, params_json, handlers_json, layout_chain_json)
-        VALUES ($url_path, $file_id, $type, $params_json, $handlers_json, $layout_chain_json);
-      `);
+      if (parsedBatch.routes.routes && parsedBatch.routes.routes.length > 0) {
+        const insertRouteStmt = db.prepare(`
+          INSERT OR REPLACE INTO routes (url_path, file_id, type, params_json, handlers_json, layout_chain_json)
+          VALUES ($url_path, $file_id, $type, $params_json, $handlers_json, $layout_chain_json);
+        `);
 
-      for (const r of parsedBatch.routes.routes) {
-        const fId = fileIdMap.get(normalize(r.filePath));
-        if (fId) {
-          insertRouteStmt.run({
-            $url_path: r.path,
-            $file_id: fId,
-            $type: r.type,
-            $params_json: JSON.stringify(r.params),
-            $handlers_json: r.handlers ? JSON.stringify(r.handlers) : null,
-            $layout_chain_json: r.layouts ? JSON.stringify(r.layouts) : null,
-          });
+        for (const r of parsedBatch.routes.routes) {
+          const fId = fileIdMap.get(normalize(r.filePath));
+          if (fId) {
+            insertRouteStmt.run({
+              $url_path: r.path,
+              $file_id: fId,
+              $type: r.type,
+              $params_json: JSON.stringify(r.params),
+              $handlers_json: r.handlers ? JSON.stringify(r.handlers) : null,
+              $layout_chain_json: r.layouts ? JSON.stringify(r.layouts) : null,
+            });
+          }
         }
       }
     }
