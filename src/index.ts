@@ -31,7 +31,11 @@ export * from './engine/layout-extractor';
 export * from './engine/archetype';
 export * from './engine/transport-analyzer';
 export * from './engine/path-resolver';
-export * from './tools/patch-plan';
+export * from './engine/template-similarity';
+export * from './engine/bundle-audit';
+export * from './engine/dynamic-imports';
+export * from './tools';
 export * from './adapters/factory';
 export * from './adapters/types';
 export * from './mcp';
+

@@ -923,3 +923,19 @@ export interface AuditArchetypeOptions {
   exemplarPath?: string;
   workspaceRoot?: string;
 }
+
+export interface ExtractedImport {
+  name: string;
+  alias?: string;
+  source: string;
+  isDynamic: boolean;
+}
+
+export type { FindSimilarTemplatesOptions } from './engine/template-similarity';
+export type { AuditBundleOptions } from './engine/bundle-audit';
+
+export interface ExtractApiContractsOptions {
+  targetPath?: string;
+  scopePath?: string;
+  excludeDirs?: string[];
+}

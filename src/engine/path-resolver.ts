@@ -238,3 +238,103 @@ export function resolveToolTargetPath(
       : defaultPath;
   return resolveWorkspacePath(rawPath);
 }
+
+/**
+ * Safely parses a positive integer (>= 1), returning fallback if invalid, NaN, or <= 0.
+ */
+export function parseSafePositiveInt(val: unknown, fallback?: number): number | undefined {
+  if (val === undefined || val === null || val === '') return fallback;
+  const n = Number(val);
+  return Number.isFinite(n) && n >= 1 ? Math.floor(n) : fallback;
+}
+
+/**
+ * Safely parses a non-negative float (>= 0), preserving 0 and returning fallback if invalid or NaN.
+ */
+export function parseSafeFloat(val: unknown, fallback?: number): number | undefined {
+  if (val === undefined || val === null || val === '') return fallback;
+  const n = Number(val);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
+/**
+ * Parses an array of strings or a comma-separated string into a clean string array.
+ */
+export function parseStringList(val: unknown): string[] | undefined {
+  if (Array.isArray(val)) {
+    const items = val.map(String).map((s) => s.trim()).filter(Boolean);
+    return items.length > 0 ? items : undefined;
+  }
+  if (typeof val === 'string') {
+    const items = val.split(',').map((s) => s.trim()).filter(Boolean);
+    return items.length > 0 ? items : undefined;
+  }
+  return undefined;
+}
+
+/**
+ * Parses an alias map from an object, a JSON string, or a comma-separated "prefix=path" string.
+ */
+export function parseAliasMapInput(raw: unknown): Record<string, string> | undefined {
+  if (!raw) return undefined;
+  if (typeof raw === 'object' && !Array.isArray(raw)) {
+    const map: Record<string, string> = {};
+    for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+      if (k && typeof v === 'string' && v.trim()) {
+        map[k.trim()] = v.trim();
+      }
+    }
+    return Object.keys(map).length > 0 ? map : undefined;
+  }
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim();
+    if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        return parseAliasMapInput(parsed);
+      } catch {
+        // Fall through to key=value parsing
+      }
+    }
+    const aliasMap: Record<string, string> = {};
+    for (const part of trimmed.split(',')) {
+      const equalsIndex = part.indexOf('=');
+      if (equalsIndex <= 0) continue;
+      const alias = part.slice(0, equalsIndex).trim();
+      const target = part.slice(equalsIndex + 1).trim();
+      if (alias && target) aliasMap[alias] = target;
+    }
+    return Object.keys(aliasMap).length > 0 ? aliasMap : undefined;
+  }
+  return undefined;
+}
+
+const AUDIT_TARGET_ALIASES: Record<string, string> = {
+  design: 'design-tokens',
+  bundle: 'bundle-health',
+  api: 'api-contracts',
+  apis: 'api-contracts',
+  archetype: 'archetype-drift',
+};
+
+export const VALID_AUDIT_TARGETS = new Set([
+  'dead-components',
+  'dead-state',
+  'routes',
+  'similar-templates',
+  'design-tokens',
+  'bundle-health',
+  'api-contracts',
+  'archetype-drift',
+  'all',
+]);
+
+/**
+ * Normalizes an audit target string (snake_case -> kebab-case and short aliases -> canonical target).
+ */
+export function normalizeAuditTarget(raw: unknown, defaultTarget = 'all'): string {
+  if (!raw || typeof raw !== 'string' || !raw.trim()) return defaultTarget;
+  const cleaned = raw.trim().toLowerCase().replace(/_/g, '-');
+  return AUDIT_TARGET_ALIASES[cleaned] ?? cleaned;
+}
+

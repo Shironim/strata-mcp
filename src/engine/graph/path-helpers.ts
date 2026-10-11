@@ -3,15 +3,10 @@ import { dirname, resolve } from 'node:path';
 import { escapeRegExp } from '../patterns';
 import { findProjectRoot } from '../path-resolver';
 import type { AliasConfig } from '../resolver';
+import type { ExtractedImport } from '../../types';
 
 export { findProjectRoot };
-
-export interface ExtractedImport {
-  name: string;
-  alias?: string;
-  source: string;
-  isDynamic: boolean;
-}
+export type { ExtractedImport };
 
 export const STATIC_IMPORT_PATTERN = /^\s*import\s+(?:type\s+)?(.+?)\s+from\s+['"]([^'"]+)['"]/gm;
 export const DEFAULT_IMPORT_CLAUSE_PATTERN = /^([A-Za-z0-9_$]+)(?:\s*,|\s*$)/;

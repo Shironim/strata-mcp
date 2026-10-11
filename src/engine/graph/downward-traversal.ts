@@ -323,7 +323,10 @@ async function getDownwardComponentTree(
   options: ComponentTreeOptions & { entryPath: string }
 ): Promise<ComponentTreeResult> {
   const entryPath = resolve(options.entryPath);
-  const maxDepth = options.maxDepth !== undefined ? options.maxDepth : 3;
+  const maxDepth =
+    typeof options.maxDepth === 'number' && Number.isFinite(options.maxDepth) && options.maxDepth >= 1
+      ? Math.floor(options.maxDepth)
+      : 3;
   const scopeFilters = normalizeScopeFilters(options.scopeFilter);
 
   // Discover aliases

@@ -9,7 +9,10 @@ import type {
   ApiContractResult,
   ApiMethod,
   BackendTargetHint,
+  ExtractApiContractsOptions,
 } from '../types';
+
+export type { ExtractApiContractsOptions };
 
 function capitalize(str: string): string {
   if (!str) return '';
@@ -406,11 +409,9 @@ export function extractApiContractsFromCode(code: string, filePath: string): Api
 /**
  * Scans the workspace or target directory and extracts all outbound API endpoint contracts.
  */
-export async function extractWorkspaceApiContracts(options?: {
-  targetPath?: string;
-  scopePath?: string;
-  excludeDirs?: string[];
-}): Promise<ApiContractResult> {
+export async function extractWorkspaceApiContracts(
+  options?: ExtractApiContractsOptions
+): Promise<ApiContractResult> {
   const root = options?.targetPath ? resolve(options.targetPath) : (findProjectRoot(process.cwd()) ?? process.cwd());
   const scanTarget = options?.scopePath ? resolve(root, options.scopePath) : root;
   const files = await collectFiles(scanTarget, { excludeDirs: options?.excludeDirs });

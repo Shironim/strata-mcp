@@ -45,18 +45,12 @@ export function extractVueTemplate(content: string): string | null {
 }
 
 
-export interface ExtractedImport {
-  name: string;
-  alias?: string;
-  source: string;
-  isDynamic: boolean;
-}
-
-export const STATIC_IMPORT_PATTERN = /^\s*import\s+(?:type\s+)?(.+?)\s+from\s+['"]([^'"]+)['"]/gm;
-export const DEFAULT_IMPORT_CLAUSE_PATTERN = /^([A-Za-z0-9_$]+)(?:\s*,|\s*$)/;
-export const NAMED_IMPORT_BLOCK_PATTERN = /\{([^}]+)\}/;
-export const NAMED_IMPORT_ITEM_PATTERN = /^([A-Za-z0-9_$]+)(?:\s+as\s+([A-Za-z0-9_$]+))?$/;
-export const DYNAMIC_IMPORT_PATTERN =
-  /(?:const|let|var)\s+([A-Za-z0-9_$]+)\s*=\s*(?:defineAsyncComponent|lazy|dynamic)\s*\(\s*(?:\(\)\s*=>\s*)?import\s*\(\s*['"]([^'"]+)['"]\s*\)\s*\)/g;
-export const INLINE_ASYNC_COMPONENT_PATTERN =
-  /([A-Za-z0-9_$]+)\s*:\s*(?:defineAsyncComponent|lazy|dynamic)\s*\(\s*(?:\(\)\s*=>\s*)?import\s*\(\s*['"]([^'"]+)['"]\s*\)\s*\)/g;
+export type { ExtractedImport } from '../../types';
+export {
+  STATIC_IMPORT_PATTERN,
+  DEFAULT_IMPORT_CLAUSE_PATTERN,
+  NAMED_IMPORT_BLOCK_PATTERN,
+  NAMED_IMPORT_ITEM_PATTERN,
+  DYNAMIC_IMPORT_PATTERN,
+  INLINE_ASYNC_COMPONENT_PATTERN,
+} from './path-helpers';
