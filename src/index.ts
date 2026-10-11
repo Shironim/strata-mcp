@@ -28,6 +28,7 @@ export * from './engine/patch-plan';
 export * from './engine/api-contract';
 export * from './engine/telemetry';
 export * from './engine/layout-extractor';
+export * from './engine/archetype';
 export * from './engine/transport-analyzer';
 export * from './engine/path-resolver';
 export * from './tools/patch-plan';

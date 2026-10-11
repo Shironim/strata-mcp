@@ -1,4 +1,8 @@
 import { parse as parseDom, NodeTypes } from '@vue/compiler-dom';
+import {
+  extractReactSemanticSections,
+  extractVueSemanticSections,
+} from './archetype';
 import type {
   ComponentLayoutStructure,
   DynamicClassBinding,
@@ -272,10 +276,13 @@ export function extractVueLayoutStructure(
     // If template parsing encounters malformed markup, fallback safely
   }
 
+  const sections = extractVueSemanticSections(templateContent, startLineOffset);
+
   return {
     rootWrapper,
     dynamicBindings,
     visibilityDirectives,
+    sections: sections.length > 0 ? sections : undefined,
   };
 }
 
@@ -371,10 +378,13 @@ export function extractReactLayoutStructure(content: string): ComponentLayoutStr
     });
   }
 
+  const sections = extractReactSemanticSections(content);
+
   return {
     rootWrapper,
     dynamicBindings,
     visibilityDirectives,
+    sections: sections.length > 0 ? sections : undefined,
   };
 }
 

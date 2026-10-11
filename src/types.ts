@@ -175,12 +175,14 @@ export interface RootWrapperLayout {
   tag: string;
   layoutTokens: string[];
   rawClass?: string;
+  line?: number;
 }
 
 export interface ComponentLayoutStructure {
   rootWrapper?: RootWrapperLayout;
   dynamicBindings: DynamicClassBinding[];
   visibilityDirectives: VisibilityDirective[];
+  sections?: SemanticSection[];
 }
 
 export interface InferredPropProperty {
@@ -847,6 +849,77 @@ export interface ApiContractResult {
   _meta?: EngineMetadata;
 }
 
+// ---------------------------------------------------------------------------
+// Live Page Archetype & Structural Drift Engine
+// ---------------------------------------------------------------------------
 
+export type SectionKind =
+  | 'page-header'
+  | 'filter-toolbar'
+  | 'data-content'
+  | 'form-section'
+  | 'action-footer'
+  | 'sidebar'
+  | 'custom-section';
 
+export interface ComponentInstanceRef {
+  name: string;
+  tag: string;
+  isCustomComponent: boolean;
+  line: number;
+  props: string[];
+  events: string[];
+  conditional?: string;
+  layoutTokens?: string[];
+}
 
+export interface SemanticSection {
+  kind: SectionKind;
+  tag: string;
+  line: number;
+  layoutTokens: string[];
+  components: ComponentInstanceRef[];
+  rawHtmlPrimitives: ComponentInstanceRef[];
+}
+
+export interface PageArchetype {
+  filePath: string;
+  framework: 'vue' | 'react' | 'astro' | 'unknown';
+  rootWrapper?: RootWrapperLayout;
+  sections: SemanticSection[];
+}
+
+export type ArchetypeViolationCode =
+  | 'MISSING_SEMANTIC_SECTION'
+  | 'SECTION_ORDER_DRIFT'
+  | 'RAW_HTML_SUBSTITUTION'
+  | 'MISSING_COMPANION_COMPONENT'
+  | 'CONTAINER_DNA_MISMATCH';
+
+export interface ArchetypeDriftViolation {
+  code: ArchetypeViolationCode;
+  severity: 'error' | 'warning';
+  section?: SectionKind;
+  line?: number;
+  message: string;
+  expected: string;
+  actual: string;
+  fixRecommendation: string;
+}
+
+export interface ArchetypeAuditResult {
+  targetFile: string;
+  exemplarFile: string;
+  conforms: boolean;
+  score: number;
+  targetArchetype: PageArchetype;
+  exemplarArchetype: PageArchetype;
+  violations: ArchetypeDriftViolation[];
+  _meta?: EngineMetadata;
+}
+
+export interface AuditArchetypeOptions {
+  targetPath: string;
+  exemplarPath?: string;
+  workspaceRoot?: string;
+}

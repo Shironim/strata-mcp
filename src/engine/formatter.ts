@@ -249,8 +249,12 @@ function appendDiagnosticsAndForms(contract: ComponentContract, lines: string[])
 
 function appendLayoutStructure(contract: ComponentContract, lines: string[]): void {
   if (!contract.layoutStructure) return;
-  const { rootWrapper, dynamicBindings, visibilityDirectives } = contract.layoutStructure;
-  const hasData = rootWrapper || dynamicBindings.length > 0 || visibilityDirectives.length > 0;
+  const { rootWrapper, dynamicBindings, visibilityDirectives, sections } = contract.layoutStructure;
+  const hasData =
+    rootWrapper ||
+    dynamicBindings.length > 0 ||
+    visibilityDirectives.length > 0 ||
+    (sections && sections.length > 0);
   if (!hasData) return;
 
   lines.push('');
@@ -260,6 +264,18 @@ function appendLayoutStructure(contract: ComponentContract, lines: string[]): vo
       ? ` (Tokens: ${rootWrapper.layoutTokens.join(' ')})`
       : '';
     lines.push(`  - Root Wrapper: <${rootWrapper.tag}>${tokensStr}`);
+  }
+  if (sections && sections.length > 0) {
+    lines.push(`  - Semantic Sections (${sections.length}):`);
+    for (const sec of sections) {
+      const customNames = sec.components
+        .filter((c) => c.isCustomComponent)
+        .map((c) => `<${c.name}>`)
+        .join(', ');
+      const rawNames = sec.rawHtmlPrimitives.map((r) => `<${r.tag}>`).join(', ');
+      const compSummary = [customNames, rawNames].filter(Boolean).join(', ') || 'layout-only';
+      lines.push(`      • L${sec.line} [${sec.kind}] <${sec.tag}>: ${compSummary}`);
+    }
   }
   if (dynamicBindings.length > 0) {
     lines.push(`  - Dynamic Class Bindings (${dynamicBindings.length}):`);
