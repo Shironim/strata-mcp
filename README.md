@@ -64,6 +64,8 @@ Add Strata to your MCP client (`mcp.json` or `claude_desktop_config.json`):
 | `strata routes [path]` | Map file-based route topology, layouts, and dynamic parameters |
 | `strata impact <symbol>` | Query state store, composable, or context blast radius across components |
 | `strata apis [path]` | Extract outbound HTTP API calls, methods, and payload schemas |
+| `strata audit [path] [--target <t>]` | Audit frontend health (`dead-components`, `dead-state`, `routes`, `similar-templates`, `design-tokens`, `bundle-health`, `api-contracts`, `archetype-drift`, or `all`) |
+| `strata archetype <file>` | Audit page archetype & structural drift against exemplar |
 | `strata unused [path]` | Audit dead/unreferenced components and pages |
 | `strata unused-state [path]` | Scan for composables, stores, and hooks with zero consumers |
 | `strata search <pattern>` | Search multi-framework AST patterns with metavariables (`ast-grep`) |
@@ -79,12 +81,12 @@ All 8 tools expose typed schemas automatically via the Model Context Protocol:
 
 - **Structural Code Search (`find_code`):** Multi-framework AST search across `.vue`, `.astro`, and `.tsx` with exact line remapping.
 - **Component Contract Master (`inspect_component`):** Deep inspection of props, emits, slots, dynamic layout styling tokens (Tailwind flex/grid/:class), and **Bidirectional Data Transport Contract** (detects casing mismatches, FormData nested object hazards, pagination traps, unguarded nullability, Zod validation schemas, 422 error audits, and cache invalidation graphs).
-- **Hierarchy & Blast Radius (`get_component_tree`):** Resolves downward trees (with props drilling & dangling context alerts) or upward blast radius.
+- **Hierarchy & Blast Radius (`get_component_tree`):** Resolves downward trees (with props drilling & dangling context alerts) or upward blast radius (`downward`/`down` or `upward`/`up`).
 - **Route Discovery (`get_routes`):** Maps route topology, layouts, and dynamic parameters across Next.js, Nuxt, Astro, and Inertia.
 - **Fullstack Vertical Slice Target Hinting (`get_api_contracts`):** Extracts outbound HTTP endpoints and synthesizes `backendTargetHint` (REST normalization, Controller/Action symbol candidates, and route intent) to bridge frontend UI calls with backend domain services across any AI agent harness, language server, or vertical-slice tracer.
-- **Prescriptive Refactoring (`generate_patch_plan`):** Generates exact AST-level replacement diffs across all upward callers.
-- **State Impact Tracer (`trace_state`):** Maps state stores (Pinia, Zustand, Redux), composables, and Context cascading chains.
-- **Full Frontend Audit (`audit_frontend`):** Comprehensive health check for dead components, unused state, template clones, and design tokens.
+- **Prescriptive Refactoring (`generate_patch_plan`):** Generates exact AST-level replacement diffs across all upward callers (`rename_prop`, `remove_prop`, `rename_event`, `rename_model`, `rename_slot`).
+- **State Impact Tracer (`trace_state`):** Maps state stores (Pinia, Zustand, Redux), composables, and Context cascading chains (`consumers`, `dependencies`, `both`).
+- **Full Frontend Audit (`audit_frontend`):** Comprehensive health check for dead components, unused state, template clones, design tokens, bundle health, API contracts, and page archetype drift.
 
 ---
 

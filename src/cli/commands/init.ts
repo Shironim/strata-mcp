@@ -2,6 +2,7 @@ import { existsSync, promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import { STRATA_FRONTEND_RULE, STRATA_INSPECT_SKILL, STRATA_POST_WRITE_HOOK } from '../templates';
 import { syncWorkspace } from '../../engine/database';
+import { resolveProjectRoot } from '../../engine/path-resolver';
 
 export interface StrataInitOptions {
   cwd?: string;
@@ -9,7 +10,8 @@ export interface StrataInitOptions {
 }
 
 export async function handleStrataInit(options: StrataInitOptions = {}): Promise<void> {
-  const cwd = options.cwd ?? process.cwd();
+  const cwd = options.cwd ? resolveProjectRoot(options.cwd) : process.cwd();
+  const force = Boolean(options.force);
 
   console.log('[strata] Initializing Strata frontend intelligence environment...\n');
 
@@ -25,18 +27,21 @@ export async function handleStrataInit(options: StrataInitOptions = {}): Promise
   await fs.mkdir(hooksDir, { recursive: true });
   await fs.mkdir(strataDir, { recursive: true });
 
-  // 2. Write agent harness rules, skills, and hooks
-  const rulePath = join(rulesDir, 'strata-frontend.md');
-  const skillPath = join(skillsDir, 'SKILL.md');
-  const hookPath = join(hooksDir, 'strata-post-write.sh');
+  // 2. Write agent harness rules, skills, and hooks (respecting --force)
+  const targets = [
+    { label: 'agent rule', rel: '.agents/rules/strata-frontend.md', path: join(rulesDir, 'strata-frontend.md'), content: STRATA_FRONTEND_RULE },
+    { label: 'agent skill', rel: '.agents/skills/strata-inspect/SKILL.md', path: join(skillsDir, 'SKILL.md'), content: STRATA_INSPECT_SKILL },
+    { label: 'agent hook', rel: '.agents/hooks/strata-post-write.sh', path: join(hooksDir, 'strata-post-write.sh'), content: STRATA_POST_WRITE_HOOK, mode: 0o755 },
+  ];
 
-  await fs.writeFile(rulePath, STRATA_FRONTEND_RULE, 'utf8');
-  await fs.writeFile(skillPath, STRATA_INSPECT_SKILL, 'utf8');
-  await fs.writeFile(hookPath, STRATA_POST_WRITE_HOOK, { encoding: 'utf8', mode: 0o755 });
-
-  console.log('  ✓ Generated agent rule:  .agents/rules/strata-frontend.md');
-  console.log('  ✓ Generated agent skill: .agents/skills/strata-inspect/SKILL.md');
-  console.log('  ✓ Generated agent hook:  .agents/hooks/strata-post-write.sh');
+  for (const t of targets) {
+    if (!force && existsSync(t.path)) {
+      console.log(`  • Skipped existing ${t.label}: ${t.rel} (use --force to overwrite)`);
+    } else {
+      await fs.writeFile(t.path, t.content, t.mode ? { encoding: 'utf8', mode: t.mode } : 'utf8');
+      console.log(`  ✓ Generated ${t.label}: ${t.rel}`);
+    }
+  }
 
   // 3. Update .gitignore
   const gitignorePath = join(cwd, '.gitignore');

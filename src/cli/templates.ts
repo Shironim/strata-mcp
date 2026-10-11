@@ -16,17 +16,17 @@ Prioritaskan penggunaan tool MCP \`strata-mcp\` daripada melakukan pencarian tek
 | Skenario Frontend | Tool Strata-MCP | Keuntungan vs Pembacaan File Mentah |
 |---|---|---|
 | Memahami props, emits, slots, exposed methods, dan state komponen | \`inspect_component\` | Menghasilkan kontrak publik ringkas (10-30 baris) tanpa membanjiri konteks dengan ratusan baris template HTML. |
-| Memetakan hierarki pohon komponen atau relasi parent-child | \`get_component_tree\` | Menampilkan topologi komponen, props drilling, dan import dependencies secara instan. |
+| Memetakan hierarki pohon komponen atau relasi parent-child | \`get_component_tree\` | Menampilkan topologi komponen (\`downward\`/\`down\` atau \`upward\`/\`up\`), props drilling, dan import dependencies secara instan. |
 | Mencari struktur template, binding variabel, atau ekspresi | \`find_code\` | AST structural pattern matching yang kebal terhadap perbedaan spasi, pemformatan baris, dan penamaan lokal. |
-| Melacak alur perubahan state global/lokal (Pinia, Context, Zustand) | \`trace_state\` | Menemukan read/write blast radius state di seluruh aplikasi. |
+| Melacak alur perubahan state global/lokal (Pinia, Context, Zustand) | \`trace_state\` | Menemukan read/write blast radius (\`consumers\`, \`dependencies\`, \`both\`) state di seluruh aplikasi. |
 | Menemukan seluruh URL routes, parameter rute, dan layout hierarchy | \`get_routes\` | Memetakan sitemap halaman Next.js, Nuxt, Astro, dan Inertia tanpa membaca puluhan file pages. |
-| Mengekstrak panggilan API backend (Inertia, TanStack, Axios, fetch) | \`get_api_contracts\` | Mengetahui endpoint URL, HTTP method, dan field payload form yang dikirim ke backend. |
-| Audit kode mati, dead state, atau komponen tak terpakai | \`audit_frontend\` | Verifikasi kepatuhan dan kebersihan frontend secara deterministik. |
-| Perencanaan refactoring prop/komponen pada seluruh consumer | \`generate_patch_plan\` | Rekomendasi patch AST presisi (file, baris, kolom, replacement) tanpa resiko regresi manual. |
+| Mengekstrak panggilan API backend (Inertia, TanStack, Axios, fetch) | \`get_api_contracts\` | Mengetahui endpoint URL, HTTP method, field payload form, serta \`backendTargetHint\` ke controller backend. |
+| Audit kode mati, dead state, archetype drift, design token, atau bundle | \`audit_frontend\` | Verifikasi kepatuhan dan kebersihan frontend (\`dead-components\`, \`dead-state\`, \`routes\`, \`similar-templates\`, \`design-tokens\`, \`bundle-health\`, \`api-contracts\`, \`archetype-drift\`, \`all\`). |
+| Perencanaan refactoring prop/event/model/slot pada seluruh consumer | \`generate_patch_plan\` | Rekomendasi patch AST presisi (\`rename_prop\`, \`remove_prop\`, \`rename_event\`, \`rename_model\`, \`rename_slot\`) tanpa resiko regresi manual. |
 
 ## 3. Protocol & Execution Principles
 - **No Blind Probing:** Jangan membaca komponen dari baris 1 jika hanya butuh mengetahui prop atau event emit. Gunakan \`inspect_component\`.
-- **Pre-Refactor Verification:** Sebelum mengubah prop atau emit komponen, selalu periksa consumers menggunakan \`get_component_tree\` atau perintah \`strata patch-plan\`.
+- **Pre-Refactor Verification:** Sebelum mengubah prop, emit, v-model, atau slot komponen, selalu periksa consumers menggunakan \`get_component_tree\` (\`direction: "upward"\`) atau \`generate_patch_plan\`.
 `;
 
 export const STRATA_INSPECT_SKILL = `---
@@ -50,30 +50,30 @@ description: Deep frontend AST component inspection, component trees, reactivity
 
 2. **Hierarki Pohon UI & Blast Radius:**
    - Petakan hierarki child components & props drilling:
-     \`get_component_tree(entry_path: "path/to/Page.tsx", direction: "downward")\`
+     \`get_component_tree(path: "path/to/Page.tsx", direction: "downward")\`
    - Analisis blast radius (siapa saja parent/page yang mengimpor komponen ini):
-     \`get_component_tree(entry_path: "path/to/SharedButton.vue", direction: "upward")\`
+     \`get_component_tree(path: "path/to/SharedButton.vue", direction: "upward")\`
 
 3. **Pemetaan URL Routes & Layouts:**
    - Pindai topologi file-based routes (Next.js, Nuxt, Astro, Inertia):
-     \`get_routes(targetPath: ".", framework: "next-app")\`
+     \`get_routes(path: ".", framework: "next-app")\`
 
 4. **Ekstraksi Kontrak API Backend:**
    - Petakan seluruh panggilan network frontend (TanStack, Inertia, Axios, fetch):
-     \`get_api_contracts(targetPath: ".")\`
+     \`get_api_contracts(path: ".")\`
 
 5. **Pelacakan Aliran State & Composables:**
    - Petakan consumer stores (Pinia, Zustand, Context):
-     \`trace_state(identifier: "useCartStore", depth: 2)\`
+     \`trace_state(identifier: "useCartStore", depth: 2, direction: "both")\`
 
 6. **Audit Arsitektur Menyeluruh:**
    - Audit kesehatan frontend secara komprehensif atau terarah:
      \`audit_frontend(target: "all")\`
-     Pilihan target: \`routes\`, \`dead-components\`, \`dead-state\`, \`similar-templates\`, \`design-tokens\`, \`bundle-health\`, \`api-contracts\`.
+     Pilihan target: \`routes\`, \`dead-components\`, \`dead-state\`, \`similar-templates\`, \`design-tokens\`, \`bundle-health\`, \`api-contracts\`, \`archetype-drift\`.
 
 7. **Perencanaan Refactoring Presisi (Patch Plan):**
-   - Hasilkan rekomendasi patch AST deterministik di semua consumer:
-     \`generate_patch_plan(component_path: "...", refactor_type: "rename_prop", old_name: "title", new_name: "headline")\`
+   - Hasilkan rekomendasi patch AST deterministik di semua consumer (\`rename_prop\`, \`remove_prop\`, \`rename_event\`, \`rename_model\`, \`rename_slot\`):
+     \`generate_patch_plan(path: "...", refactor_type: "rename_prop", old_name: "title", new_name: "headline")\`
 
 8. **Pencarian AST Struktural:**
    - Temukan pola kode atau penggunaan komponen yang kebal terhadap variasi formatting:

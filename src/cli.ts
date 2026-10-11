@@ -24,6 +24,15 @@ import {
   formatStateChainAsText,
 } from './engine/database';
 import { handleStrataInit } from './cli/commands/init';
+import {
+  normalizeAuditTarget,
+  parseAliasMapInput,
+  parseSafeFloat,
+  parseSafePositiveInt,
+  parseStringList,
+  resolveProjectRoot,
+  VALID_AUDIT_TARGETS,
+} from './engine/path-resolver';
 import { STRATA_VERSION } from './version';
 import { StrataTelemetry, formatSummaryAsText } from './engine/telemetry';
 import type { PatchRefactorType, RouteFramework } from './types';
@@ -64,16 +73,16 @@ Command-specific Options:
     --force                               Overwrite existing config files and instructions
 
   patch-plan:
-    --refactor, --refactor-type <type>    Refactor operation: rename_prop | remove_prop | rename_event (default: rename_prop)
+    --refactor, --refactor-type <type>    Refactor operation: rename_prop | remove_prop | rename_event | rename_model | rename_slot (default: rename_prop)
     --old, --old-name <name>              Current/old identifier or property name
-    --new, --new-name <name>              New identifier or property name
+    --new, --new-name <name>              New identifier or property name (required for rename_*)
 
   tree:
     --route <route-path>                  URL route path to resolve (e.g. "/catalog")
-    --depth <number>                      Max hierarchy tree depth (default: 3)
-    --direction <dir>                     Traversal direction: downward | upward (default: downward)
-    --alias <prefix=path>                 Path alias mapping, comma-separated (e.g. "@/=resources/js/")
-    --scope-filter <scope>                Domain or package filter (e.g. "apps/web")
+    --depth, --max-depth <number>         Max hierarchy tree depth (default: 3)
+    --direction <dir>                     Traversal direction: downward (down) | upward (up) (default: downward)
+    --alias, --alias-map <prefix=path>    Path alias mapping, comma-separated or JSON (e.g. "@/=resources/js/")
+    --scope-filter, --scope-path <scope>  Domain or package filter (e.g. "apps/web")
 
   routes:
     --prefix <prefix>                     Filter routes by URL prefix (e.g. "/api", "/auth")
@@ -83,6 +92,7 @@ Command-specific Options:
   unused, audit:
     --target <target>                     Audit target: dead-components (default) | dead-state | routes | similar-templates | design-tokens | bundle-health | api-contracts | archetype-drift | all
     --threshold <number>                  Similarity threshold for template redundancy (default: 0.8)
+    --exemplar <file>                     Exemplar page path for archetype-drift comparison
     --ignore <pattern>                    Glob pattern to ignore (comma-separated)
     --include-pages                       Include file-based page views in audit
     --scope-path <dir>                    Sub-directory or package scope filter
@@ -163,19 +173,7 @@ function parseArgs(args: string[]) {
  * Example: `@/=resources/js/,@components/=src/components/`.
  */
 function parseAliasMap(raw: string | boolean | undefined): Record<string, string> | undefined {
-  if (!raw || typeof raw !== 'string') return undefined;
-
-  const aliasMap: Record<string, string> = {};
-  for (const part of raw.split(',')) {
-    const equalsIndex = part.indexOf('=');
-    if (equalsIndex <= 0) continue;
-
-    const alias = part.slice(0, equalsIndex).trim();
-    const target = part.slice(equalsIndex + 1).trim();
-    if (alias && target) aliasMap[alias] = target;
-  }
-
-  return Object.keys(aliasMap).length > 0 ? aliasMap : undefined;
+  return parseAliasMapInput(raw);
 }
 
 export async function main(argv: string[] = process.argv.slice(2)) {
@@ -336,10 +334,18 @@ export async function main(argv: string[] = process.argv.slice(2)) {
         process.exit(1);
       }
 
-      const maxDepth = flags.depth ? Number(flags.depth) : 3;
-      const direction = flags.direction === 'upward' ? 'upward' : 'downward';
-      const aliasMap = parseAliasMap(flags.alias);
-      const scopeFilter = (flags['scope-filter'] || flags.scopeFilter) as string | undefined;
+      const maxDepth = parseSafePositiveInt(flags.depth ?? flags['max-depth'] ?? flags.maxDepth, 3) ?? 3;
+      const rawDir = String(flags.direction || '').toLowerCase();
+      const direction = rawDir === 'upward' || rawDir === 'up' ? 'upward' : 'downward';
+      const aliasMap = parseAliasMap(flags.alias || flags['alias-map'] || flags.aliasMap || flags.alias_map);
+      const scopeFilter = (
+        flags['scope-filter'] ||
+        flags.scopeFilter ||
+        flags['scope-path'] ||
+        flags.scopePath ||
+        flags.scope_filter ||
+        flags.scope_path
+      ) as string | undefined;
       const result = await getComponentTree({
         entryPath: entryFile,
         routePath,
@@ -377,13 +383,15 @@ export async function main(argv: string[] = process.argv.slice(2)) {
 
     if (command === 'unused' || command === 'find-unused' || command === 'audit') {
       const auditPath = positional[1] || targetPath;
-      const target = (flags.target as string) || 'dead-components';
-      const excludeDirs = flags['exclude-dirs']
-        ? String(flags['exclude-dirs']).split(',').map((s) => s.trim()).filter(Boolean)
-        : flags.excludeDirs
-          ? String(flags.excludeDirs).split(',').map((s) => s.trim()).filter(Boolean)
-          : undefined;
-      const scopePath = (flags['scope-path'] || flags.scopePath) as string | undefined;
+      const target = normalizeAuditTarget(flags.target, 'dead-components');
+      if (!VALID_AUDIT_TARGETS.has(target)) {
+        console.error(
+          `Error: Invalid audit target "${flags.target}". Supported targets: ${[...VALID_AUDIT_TARGETS].join(', ')}`
+        );
+        process.exit(1);
+      }
+      const excludeDirs = parseStringList(flags['exclude-dirs'] ?? flags.excludeDirs ?? flags.exclude_dirs);
+      const scopePath = (flags['scope-path'] || flags.scopePath || flags.scope_path || flags['scope-filter'] || flags.scopeFilter) as string | undefined;
 
       if (target === 'dead-state') {
         const result = await findUnusedState(auditPath, { scopePath });
@@ -412,7 +420,7 @@ export async function main(argv: string[] = process.argv.slice(2)) {
       if (target === 'similar-templates') {
         const result = await findSimilarTemplates({
           targetPath: auditPath,
-          threshold: flags.threshold ? Number(flags.threshold) : undefined,
+          threshold: parseSafeFloat(flags.threshold),
           excludeDirs,
         });
         if (isJson) {
@@ -474,13 +482,14 @@ export async function main(argv: string[] = process.argv.slice(2)) {
         const result = await auditPageArchetypeDrift({
           targetPath: auditPath,
           exemplarPath: exemplarFile,
+          workspaceRoot: resolveProjectRoot(auditPath),
         });
         if (isJson) {
           console.log(JSON.stringify(result, null, 2));
         } else {
           console.log(formatArchetypeAuditAsText(result));
         }
-        if (!result.conforms) {
+        if (!result.conforms && !isJson) {
           process.exit(1);
         }
         return;
@@ -503,7 +512,7 @@ export async function main(argv: string[] = process.argv.slice(2)) {
             findUnusedState(auditPath, { scopePath }),
             findSimilarTemplates({
               targetPath: auditPath,
-              threshold: flags.threshold ? Number(flags.threshold) : undefined,
+              threshold: parseSafeFloat(flags.threshold),
               excludeDirs,
             }),
             auditDesignTokens({
@@ -592,10 +601,11 @@ export async function main(argv: string[] = process.argv.slice(2)) {
         process.exit(1);
       }
 
-      const depth = flags.depth ? Number(flags.depth) : 1;
-      const direction = (flags.direction as 'consumers' | 'dependencies' | 'both') || 'both';
+      const depth = parseSafePositiveInt(flags.depth ?? flags['max-depth'] ?? flags.maxDepth, 1) ?? 1;
+      const rawDirection = flags.direction ? String(flags.direction).toLowerCase() : undefined;
+      const direction = (rawDirection as 'consumers' | 'dependencies' | 'both') || 'both';
 
-      if (depth > 1 || flags.direction) {
+      if (depth > 1 || rawDirection === 'dependencies' || rawDirection === 'both') {
         const result = await traceStateChain(targetPath, {
           identifier,
           direction,
@@ -645,6 +655,11 @@ export async function main(argv: string[] = process.argv.slice(2)) {
 
       if (!oldName) {
         console.error('Error: --old <name> is required.');
+        process.exit(1);
+      }
+
+      if (refactorType.startsWith('rename_') && !newName) {
+        console.error(`Error: --new <name> is required when --refactor is "${refactorType}".`);
         process.exit(1);
       }
 
