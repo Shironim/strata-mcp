@@ -17,39 +17,15 @@ export const traceStateTool: McpToolDefinition = {
     properties: {
       identifier: {
         type: 'string',
-        description: 'State identifier to trace (alias: state, store, composable, name, e.g. "useCartStore", "useRouter")',
-      },
-      state: {
-        type: 'string',
-        description: 'Alias for identifier',
-      },
-      store: {
-        type: 'string',
-        description: 'Alias for identifier',
-      },
-      composable: {
-        type: 'string',
-        description: 'Alias for identifier',
+        description: 'State identifier to trace (e.g. "useCartStore", "useRouter", alias: state, store, composable)',
       },
       path: {
         type: 'string',
-        description: 'Project root directory or file path (alias: target_path, file_path, filePath, default: ".")',
-      },
-      target_path: {
-        type: 'string',
-        description: 'Alias for path',
-      },
-      file_path: {
-        type: 'string',
-        description: 'Alias for path',
-      },
-      filePath: {
-        type: 'string',
-        description: 'Alias for path',
+        description: 'Project root directory or component file path (default: ".", alias: target_path, file_path)',
       },
       depth: {
         type: 'number',
-        description: 'Traversal depth: 1 for direct consumers impact, or >1 for multi-hop call chain (default: 1)',
+        description: 'Traversal depth: 1 for direct consumers impact, or >1 for multi-hop call chain (default: 1, alias: max_depth)',
       },
       role: {
         type: 'string',
@@ -62,10 +38,10 @@ export const traceStateTool: McpToolDefinition = {
         enum: ['consumers', 'dependencies', 'both'],
         description: 'Direction for multi-hop tracing (default: "both")',
       },
-      output_format: {
+      format: {
         type: 'string',
         enum: ['text', 'json'],
-        description: 'Output format: text or json (default: "text")',
+        description: 'Output format: text or json (default: "text", alias: output_format)',
       },
     },
   },
@@ -117,8 +93,8 @@ export const traceStateTool: McpToolDefinition = {
     }
 
     const targetPath = resolveProjectRoot(rawTargetPath);
-    const depth = args.depth ? Number(args.depth) : 1;
-    const isJson = args.output_format === 'json';
+    const depth = args.depth ? Number(args.depth) : (args.max_depth ? Number(args.max_depth) : 1);
+    const isJson = args.output_format === 'json' || args.format === 'json';
 
     if (depth > 1 || args.direction === 'dependencies') {
       const result = await traceStateChain(targetPath, {

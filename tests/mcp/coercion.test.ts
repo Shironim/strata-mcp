@@ -110,6 +110,42 @@ describe('MCP Input Coercion & Contract Standardization', () => {
     expect(canonicalTree.entry_path).toBe('src/App.vue');
     expect(canonicalTree.targetPath).toBe('src/App.vue');
   });
+
+  it('normalizes generate_patch_plan and trace_state aliases', () => {
+    const patchRes = coerceToolArguments('generate_patch_plan', {
+      path: 'src/Button.vue',
+      refactor: 'rename_prop',
+      old: 'title',
+      new: 'heading',
+    });
+    expect(patchRes.refactor_type).toBe('rename_prop');
+    expect(patchRes.old_name).toBe('title');
+    expect(patchRes.new_name).toBe('heading');
+    expect(patchRes.component_path).toBe('src/Button.vue');
+
+    const stateRes1 = coerceToolArguments('trace_state', { state_name: 'useAuth' });
+    expect(stateRes1.identifier).toBe('useAuth');
+
+    const stateRes2 = coerceToolArguments('trace_state', { store_name: 'useCartStore' });
+    expect(stateRes2.identifier).toBe('useCartStore');
+
+    // format <-> output_format sync
+    const fmtRes1 = coerceToolArguments('find_code', { format: 'json' });
+    expect(fmtRes1.output_format).toBe('json');
+    expect(fmtRes1.format).toBe('json');
+
+    const fmtRes2 = coerceToolArguments('find_code', { output_format: 'text' });
+    expect(fmtRes2.format).toBe('text');
+    expect(fmtRes2.output_format).toBe('text');
+
+    // root override prioritizes explicit root
+    const rootRes = coerceToolArguments('generate_patch_plan', {
+      path: 'src/Button.vue',
+      root: '/custom/root',
+    });
+    expect(rootRes.root).toBe('/custom/root');
+    expect(rootRes.target_path).toBe('/custom/root');
+  });
 });
 
 

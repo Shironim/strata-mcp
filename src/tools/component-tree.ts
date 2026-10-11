@@ -13,43 +13,19 @@ export const componentTreeTool: McpToolDefinition = {
     properties: {
       path: {
         type: 'string',
-        description: 'Root component file path or project directory (alias: entry_path, file_path, filePath, component, component_path)',
-      },
-      entry_path: {
-        type: 'string',
-        description: 'Alias for path',
-      },
-      file_path: {
-        type: 'string',
-        description: 'Alias for path',
-      },
-      filePath: {
-        type: 'string',
-        description: 'Alias for path',
-      },
-      component_path: {
-        type: 'string',
-        description: 'Alias for path',
-      },
-      component: {
-        type: 'string',
-        description: 'Alias for path',
+        description: 'Root component file path to inspect (e.g. "src/App.vue", alias: entry_path, file_path)',
       },
       route: {
         type: 'string',
-        description: 'URL route path to resolve directly to page entrypoint and tree (e.g. "/dashboard", "/catalog/[id]")',
-      },
-      route_path: {
-        type: 'string',
-        description: 'Alias for route',
+        description: 'URL route path to resolve directly to page entrypoint and tree (e.g. "/dashboard", "/catalog/[id]", alias: route_path)',
       },
       target_path: {
         type: 'string',
-        description: 'Project root or pages directory (default: ".")',
+        description: 'Project root directory (default: ".", alias: root, workspace_root)',
       },
       max_depth: {
         type: 'number',
-        description: 'Maximum traversal depth (default: 3)',
+        description: 'Maximum traversal depth (default: 3, alias: depth)',
       },
       direction: {
         type: 'string',
@@ -65,7 +41,7 @@ export const componentTreeTool: McpToolDefinition = {
       },
       scope_filter: {
         type: 'string',
-        description: 'Optional package/domain scope filter (e.g. "apps/web", "features/auth")',
+        description: 'Optional package/domain scope filter (e.g. "apps/web", "features/auth", alias: scope_path)',
       },
       include_props: {
         type: 'boolean',
@@ -76,11 +52,6 @@ export const componentTreeTool: McpToolDefinition = {
         type: 'string',
         enum: ['text', 'json'],
         description: 'Output format: text (indented tree) or json (default: "text", alias: output_format)',
-      },
-      output_format: {
-        type: 'string',
-        enum: ['text', 'json'],
-        description: 'Alias for format',
       },
     },
   },

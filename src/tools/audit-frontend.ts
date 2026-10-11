@@ -11,24 +11,33 @@ import {
   extractWorkspaceApiContracts,
   formatApiContractsAsText,
 } from '../engine/api-contract';
-import { resolveProjectRoot } from '../engine/path-resolver';
+import {
+  auditPageArchetypeDrift,
+  formatArchetypeAuditAsText,
+} from '../engine/archetype';
+import { resolveProjectRoot, resolveWorkspacePath } from '../engine/path-resolver';
 import type { RouteFramework } from '../types';
 import type { McpToolDefinition } from './types';
 
 export const auditFrontendTool: McpToolDefinition = {
   name: 'audit_frontend',
   description:
-    'Architectural frontend health audit: file-based routes, dead components, unused state composables, structural template similarity, design tokens & a11y, and bundle health / island hydration. Supports targeted or full audits (target: "all").',
+    'Architectural frontend health audit: file-based routes, dead components, unused state composables, structural template similarity, design tokens & a11y, bundle health / island hydration, and page archetype structural drift. Supports targeted or full audits (target: "all").',
   inputSchema: {
     type: 'object',
     properties: {
       path: {
         type: 'string',
-        description: 'Project root directory (alias: target_path, default: ".")',
+        description: 'Project root directory or target page file for archetype-drift (alias: target_path, default: ".")',
       },
       target_path: {
         type: 'string',
         description: 'Alias for path',
+      },
+      exemplar_path: {
+        type: 'string',
+        description:
+          'Optional exemplar/reference page file path for target: "archetype-drift" (auto-discovers richest sibling page when omitted)',
       },
       scope_path: {
         type: 'string',
@@ -45,10 +54,11 @@ export const auditFrontendTool: McpToolDefinition = {
           'design-tokens',
           'bundle-health',
           'api-contracts',
+          'archetype-drift',
           'all',
         ],
         description:
-          'Audit target: "routes" (URL topology), "dead-components" (orphan components), "dead-state" (unused composables/stores), "similar-templates" (redundant template structure & DRY opportunities), "design-tokens" (arbitrary Tailwind colors/spacing, radius consistency & a11y violations), "bundle-health" (heavy eager imports & eager island hydration), "api-contracts" (outbound API endpoints & caller mapping), or "all" for a full architectural diagnostic (default: "all")',
+          'Audit target: "routes" (URL topology), "dead-components" (orphan components), "dead-state" (unused composables/stores), "similar-templates" (redundant template structure & DRY opportunities), "design-tokens" (arbitrary Tailwind colors/spacing, radius consistency & a11y violations), "bundle-health" (heavy eager imports & eager island hydration), "api-contracts" (outbound API endpoints & caller mapping), "archetype-drift" (page semantic section & component drift vs exemplar), or "all" for a full architectural diagnostic (default: "all")',
       },
       threshold: {
         type: 'number',
@@ -73,10 +83,10 @@ export const auditFrontendTool: McpToolDefinition = {
         items: { type: 'string' },
         description: 'List of directory names or paths to ignore during traversal',
       },
-      output_format: {
+      format: {
         type: 'string',
         enum: ['text', 'json'],
-        description: 'Output format: text or json (default: "text")',
+        description: 'Output format: text or json (default: "text", alias: output_format)',
       },
     },
   },
@@ -87,7 +97,7 @@ export const auditFrontendTool: McpToolDefinition = {
     const targetPath = resolveProjectRoot(rawTargetPath);
     const scopePath = args.scope_path ? String(args.scope_path) : undefined;
     const target = args.target ? String(args.target) : 'all';
-    const isJson = args.output_format === 'json';
+    const isJson = args.output_format === 'json' || args.format === 'json';
     const excludeDirs = Array.isArray(args.exclude_dirs)
       ? args.exclude_dirs.map(String)
       : typeof args.exclude_dirs === 'string'
@@ -194,6 +204,40 @@ export const auditFrontendTool: McpToolDefinition = {
       };
     }
 
+    if (target === 'archetype-drift' || target === 'archetype') {
+      if (!rawTargetPath) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: 'text',
+              text: "Missing required argument: 'path' (or 'target_path') pointing to the target page file for archetype-drift audit.",
+            },
+          ],
+        };
+      }
+      const resolvedPagePath = resolveWorkspacePath(rawTargetPath);
+      const rawExemplar = args.exemplar_path || args.exemplar || args.exemplarPath;
+      const resolvedExemplarPath = rawExemplar
+        ? resolveWorkspacePath(String(rawExemplar), targetPath)
+        : undefined;
+
+      const result = await auditPageArchetypeDrift({
+        targetPath: resolvedPagePath,
+        exemplarPath: resolvedExemplarPath,
+        workspaceRoot: targetPath,
+      });
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: isJson ? JSON.stringify(result, null, 2) : formatArchetypeAuditAsText(result),
+          },
+        ],
+      };
+    }
+
     // target === 'all'
     const [routes, unusedComponents, unusedState, similarTemplates, designSystemAudit, bundleAudit, apiContracts] = await Promise.all([
       scanRoutes({
@@ -225,6 +269,7 @@ export const auditFrontendTool: McpToolDefinition = {
       extractWorkspaceApiContracts({
         targetPath,
         scopePath,
+        excludeDirs,
       }),
     ]);
 

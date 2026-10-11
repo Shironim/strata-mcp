@@ -17,39 +17,15 @@ export const findCodeTool: McpToolDefinition = {
     properties: {
       path: {
         type: 'string',
-        description: 'Target directory or file path to search (alias: file_path, filePath, target_path)',
-      },
-      file_path: {
-        type: 'string',
-        description: 'Alias for path',
-      },
-      filePath: {
-        type: 'string',
-        description: 'Alias for path',
-      },
-      target_path: {
-        type: 'string',
-        description: 'Alias for path',
+        description: 'Target directory or file path to search (alias: file_path, target_path)',
       },
       pattern: {
         type: 'string',
-        description: 'ast-grep pattern (alias: query, search, e.g. "console.log($$$)", "ref($$$)")',
-      },
-      query: {
-        type: 'string',
-        description: 'Alias for pattern',
-      },
-      search: {
-        type: 'string',
-        description: 'Alias for pattern',
+        description: 'ast-grep pattern (e.g. "console.log($$$)", "ref($$$)", alias: query, search)',
       },
       component: {
         type: 'string',
-        description: 'Component name to search (e.g. "OldButton" or "old-button")',
-      },
-      component_name: {
-        type: 'string',
-        description: 'Alias for component',
+        description: 'Component name to search (e.g. "OldButton" or "old-button", alias: component_name)',
       },
       rule_yaml: {
         type: 'string',
@@ -57,11 +33,7 @@ export const findCodeTool: McpToolDefinition = {
       },
       code: {
         type: 'string',
-        description: 'Code snippet to test pattern/rule against in-memory, or dump CST syntax tree',
-      },
-      code_snippet: {
-        type: 'string',
-        description: 'Alias for code',
+        description: 'Code snippet to test pattern/rule against in-memory, or dump CST syntax tree (alias: code_snippet)',
       },
       action: {
         type: 'string',
@@ -79,10 +51,10 @@ export const findCodeTool: McpToolDefinition = {
         enum: ['template', 'script', 'both'],
         description: 'Scope for component search: "template", "script", or "both" (default: "both")',
       },
-      output_format: {
+      format: {
         type: 'string',
         enum: ['text', 'json'],
-        description: 'Output format (default: "text" for token efficiency)',
+        description: 'Output format (default: "text" for token efficiency, alias: output_format)',
       },
       max_results: {
         type: 'number',
@@ -96,7 +68,7 @@ export const findCodeTool: McpToolDefinition = {
     },
   },
   handler: async (args: Record<string, any>) => {
-    const isJson = args.output_format === 'json';
+    const isJson = args.format === 'json' || args.output_format === 'json';
     const codeSnippet = (args.code || args.code_snippet) ? String(args.code || args.code_snippet) : undefined;
     const rawTargetPath = (args.path || args.file_path || args.filePath || args.target_path || args.targetPath)
       ? String(args.path || args.file_path || args.filePath || args.target_path || args.targetPath)

@@ -113,7 +113,16 @@ export function coerceToolArguments(toolName: string, rawArgs: any): Record<stri
 
   // 5. Canonical Entity Aliasing: identifier (for trace_state)
   if (!args.identifier && toolName === 'trace_state') {
-    const idAlias = args.state || args.store || args.composable || args.symbol || args.name;
+    const idAlias =
+      args.state ||
+      args.state_name ||
+      args.stateName ||
+      args.store ||
+      args.store_name ||
+      args.storeName ||
+      args.composable ||
+      args.symbol ||
+      args.name;
     if (idAlias) {
       args.identifier = String(idAlias);
     }
@@ -137,6 +146,44 @@ export function coerceToolArguments(toolName: string, rawArgs: any): Record<stri
     if (rootAlias) {
       args.root = String(rootAlias);
     }
+  }
+  if (args.root) {
+    if (!args.target_path || /\.(vue|tsx|jsx|svelte|astro|ts|js)$/i.test(String(args.target_path))) {
+      args.target_path = args.root;
+      args.targetPath = args.root;
+    }
+  }
+
+  // 8. Canonical Entity Aliasing: exemplar_path (for archetype-drift audit)
+  if (!args.exemplar_path) {
+    const exemplarAlias = args.exemplar || args.exemplarPath;
+    if (exemplarAlias) {
+      args.exemplar_path = String(exemplarAlias);
+    }
+  }
+
+  // 9. Canonical Entity Aliasing for generate_patch_plan
+  if (toolName === 'generate_patch_plan') {
+    if (!args.refactor_type) {
+      const refactorAlias = args.refactor || args.refactorType;
+      if (refactorAlias) args.refactor_type = String(refactorAlias);
+    }
+    if (!args.old_name) {
+      const oldAlias = args.old || args.oldName;
+      if (oldAlias) args.old_name = String(oldAlias);
+    }
+    if (!args.new_name) {
+      const newAlias = args.new || args.newName;
+      if (newAlias) args.new_name = String(newAlias);
+    }
+  }
+
+  // 10. Depth normalization
+  if (!args.max_depth && args.depth) {
+    args.max_depth = Number(args.depth);
+  }
+  if (!args.depth && args.max_depth) {
+    args.depth = Number(args.max_depth);
   }
 
   return args;

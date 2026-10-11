@@ -12,23 +12,7 @@ export const patchPlanTool: McpToolDefinition = {
     properties: {
       path: {
         type: 'string',
-        description: 'Path to the component file being refactored (alias: component_path, file_path, filePath, component, e.g. "src/components/Button.vue")',
-      },
-      component_path: {
-        type: 'string',
-        description: 'Alias for path',
-      },
-      file_path: {
-        type: 'string',
-        description: 'Alias for path',
-      },
-      filePath: {
-        type: 'string',
-        description: 'Alias for path',
-      },
-      component: {
-        type: 'string',
-        description: 'Alias for path',
+        description: 'Path to the component file being refactored (e.g. "src/components/Button.vue", alias: component_path, file_path)',
       },
       refactor_type: {
         type: 'string',
@@ -56,13 +40,13 @@ export const patchPlanTool: McpToolDefinition = {
         type: 'string',
         description: 'Workspace or project root directory (default: ".")',
       },
-      output_format: {
+      format: {
         type: 'string',
         enum: ['text', 'json'],
-        description: 'Output format: text or json (default: "text")',
+        description: 'Output format: text or json (default: "text", alias: output_format)',
       },
     },
-    required: ['refactor_type', 'old_name'],
+    required: ['path', 'refactor_type', 'old_name'],
   },
   handler: async (args: Record<string, any>) => {
     const rawPath =

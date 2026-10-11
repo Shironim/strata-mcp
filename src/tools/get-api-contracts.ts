@@ -11,15 +11,7 @@ export const getApiContractsTool: McpToolDefinition = {
     properties: {
       path: {
         type: 'string',
-        description: 'Workspace root or directory to scan for API call sites (alias: target_path, targetPath).',
-      },
-      target_path: {
-        type: 'string',
-        description: 'Alias for path',
-      },
-      targetPath: {
-        type: 'string',
-        description: 'Alias for path',
+        description: 'Workspace root or directory to scan for API call sites (alias: target_path).',
       },
       scope_path: {
         type: 'string',
@@ -34,11 +26,6 @@ export const getApiContractsTool: McpToolDefinition = {
         type: 'string',
         enum: ['text', 'json'],
         description: 'Output format: text or json (default: "text", alias: output_format)',
-      },
-      output_format: {
-        type: 'string',
-        enum: ['text', 'json'],
-        description: 'Alias for format',
       },
     },
     required: [],

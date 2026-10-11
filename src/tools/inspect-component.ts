@@ -19,28 +19,12 @@ export const inspectComponentTool: McpToolDefinition = {
     properties: {
       path: {
         type: 'string',
-        description: 'Target component or file path (alias: file_path, filePath, target_path)',
-      },
-      file_path: {
-        type: 'string',
-        description: 'Alias for path',
-      },
-      filePath: {
-        type: 'string',
-        description: 'Alias for path',
-      },
-      target_path: {
-        type: 'string',
-        description: 'Project root directory or alias for path',
+        description: 'Target component or file path (e.g. "src/components/MyButton.vue", alias: file_path, target_path)',
       },
       symbol: {
         type: 'string',
         description:
-          'Symbol/function name to slice verbatim with exact line numbers, callers, and covering test detection (e.g. "calculateTotal", "handleSubmit")',
-      },
-      symbol_name: {
-        type: 'string',
-        description: 'Alias for symbol',
+          'Symbol/function name to slice verbatim with exact line numbers, callers, and covering test detection (e.g. "calculateTotal", "handleSubmit", alias: symbol_name)',
       },
       audit_events: {
         type: 'boolean',
@@ -61,11 +45,6 @@ export const inspectComponentTool: McpToolDefinition = {
         type: 'string',
         enum: ['text', 'json'],
         description: 'Output format: text or json (default: "text", alias: output_format)',
-      },
-      output_format: {
-        type: 'string',
-        enum: ['text', 'json'],
-        description: 'Alias for format',
       },
     },
   },
