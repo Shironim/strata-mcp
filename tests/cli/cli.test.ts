@@ -95,4 +95,26 @@ describe('CLI Companion (Task 6 DoD)', () => {
     expect(logs[0]).toContain('State Impact Analysis for: useRouter');
     expect(logs[1]).toContain('Synced workspace');
   });
+
+  it('executes audit with sub-targets and multi-hop impact from CLI', async () => {
+    const logs: string[] = [];
+    const originalLog = console.log;
+    console.log = (...args) => logs.push(args.join(' '));
+
+    try {
+      await main(['audit', '--path', FIXTURES_DIR, '--target', 'dead-state']);
+      await main(['audit', '--path', FIXTURES_DIR, '--target', 'routes']);
+      await main(['impact', 'useRouter', '--path', FIXTURES_DIR, '--depth', '2']);
+      await main(['apis', FIXTURES_DIR, '--json']);
+    } finally {
+      console.log = originalLog;
+    }
+
+    expect(logs.length).toBeGreaterThanOrEqual(4);
+    expect(logs[0]).toContain('Unused State');
+    expect(logs[1]).toContain('Route Manifest');
+    expect(logs[2]).toContain('State Dependency Chain');
+    const parsedApis = JSON.parse(logs[3]);
+    expect(parsedApis.workspaceRoot).toBeDefined();
+  });
 });

@@ -2,11 +2,17 @@
 import { existsSync, promises as fs } from 'node:fs';
 import { findCode, findCodeByRule, findComponentUsage, formatMatchesAsText } from './engine/search';
 import { extractComponentContract, formatContractAsText } from './engine/contract';
+import { sliceSymbol, formatSymbolSliceAsText } from './engine/slicer';
+import { auditEventHandlers, formatEventHandlerAuditAsText } from './engine/reactivity';
 import { getComponentTree, formatTreeAsText } from './engine/tree';
 import { findUnusedComponents, formatUnusedAsText } from './engine/audit';
 import { scanRoutes, formatRoutesAsText } from './engine/routes';
 import { generatePatchPlan } from './engine/patch-plan';
 import { extractWorkspaceApiContracts, formatApiContractsAsText } from './engine/api-contract';
+import { auditPageArchetypeDrift, formatArchetypeAuditAsText } from './engine/archetype';
+import { findSimilarTemplates, formatSimilarTemplatesAsText } from './engine/template-similarity';
+import { auditDesignTokens, formatDesignAuditAsText } from './engine/style-audit';
+import { auditBundleHealth, formatBundleAuditAsText } from './engine/bundle-audit';
 import {
   formatStateImpactAsText,
   formatUnusedStateAsText,
@@ -14,6 +20,8 @@ import {
   queryStateImpact,
   syncWorkspace,
   closeAllDatabases,
+  traceStateChain,
+  formatStateChainAsText,
 } from './engine/database';
 import { handleStrataInit } from './cli/commands/init';
 import { STRATA_VERSION } from './version';
@@ -35,13 +43,14 @@ Commands:
   contract, extract-contract <file>       Extract public component contract (props, emits, slots)
   tree, component-tree [entry-file]       Inspect component dependency hierarchy
   patch-plan, patch <file>                Generate precision refactoring patch plan
+  archetype <file>                        Audit page archetype & structural drift against exemplar
   apis, api-contracts [target-dir]        Extract backend/frontend API integration contracts
   routes, scan-routes [target-dir]        Scan and resolve file-based routing paths
   impact, state-impact <state-id>         Trace blast radius and state consumers
   unused-state, dead-state [target-dir]   Audit unused stores, composables, or state variables
   stats, telemetry [target-dir]           Show tool latency percentiles, error rates, and telemetry stats
   sync [target-dir]                       Synchronize project cache and index database
-  unused, audit [target-dir]              Audit dead or unreferenced components
+  unused, audit [target-dir]              Audit frontend health (dead components, state, design, bundle, or all)
   rule <rule-file-or-yaml>                Execute custom ast-grep lint and audit rules
 
 Global Options:
@@ -55,9 +64,9 @@ Command-specific Options:
     --force                               Overwrite existing config files and instructions
 
   patch-plan:
-    --refactor <type>                     Refactor operation: rename_prop | remove_prop | rename_event (default: rename_prop)
-    --old <name>                          Current/old identifier or property name
-    --new <name>                          New identifier or property name
+    --refactor, --refactor-type <type>    Refactor operation: rename_prop | remove_prop | rename_event (default: rename_prop)
+    --old, --old-name <name>              Current/old identifier or property name
+    --new, --new-name <name>              New identifier or property name
 
   tree:
     --route <route-path>                  URL route path to resolve (e.g. "/catalog")
@@ -71,9 +80,26 @@ Command-specific Options:
     --view <mode>                         View layout: summary | full | tree (default: auto)
     --framework <hint>                    Framework hint (next-app, nuxt, astro, inertia)
 
-  unused:
+  unused, audit:
+    --target <target>                     Audit target: dead-components (default) | dead-state | routes | similar-templates | design-tokens | bundle-health | api-contracts | archetype-drift | all
+    --threshold <number>                  Similarity threshold for template redundancy (default: 0.8)
     --ignore <pattern>                    Glob pattern to ignore (comma-separated)
     --include-pages                       Include file-based page views in audit
+    --scope-path <dir>                    Sub-directory or package scope filter
+    --exclude-dirs <dirs>                 Comma-separated directories to ignore
+
+  apis:
+    --scope-path <dir>                    Sub-directory or package scope filter
+    --exclude-dirs <dirs>                 Comma-separated directories to ignore
+
+  impact:
+    --depth <number>                      Traversal depth (default: 1, >1 triggers multi-hop trace)
+    --direction <dir>                     Direction: consumers | dependencies | both (default: both)
+    --role <role>                         Role filter: all | mutators | readers (default: all)
+
+  contract:
+    --symbol <name>                       Symbol/function to slice verbatim
+    --audit-events                        Audit template-to-script event handler integrity
 
   search:
     --lang <lang>                         Target language hint (default: ts)
@@ -100,14 +126,20 @@ function parseArgs(args: string[]) {
     } else if (arg === '--help' || arg === '-h') {
       flags.help = true;
     } else if (arg.startsWith('--')) {
-      const key = arg.slice(2);
-      const camelKey = toCamelCase(key);
-      const next = args[i + 1];
+      const equalsIdx = arg.indexOf('=');
+      let key = arg.slice(2);
       let val: string | boolean = true;
-      if (next && !next.startsWith('-')) {
-        val = next;
-        i++;
+      if (equalsIdx > 2) {
+        key = arg.slice(2, equalsIdx);
+        val = arg.slice(equalsIdx + 1);
+      } else {
+        const next = args[i + 1];
+        if (next && !next.startsWith('-')) {
+          val = next;
+          i++;
+        }
       }
+      const camelKey = toCamelCase(key);
       flags[key] = val;
       if (camelKey !== key) {
         flags[camelKey] = val;
@@ -255,7 +287,38 @@ export async function main(argv: string[] = process.argv.slice(2)) {
         process.exit(1);
       }
 
-      const contract = await extractComponentContract(filePath);
+      const symbol = (flags.symbol || flags['symbol-name']) as string | undefined;
+      if (symbol) {
+        const sliced = await sliceSymbol({ path: filePath, symbolName: symbol });
+        if (!sliced) {
+          console.error(`Error: Symbol "${symbol}" not found in "${filePath}".`);
+          process.exit(1);
+        }
+        if (isJson) {
+          console.log(JSON.stringify(sliced, null, 2));
+        } else {
+          console.log(formatSymbolSliceAsText(sliced));
+        }
+        return;
+      }
+
+      if (flags['audit-events']) {
+        const auditRes = await auditEventHandlers({ path: filePath });
+        if (isJson) {
+          console.log(JSON.stringify(auditRes, null, 2));
+        } else {
+          console.log(formatEventHandlerAuditAsText(auditRes));
+        }
+        return;
+      }
+
+      const inferProps = flags['infer-props'] !== false;
+      const resolveGlobals = flags['resolve-globals'] !== false;
+
+      const contract = await extractComponentContract(filePath, {
+        inferProps,
+        resolveGlobals,
+      });
       if (isJson) {
         console.log(JSON.stringify(contract, null, 2));
       } else {
@@ -314,6 +377,184 @@ export async function main(argv: string[] = process.argv.slice(2)) {
 
     if (command === 'unused' || command === 'find-unused' || command === 'audit') {
       const auditPath = positional[1] || targetPath;
+      const target = (flags.target as string) || 'dead-components';
+      const excludeDirs = flags['exclude-dirs']
+        ? String(flags['exclude-dirs']).split(',').map((s) => s.trim()).filter(Boolean)
+        : flags.excludeDirs
+          ? String(flags.excludeDirs).split(',').map((s) => s.trim()).filter(Boolean)
+          : undefined;
+      const scopePath = (flags['scope-path'] || flags.scopePath) as string | undefined;
+
+      if (target === 'dead-state') {
+        const result = await findUnusedState(auditPath, { scopePath });
+        if (isJson) {
+          console.log(JSON.stringify(result, null, 2));
+        } else {
+          console.log(formatUnusedStateAsText(result));
+        }
+        return;
+      }
+
+      if (target === 'routes') {
+        const result = await scanRoutes({
+          targetPath: auditPath,
+          frameworkHint: flags.framework as RouteFramework | undefined,
+          prefix: (flags.prefix as string) || undefined,
+        });
+        if (isJson) {
+          console.log(JSON.stringify(result, null, 2));
+        } else {
+          console.log(formatRoutesAsText(result));
+        }
+        return;
+      }
+
+      if (target === 'similar-templates') {
+        const result = await findSimilarTemplates({
+          targetPath: auditPath,
+          threshold: flags.threshold ? Number(flags.threshold) : undefined,
+          excludeDirs,
+        });
+        if (isJson) {
+          console.log(JSON.stringify(result, null, 2));
+        } else {
+          console.log(formatSimilarTemplatesAsText(result));
+        }
+        return;
+      }
+
+      if (target === 'design-tokens' || target === 'design') {
+        const result = await auditDesignTokens({
+          targetPath: auditPath,
+          scopePath,
+          excludeDirs,
+        });
+        if (isJson) {
+          console.log(JSON.stringify(result, null, 2));
+        } else {
+          console.log(formatDesignAuditAsText(result));
+        }
+        return;
+      }
+
+      if (target === 'bundle-health' || target === 'bundle') {
+        const result = await auditBundleHealth({
+          targetPath: auditPath,
+          scopePath,
+          excludeDirs,
+        });
+        if (isJson) {
+          console.log(JSON.stringify(result, null, 2));
+        } else {
+          console.log(formatBundleAuditAsText(result));
+        }
+        return;
+      }
+
+      if (target === 'api-contracts' || target === 'apis') {
+        const result = await extractWorkspaceApiContracts({
+          targetPath: auditPath,
+          scopePath,
+          excludeDirs,
+        });
+        if (isJson) {
+          console.log(JSON.stringify(result, null, 2));
+        } else {
+          console.log(formatApiContractsAsText(result));
+        }
+        return;
+      }
+
+      if (target === 'archetype-drift' || target === 'archetype') {
+        const exemplarFile = flags.exemplar
+          ? String(flags.exemplar)
+          : flags.exemplarPath
+            ? String(flags.exemplarPath)
+            : undefined;
+        const result = await auditPageArchetypeDrift({
+          targetPath: auditPath,
+          exemplarPath: exemplarFile,
+        });
+        if (isJson) {
+          console.log(JSON.stringify(result, null, 2));
+        } else {
+          console.log(formatArchetypeAuditAsText(result));
+        }
+        if (!result.conforms) {
+          process.exit(1);
+        }
+        return;
+      }
+
+      if (target === 'all') {
+        const [routes, unusedComponents, unusedState, similarTemplates, designSystemAudit, bundleAudit, apiContracts] =
+          await Promise.all([
+            scanRoutes({
+              targetPath: auditPath,
+              frameworkHint: flags.framework as RouteFramework | undefined,
+              prefix: (flags.prefix as string) || undefined,
+            }),
+            findUnusedComponents({
+              targetPath: auditPath,
+              ignorePatterns: flags.ignore ? String(flags.ignore).split(',') : undefined,
+              excludePages: flags['include-pages'] ? false : true,
+              excludeDirs,
+            }),
+            findUnusedState(auditPath, { scopePath }),
+            findSimilarTemplates({
+              targetPath: auditPath,
+              threshold: flags.threshold ? Number(flags.threshold) : undefined,
+              excludeDirs,
+            }),
+            auditDesignTokens({
+              targetPath: auditPath,
+              scopePath,
+              excludeDirs,
+            }),
+            auditBundleHealth({
+              targetPath: auditPath,
+              scopePath,
+              excludeDirs,
+            }),
+            extractWorkspaceApiContracts({
+              targetPath: auditPath,
+              scopePath,
+              excludeDirs,
+            }),
+          ]);
+
+        if (isJson) {
+          console.log(
+            JSON.stringify(
+              { routes, unusedComponents, unusedState, similarTemplates, designSystemAudit, bundleAudit, apiContracts },
+              null,
+              2
+            )
+          );
+        } else {
+          const report = [
+            '## Frontend Architecture & Health Audit',
+            `Target: \`${auditPath}\`\n`,
+            formatRoutesAsText(routes),
+            '\n---\n',
+            formatUnusedAsText(unusedComponents),
+            '\n---\n',
+            formatUnusedStateAsText(unusedState),
+            '\n---\n',
+            formatSimilarTemplatesAsText(similarTemplates),
+            '\n---\n',
+            formatDesignAuditAsText(designSystemAudit),
+            '\n---\n',
+            formatBundleAuditAsText(bundleAudit),
+            '\n---\n',
+            formatApiContractsAsText(apiContracts),
+          ].join('\n');
+          console.log(report);
+        }
+        return;
+      }
+
+      // Default target: dead-components
       const ignoreArg = flags.ignore ? String(flags.ignore).split(',') : undefined;
       const excludePages = flags['include-pages'] ? false : true;
 
@@ -321,6 +562,7 @@ export async function main(argv: string[] = process.argv.slice(2)) {
         targetPath: auditPath,
         ignorePatterns: ignoreArg,
         excludePages,
+        excludeDirs,
       });
 
       if (isJson) {
@@ -350,7 +592,25 @@ export async function main(argv: string[] = process.argv.slice(2)) {
         process.exit(1);
       }
 
-      const result = await queryStateImpact(targetPath, identifier);
+      const depth = flags.depth ? Number(flags.depth) : 1;
+      const direction = (flags.direction as 'consumers' | 'dependencies' | 'both') || 'both';
+
+      if (depth > 1 || flags.direction) {
+        const result = await traceStateChain(targetPath, {
+          identifier,
+          direction,
+          maxDepth: depth,
+        });
+        if (isJson) {
+          console.log(JSON.stringify(result, null, 2));
+        } else {
+          console.log(formatStateChainAsText(result));
+        }
+        return;
+      }
+
+      const role = (flags.role as 'all' | 'mutators' | 'readers') || 'all';
+      const result = await queryStateImpact(targetPath, identifier, role);
       if (isJson) {
         console.log(JSON.stringify(result, null, 2));
       } else {
@@ -412,12 +672,54 @@ export async function main(argv: string[] = process.argv.slice(2)) {
 
     if (command === 'apis' || command === 'api-contracts') {
       const scanPath = positional[1] || targetPath;
-      const result = await extractWorkspaceApiContracts({ targetPath: scanPath });
+      const scopePath = (flags['scope-path'] || flags.scopePath) as string | undefined;
+      const excludeDirs = flags['exclude-dirs']
+        ? String(flags['exclude-dirs']).split(',').map((s) => s.trim()).filter(Boolean)
+        : flags.excludeDirs
+          ? String(flags.excludeDirs).split(',').map((s) => s.trim()).filter(Boolean)
+          : undefined;
+
+      const result = await extractWorkspaceApiContracts({
+        targetPath: scanPath,
+        scopePath,
+        excludeDirs,
+      });
 
       if (isJson) {
         console.log(JSON.stringify(result, null, 2));
       } else {
         console.log(formatApiContractsAsText(result));
+      }
+      return;
+    }
+
+    if (command === 'archetype') {
+      const pageFile = positional[1] || (flags.path as string);
+      if (!pageFile || pageFile === '.') {
+        console.error(
+          'Error: Target page file is required for archetype audit (e.g. strata archetype pages/orders/index.vue --exemplar pages/products/index.vue).'
+        );
+        process.exit(1);
+      }
+
+      const exemplarFile = flags.exemplar
+        ? String(flags.exemplar)
+        : flags.exemplarPath
+          ? String(flags.exemplarPath)
+          : undefined;
+
+      const result = await auditPageArchetypeDrift({
+        targetPath: pageFile,
+        exemplarPath: exemplarFile,
+      });
+
+      if (isJson) {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        console.log(formatArchetypeAuditAsText(result));
+      }
+      if (!result.conforms) {
+        process.exit(1);
       }
       return;
     }
