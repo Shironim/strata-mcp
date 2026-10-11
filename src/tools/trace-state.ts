@@ -5,7 +5,11 @@ import {
   traceStateChain,
   formatStateChainAsText,
 } from '../engine/database';
-import { resolveProjectRoot, resolveWorkspacePath } from '../engine/path-resolver';
+import {
+  parseSafePositiveInt,
+  resolveProjectRoot,
+  resolveWorkspacePath,
+} from '../engine/path-resolver';
 import type { McpToolDefinition } from './types';
 
 export const traceStateTool: McpToolDefinition = {
@@ -92,35 +96,44 @@ export const traceStateTool: McpToolDefinition = {
       };
     }
 
-    const targetPath = resolveProjectRoot(rawTargetPath);
-    const depth = args.depth ? Number(args.depth) : (args.max_depth ? Number(args.max_depth) : 1);
-    const isJson = args.output_format === 'json' || args.format === 'json';
+    try {
+      const targetPath = resolveProjectRoot(rawTargetPath);
+      const depth = parseSafePositiveInt(args.depth ?? args.max_depth ?? args.maxDepth, 1) ?? 1;
+      const isJson = args.output_format === 'json' || args.format === 'json';
 
-    if (depth > 1 || args.direction === 'dependencies') {
-      const result = await traceStateChain(targetPath, {
-        identifier,
-        direction: args.direction as any,
-        maxDepth: depth,
-      });
+      const shouldMultiHop = depth > 1 || args.direction === 'dependencies' || args.direction === 'both';
+      if (shouldMultiHop) {
+        const result = await traceStateChain(targetPath, {
+          identifier,
+          direction: (args.direction as 'consumers' | 'dependencies' | 'both') || 'both',
+          maxDepth: depth,
+        });
+        return {
+          content: [
+            {
+              type: 'text',
+              text: isJson ? JSON.stringify(result, null, 2) : formatStateChainAsText(result),
+            },
+          ],
+        };
+      }
+
+      const role = (args.role as 'all' | 'mutators' | 'readers') || 'all';
+      const result = await queryStateImpact(targetPath, identifier, role);
       return {
         content: [
           {
             type: 'text',
-            text: isJson ? JSON.stringify(result, null, 2) : formatStateChainAsText(result),
+            text: isJson ? JSON.stringify(result, null, 2) : formatStateImpactAsText(result),
           },
         ],
       };
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return {
+        isError: true,
+        content: [{ type: 'text', text: `Failed to trace state "${identifier}": ${msg}` }],
+      };
     }
-
-    const role = (args.role as 'all' | 'mutators' | 'readers') || 'all';
-    const result = await queryStateImpact(targetPath, identifier, role);
-    return {
-      content: [
-        {
-          type: 'text',
-          text: isJson ? JSON.stringify(result, null, 2) : formatStateImpactAsText(result),
-        },
-      ],
-    };
   },
 };

@@ -38,7 +38,7 @@ export const getRoutesTool: McpToolDefinition = {
   },
   handler: async (args: Record<string, any>) => {
     const targetPath = resolveToolTargetPath(args);
-    const framework = args.framework as RouteFramework | undefined;
+    const framework = (args.framework || args.framework_hint || args.frameworkHint) as RouteFramework | undefined;
     const prefix = typeof args.prefix === 'string' ? args.prefix : undefined;
     const view = args.view === 'full' || args.view === 'tree' ? args.view : 'summary';
     const isJson = args.output_format === 'json' || args.format === 'json';

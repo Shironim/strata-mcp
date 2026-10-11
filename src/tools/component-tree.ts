@@ -1,6 +1,11 @@
 import fs from 'node:fs';
 import { getComponentTree, formatTreeAsText } from '../engine/tree';
-import { resolveWorkspacePath, resolveProjectRoot } from '../engine/path-resolver';
+import {
+  parseAliasMapInput,
+  parseSafePositiveInt,
+  resolveProjectRoot,
+  resolveWorkspacePath,
+} from '../engine/path-resolver';
 import type { ComponentTreeNode, ComponentTreeOptions } from '../types';
 import type { McpToolDefinition } from './types';
 
@@ -101,32 +106,54 @@ export const componentTreeTool: McpToolDefinition = {
       };
     }
 
-    const tree = await getComponentTree({
-      entryPath,
-      routePath,
-      targetPath,
-      maxDepth: args.max_depth ? Number(args.max_depth) : undefined,
-      direction: args.direction as ComponentTreeOptions['direction'],
-      aliasMap: args.alias_map as Record<string, string> | undefined,
-      scopeFilter: args.scope_filter ? String(args.scope_filter) : undefined,
-    });
+    try {
+      const maxDepth = parseSafePositiveInt(args.max_depth ?? args.maxDepth ?? args.depth);
 
-    if (args.include_props === false) {
-      const stripProps = (n: ComponentTreeNode) => {
-        delete (n as { passedProps?: unknown }).passedProps;
-        n.children?.forEach(stripProps);
+      const rawDir = String(args.direction || '').toLowerCase();
+      const direction: ComponentTreeOptions['direction'] =
+        rawDir === 'upward' || rawDir === 'up'
+          ? 'upward'
+          : rawDir === 'downward' || rawDir === 'down'
+            ? 'downward'
+            : undefined;
+
+      const rawScopeFilter = args.scope_filter ?? args.scope_path ?? args.scopeFilter ?? args.scopePath;
+      const scopeFilter = rawScopeFilter ? String(rawScopeFilter) : undefined;
+      const aliasMap = parseAliasMapInput(args.alias_map ?? args.aliasMap ?? args.alias);
+
+      const tree = await getComponentTree({
+        entryPath,
+        routePath,
+        targetPath,
+        maxDepth,
+        direction,
+        aliasMap,
+        scopeFilter,
+      });
+
+      if (args.include_props === false || args.includeProps === false) {
+        const stripProps = (n: ComponentTreeNode) => {
+          delete (n as { passedProps?: unknown }).passedProps;
+          n.children?.forEach(stripProps);
+        };
+        stripProps(tree.root);
+      }
+
+      const isJson = args.output_format === 'json' || args.format === 'json';
+      return {
+        content: [
+          {
+            type: 'text',
+            text: isJson ? JSON.stringify(tree, null, 2) : formatTreeAsText(tree),
+          },
+        ],
       };
-      stripProps(tree.root);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return {
+        isError: true,
+        content: [{ type: 'text', text: `Failed to resolve component tree: ${msg}` }],
+      };
     }
-
-    const isJson = args.output_format === 'json' || args.format === 'json';
-    return {
-      content: [
-        {
-          type: 'text',
-          text: isJson ? JSON.stringify(tree, null, 2) : formatTreeAsText(tree),
-        },
-      ],
-    };
   },
 };

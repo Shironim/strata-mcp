@@ -15,7 +15,14 @@ import {
   auditPageArchetypeDrift,
   formatArchetypeAuditAsText,
 } from '../engine/archetype';
-import { resolveProjectRoot, resolveWorkspacePath } from '../engine/path-resolver';
+import {
+  normalizeAuditTarget,
+  parseSafeFloat,
+  parseStringList,
+  resolveProjectRoot,
+  resolveWorkspacePath,
+  VALID_AUDIT_TARGETS,
+} from '../engine/path-resolver';
 import type { RouteFramework } from '../types';
 import type { McpToolDefinition } from './types';
 
@@ -78,6 +85,10 @@ export const auditFrontendTool: McpToolDefinition = {
         items: { type: 'string' },
         description: 'Glob patterns to exclude from dead component audit',
       },
+      include_pages: {
+        type: 'boolean',
+        description: 'Include page/view files in dead-components audit (default: false)',
+      },
       exclude_dirs: {
         type: 'array',
         items: { type: 'string' },
@@ -91,219 +102,243 @@ export const auditFrontendTool: McpToolDefinition = {
     },
   },
   handler: async (args: Record<string, any>) => {
-    const rawTargetPath = (args.target_path || args.path)
-      ? String(args.target_path || args.path)
-      : undefined;
-    const targetPath = resolveProjectRoot(rawTargetPath);
-    const scopePath = args.scope_path ? String(args.scope_path) : undefined;
-    const target = args.target ? String(args.target) : 'all';
-    const isJson = args.output_format === 'json' || args.format === 'json';
-    const excludeDirs = Array.isArray(args.exclude_dirs)
-      ? args.exclude_dirs.map(String)
-      : typeof args.exclude_dirs === 'string'
-        ? (args.exclude_dirs as string).split(',').map((s) => s.trim()).filter(Boolean)
+    try {
+      const rawTargetPath = (args.target_path || args.path || args.targetPath)
+        ? String(args.target_path || args.path || args.targetPath)
         : undefined;
+      const targetPath = resolveProjectRoot(rawTargetPath);
+      const rawScope = args.scope_path ?? args.scopePath ?? args.scope_filter ?? args.scopeFilter;
+      const scopePath = rawScope ? String(rawScope) : undefined;
 
-    if (target === 'routes') {
-      const manifest = await scanRoutes({
-        targetPath,
-        frameworkHint: args.framework as RouteFramework | undefined,
-        prefix: args.prefix ? String(args.prefix) : undefined,
-      });
-      return {
-        content: [
-          {
-            type: 'text',
-            text: isJson ? JSON.stringify(manifest, null, 2) : formatRoutesAsText(manifest),
-          },
-        ],
-      };
-    }
-
-    if (target === 'dead-components') {
-      const result = await findUnusedComponents({
-        targetPath,
-        ignorePatterns: args.ignore_patterns as string[] | undefined,
-        excludeDirs,
-      });
-      return {
-        content: [
-          {
-            type: 'text',
-            text: isJson ? JSON.stringify(result, null, 2) : formatUnusedAsText(result),
-          },
-        ],
-      };
-    }
-
-    if (target === 'dead-state') {
-      const result = await findUnusedState(targetPath, { scopePath });
-      return {
-        content: [
-          {
-            type: 'text',
-            text: isJson ? JSON.stringify(result, null, 2) : formatUnusedStateAsText(result),
-          },
-        ],
-      };
-    }
-
-    if (target === 'similar-templates') {
-      const result = await findSimilarTemplates({
-        targetPath,
-        threshold: args.threshold ? Number(args.threshold) : undefined,
-        excludeDirs,
-      });
-      return {
-        content: [
-          {
-            type: 'text',
-            text: isJson ? JSON.stringify(result, null, 2) : formatSimilarTemplatesAsText(result),
-          },
-        ],
-      };
-    }
-
-    if (target === 'design-tokens' || target === 'design') {
-      const result = await auditDesignTokens({
-        targetPath,
-        scopePath,
-        excludeDirs,
-      });
-      return {
-        content: [
-          {
-            type: 'text',
-            text: isJson ? JSON.stringify(result, null, 2) : formatDesignAuditAsText(result),
-          },
-        ],
-      };
-    }
-
-    if (target === 'bundle-health' || target === 'bundle') {
-      const result = await auditBundleHealth({ targetPath, scopePath, excludeDirs });
-      return {
-        content: [
-          {
-            type: 'text',
-            text: isJson ? JSON.stringify(result, null, 2) : formatBundleAuditAsText(result),
-          },
-        ],
-      };
-    }
-
-    if (target === 'api-contracts' || target === 'api' || target === 'apis') {
-      const result = await extractWorkspaceApiContracts({ targetPath, scopePath, excludeDirs });
-      return {
-        content: [
-          {
-            type: 'text',
-            text: isJson ? JSON.stringify(result, null, 2) : formatApiContractsAsText(result),
-          },
-        ],
-      };
-    }
-
-    if (target === 'archetype-drift' || target === 'archetype') {
-      if (!rawTargetPath) {
+      const target = normalizeAuditTarget(args.target, 'all');
+      if (!VALID_AUDIT_TARGETS.has(target)) {
         return {
           isError: true,
           content: [
             {
               type: 'text',
-              text: "Missing required argument: 'path' (or 'target_path') pointing to the target page file for archetype-drift audit.",
+              text: `Invalid audit target: "${args.target}". Supported targets: ${[...VALID_AUDIT_TARGETS].join(', ')}`,
             },
           ],
         };
       }
-      const resolvedPagePath = resolveWorkspacePath(rawTargetPath);
-      const rawExemplar = args.exemplar_path || args.exemplar || args.exemplarPath;
-      const resolvedExemplarPath = rawExemplar
-        ? resolveWorkspacePath(String(rawExemplar), targetPath)
-        : undefined;
 
-      const result = await auditPageArchetypeDrift({
-        targetPath: resolvedPagePath,
-        exemplarPath: resolvedExemplarPath,
-        workspaceRoot: targetPath,
-      });
+      const isJson = args.output_format === 'json' || args.format === 'json';
+      const excludeDirs = parseStringList(args.exclude_dirs ?? args.excludeDirs);
+      const ignorePatterns = parseStringList(args.ignore_patterns ?? args.ignorePatterns);
+      const includePages = Boolean(args.include_pages ?? args.includePages);
+      const frameworkHint = (args.framework || args.framework_hint || args.frameworkHint) as RouteFramework | undefined;
+      const threshold = parseSafeFloat(args.threshold);
+
+      if (target === 'routes') {
+        const manifest = await scanRoutes({
+          targetPath,
+          frameworkHint,
+          prefix: args.prefix ? String(args.prefix) : undefined,
+        });
+        return {
+          content: [
+            {
+              type: 'text',
+              text: isJson ? JSON.stringify(manifest, null, 2) : formatRoutesAsText(manifest),
+            },
+          ],
+        };
+      }
+
+      if (target === 'dead-components') {
+        const result = await findUnusedComponents({
+          targetPath,
+          ignorePatterns,
+          excludePages: !includePages,
+          excludeDirs,
+        });
+        return {
+          content: [
+            {
+              type: 'text',
+              text: isJson ? JSON.stringify(result, null, 2) : formatUnusedAsText(result),
+            },
+          ],
+        };
+      }
+
+      if (target === 'dead-state') {
+        const result = await findUnusedState(targetPath, { scopePath });
+        return {
+          content: [
+            {
+              type: 'text',
+              text: isJson ? JSON.stringify(result, null, 2) : formatUnusedStateAsText(result),
+            },
+          ],
+        };
+      }
+
+      if (target === 'similar-templates') {
+        const result = await findSimilarTemplates({
+          targetPath,
+          threshold,
+          excludeDirs,
+        });
+        return {
+          content: [
+            {
+              type: 'text',
+              text: isJson ? JSON.stringify(result, null, 2) : formatSimilarTemplatesAsText(result),
+            },
+          ],
+        };
+      }
+
+      if (target === 'design-tokens') {
+        const result = await auditDesignTokens({
+          targetPath,
+          scopePath,
+          excludeDirs,
+        });
+        return {
+          content: [
+            {
+              type: 'text',
+              text: isJson ? JSON.stringify(result, null, 2) : formatDesignAuditAsText(result),
+            },
+          ],
+        };
+      }
+
+      if (target === 'bundle-health') {
+        const result = await auditBundleHealth({ targetPath, scopePath, excludeDirs });
+        return {
+          content: [
+            {
+              type: 'text',
+              text: isJson ? JSON.stringify(result, null, 2) : formatBundleAuditAsText(result),
+            },
+          ],
+        };
+      }
+
+      if (target === 'api-contracts') {
+        const result = await extractWorkspaceApiContracts({ targetPath, scopePath, excludeDirs });
+        return {
+          content: [
+            {
+              type: 'text',
+              text: isJson ? JSON.stringify(result, null, 2) : formatApiContractsAsText(result),
+            },
+          ],
+        };
+      }
+
+      if (target === 'archetype-drift') {
+        if (!rawTargetPath) {
+          return {
+            isError: true,
+            content: [
+              {
+                type: 'text',
+                text: "Missing required argument: 'path' (or 'target_path') pointing to the target page file for archetype-drift audit.",
+              },
+            ],
+          };
+        }
+        const resolvedPagePath = resolveWorkspacePath(rawTargetPath);
+        const rawExemplar = args.exemplar_path || args.exemplar || args.exemplarPath;
+        const resolvedExemplarPath = rawExemplar
+          ? resolveWorkspacePath(String(rawExemplar), targetPath)
+          : undefined;
+
+        const result = await auditPageArchetypeDrift({
+          targetPath: resolvedPagePath,
+          exemplarPath: resolvedExemplarPath,
+          workspaceRoot: targetPath,
+        });
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: isJson ? JSON.stringify(result, null, 2) : formatArchetypeAuditAsText(result),
+            },
+          ],
+        };
+      }
+
+      // target === 'all'
+      const [routes, unusedComponents, unusedState, similarTemplates, designSystemAudit, bundleAudit, apiContracts] = await Promise.all([
+        scanRoutes({
+          targetPath,
+          frameworkHint,
+          prefix: args.prefix ? String(args.prefix) : undefined,
+        }),
+        findUnusedComponents({
+          targetPath,
+          ignorePatterns,
+          excludePages: !includePages,
+          excludeDirs,
+        }),
+        findUnusedState(targetPath, { scopePath }),
+        findSimilarTemplates({
+          targetPath,
+          threshold,
+          excludeDirs,
+        }),
+        auditDesignTokens({
+          targetPath,
+          scopePath,
+          excludeDirs,
+        }),
+        auditBundleHealth({
+          targetPath,
+          scopePath,
+          excludeDirs,
+        }),
+        extractWorkspaceApiContracts({
+          targetPath,
+          scopePath,
+          excludeDirs,
+        }),
+      ]);
+
+      if (isJson) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ routes, unusedComponents, unusedState, similarTemplates, designSystemAudit, bundleAudit, apiContracts }, null, 2),
+            },
+          ],
+        };
+      }
+
+      const report = [
+        '## Frontend Architecture & Health Audit',
+        `Target: \`${targetPath}\`\n`,
+        formatRoutesAsText(routes),
+        '\n---\n',
+        formatUnusedAsText(unusedComponents),
+        '\n---\n',
+        formatUnusedStateAsText(unusedState),
+        '\n---\n',
+        formatSimilarTemplatesAsText(similarTemplates),
+        '\n---\n',
+        formatDesignAuditAsText(designSystemAudit),
+        '\n---\n',
+        formatBundleAuditAsText(bundleAudit),
+        '\n---\n',
+        formatApiContractsAsText(apiContracts),
+      ].join('\n');
 
       return {
-        content: [
-          {
-            type: 'text',
-            text: isJson ? JSON.stringify(result, null, 2) : formatArchetypeAuditAsText(result),
-          },
-        ],
+        content: [{ type: 'text', text: report }],
       };
-    }
-
-    // target === 'all'
-    const [routes, unusedComponents, unusedState, similarTemplates, designSystemAudit, bundleAudit, apiContracts] = await Promise.all([
-      scanRoutes({
-        targetPath,
-        frameworkHint: args.framework as RouteFramework | undefined,
-        prefix: args.prefix ? String(args.prefix) : undefined,
-      }),
-      findUnusedComponents({
-        targetPath,
-        ignorePatterns: args.ignore_patterns as string[] | undefined,
-        excludeDirs,
-      }),
-      findUnusedState(targetPath, { scopePath }),
-      findSimilarTemplates({
-        targetPath,
-        threshold: args.threshold ? Number(args.threshold) : undefined,
-        excludeDirs,
-      }),
-      auditDesignTokens({
-        targetPath,
-        scopePath,
-        excludeDirs,
-      }),
-      auditBundleHealth({
-        targetPath,
-        scopePath,
-        excludeDirs,
-      }),
-      extractWorkspaceApiContracts({
-        targetPath,
-        scopePath,
-        excludeDirs,
-      }),
-    ]);
-
-    if (isJson) {
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
       return {
-        content: [
-          {
-            type: 'text',
-            text: JSON.stringify({ routes, unusedComponents, unusedState, similarTemplates, designSystemAudit, bundleAudit, apiContracts }, null, 2),
-          },
-        ],
+        isError: true,
+        content: [{ type: 'text', text: `Failed to execute frontend audit: ${msg}` }],
       };
     }
-
-    const report = [
-      '## Frontend Architecture & Health Audit',
-      `Target: \`${targetPath}\`\n`,
-      formatRoutesAsText(routes),
-      '\n---\n',
-      formatUnusedAsText(unusedComponents),
-      '\n---\n',
-      formatUnusedStateAsText(unusedState),
-      '\n---\n',
-      formatSimilarTemplatesAsText(similarTemplates),
-      '\n---\n',
-      formatDesignAuditAsText(designSystemAudit),
-      '\n---\n',
-      formatBundleAuditAsText(bundleAudit),
-      '\n---\n',
-      formatApiContractsAsText(apiContracts),
-    ].join('\n');
-
-    return {
-      content: [{ type: 'text', text: report }],
-    };
   },
 };

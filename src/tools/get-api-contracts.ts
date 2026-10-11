@@ -1,5 +1,5 @@
 import { extractWorkspaceApiContracts, formatApiContractsAsText } from '../engine/api-contract';
-import { resolveToolTargetPath } from '../engine/path-resolver';
+import { parseStringList, resolveToolTargetPath } from '../engine/path-resolver';
 import type { McpToolDefinition } from './types';
 
 export const getApiContractsTool: McpToolDefinition = {
@@ -32,12 +32,9 @@ export const getApiContractsTool: McpToolDefinition = {
   },
   handler: async (args: Record<string, any>) => {
     const targetPath = resolveToolTargetPath(args);
-    const scopePath = args.scope_path ? String(args.scope_path) : undefined;
-    const excludeDirs = Array.isArray(args.exclude_dirs)
-      ? args.exclude_dirs.map(String)
-      : typeof args.exclude_dirs === 'string'
-        ? (args.exclude_dirs as string).split(',').map((s) => s.trim()).filter(Boolean)
-        : undefined;
+    const rawScope = args.scope_path ?? args.scopePath ?? args.scope_filter ?? args.scopeFilter;
+    const scopePath = rawScope ? String(rawScope) : undefined;
+    const excludeDirs = parseStringList(args.exclude_dirs ?? args.excludeDirs);
     const isJson = args.output_format === 'json' || args.format === 'json';
 
     try {

@@ -94,82 +94,91 @@ export const inspectComponentTool: McpToolDefinition = {
     const isJson = args.output_format === 'json' || args.format === 'json';
     const symbolName = args.symbol || args.symbol_name;
 
-    // Sub-action A: Symbol slicing
-    if (symbolName) {
-      const result = await sliceSymbol({
-        path: filePath,
-        symbolName: String(symbolName),
-        includeBlastRadius: true,
-      });
-      if (!result) {
+    try {
+      // Sub-action A: Symbol slicing
+      if (symbolName) {
+        const result = await sliceSymbol({
+          path: filePath,
+          symbolName: String(symbolName),
+          includeBlastRadius: true,
+        });
+        if (!result) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Symbol '${symbolName}' not found in '${filePath}'.`,
+              },
+            ],
+          };
+        }
         return {
           content: [
             {
               type: 'text',
-              text: `Symbol '${symbolName}' not found in '${filePath}'.`,
-            },
-          ],
-        };
-      }
-      return {
-        content: [
-          {
-            type: 'text',
-            text: isJson ? JSON.stringify(result, null, 2) : formatSymbolSliceAsText(result),
-          },
-        ],
-      };
-    }
-
-    // Sub-action B: Public interface contract with reactivity smells & optional event handler audit
-    const inferProps = args.infer_props !== false;
-    const resolveGlobals = args.resolve_globals !== false;
-    const contract = await extractComponentContract(filePath, { inferProps, resolveGlobals });
-
-    // Detect Reactivity Smells directly as first-class diagnostics
-    const reactivitySmells = await detectReactivitySmells({ path: filePath });
-    contract.reactivitySmells = reactivitySmells;
-
-    if (args.audit_events) {
-      const auditResult = await auditEventHandlers({ path: filePath });
-      if (isJson) {
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify(
-                {
-                  ...contract,
-                  eventAudit: auditResult,
-                },
-                null,
-                2
-              ),
+              text: isJson ? JSON.stringify(result, null, 2) : formatSymbolSliceAsText(result),
             },
           ],
         };
       }
 
-      const contractText = formatContractAsText(contract);
-      const auditText = formatEventHandlerAuditAsText(auditResult);
+      // Sub-action B: Public interface contract with reactivity smells & optional event handler audit
+      const inferProps = args.infer_props !== false && args.inferProps !== false;
+      const resolveGlobals = args.resolve_globals !== false && args.resolveGlobals !== false;
+      const auditEvents = Boolean(args.audit_events || args.auditEvents);
+      const contract = await extractComponentContract(filePath, { inferProps, resolveGlobals });
+
+      // Detect Reactivity Smells directly as first-class diagnostics
+      const reactivitySmells = await detectReactivitySmells({ path: filePath });
+      contract.reactivitySmells = reactivitySmells;
+
+      if (auditEvents) {
+        const auditResult = await auditEventHandlers({ path: filePath });
+        if (isJson) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify(
+                  {
+                    ...contract,
+                    eventAudit: auditResult,
+                  },
+                  null,
+                  2
+                ),
+              },
+            ],
+          };
+        }
+
+        const contractText = formatContractAsText(contract);
+        const auditText = formatEventHandlerAuditAsText(auditResult);
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `${contractText}\n\n${auditText}`,
+            },
+          ],
+        };
+      }
+
       return {
         content: [
           {
             type: 'text',
-            text: `${contractText}\n\n${auditText}`,
+            text: isJson ? JSON.stringify(contract, null, 2) : formatContractAsText(contract),
           },
         ],
       };
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return {
+        isError: true,
+        content: [{ type: 'text', text: `Failed to inspect component "${filePath}": ${msg}` }],
+      };
     }
-
-    return {
-      content: [
-        {
-          type: 'text',
-          text: isJson ? JSON.stringify(contract, null, 2) : formatContractAsText(contract),
-        },
-      ],
-    };
   },
 };
 

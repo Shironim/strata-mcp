@@ -178,16 +178,87 @@ export function coerceToolArguments(toolName: string, rawArgs: any): Record<stri
     }
   }
 
-  // 10. Depth normalization
-  if (!args.max_depth && args.depth) {
-    args.max_depth = Number(args.depth);
+  // 10. Canonical Entity Aliasing: framework / framework_hint / frameworkHint
+  if (!args.framework && (args.framework_hint || args.frameworkHint)) {
+    args.framework = String(args.framework_hint || args.frameworkHint);
   }
-  if (!args.depth && args.max_depth) {
-    args.depth = Number(args.max_depth);
+
+  // 11. Canonical Entity Aliasing: scope_path / scope_filter / scopePath / scopeFilter
+  const rawScope = args.scope_path ?? args.scopePath ?? args.scope_filter ?? args.scopeFilter;
+  if (rawScope !== undefined) {
+    if (args.scope_path === undefined) args.scope_path = String(rawScope);
+    if (args.scope_filter === undefined) args.scope_filter = String(rawScope);
+  }
+
+  // 12. Canonical Entity Aliasing: alias_map / aliasMap / alias
+  const rawAliasMap = args.alias_map ?? args.aliasMap ?? args.alias;
+  if (rawAliasMap !== undefined) {
+    const parsedAliasMap = parseAliasMapInput(rawAliasMap);
+    if (parsedAliasMap) {
+      args.alias_map = parsedAliasMap;
+    } else {
+      delete args.alias_map;
+      delete args.aliasMap;
+      delete args.alias;
+    }
+  }
+
+  // 13. Canonical Entity Aliasing: exclude_dirs / excludeDirs & ignore_patterns / ignorePatterns
+  const rawExcludeDirs = args.exclude_dirs ?? args.excludeDirs;
+  if (rawExcludeDirs !== undefined) {
+    args.exclude_dirs = parseStringList(rawExcludeDirs);
+  }
+  const rawIgnorePatterns = args.ignore_patterns ?? args.ignorePatterns;
+  if (rawIgnorePatterns !== undefined) {
+    args.ignore_patterns = parseStringList(rawIgnorePatterns);
+  }
+
+  // 14. Safe numeric parsing & depth normalization
+  const parsedDepth = parseSafePositiveInt(args.depth ?? args.max_depth ?? args.maxDepth);
+  if (parsedDepth !== undefined) {
+    args.depth = parsedDepth;
+    args.max_depth = parsedDepth;
+  } else {
+    delete args.depth;
+    delete args.max_depth;
+  }
+
+  const rawMaxResults = args.max_results ?? args.maxResults;
+  if (rawMaxResults !== undefined) {
+    const parsedMaxResults = parseSafePositiveInt(rawMaxResults);
+    if (parsedMaxResults !== undefined) {
+      args.max_results = parsedMaxResults;
+    } else {
+      delete args.max_results;
+    }
+  }
+
+  if (args.threshold !== undefined) {
+    const parsedThreshold = parseSafeFloat(args.threshold);
+    if (parsedThreshold !== undefined) {
+      args.threshold = parsedThreshold;
+    } else {
+      delete args.threshold;
+    }
   }
 
   return args;
 }
+
+export {
+  parseSafePositiveInt,
+  parseSafeFloat,
+  parseStringList,
+  parseAliasMapInput,
+  normalizeAuditTarget,
+  VALID_AUDIT_TARGETS,
+} from './engine/path-resolver';
+import {
+  parseSafePositiveInt,
+  parseSafeFloat,
+  parseStringList,
+  parseAliasMapInput,
+} from './engine/path-resolver';
 
 export function createMcpServer(): Server {
   const server = new Server(

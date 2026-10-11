@@ -5,7 +5,12 @@ import {
   formatMatchesAsText,
 } from '../engine/search';
 import { dumpSyntaxTree, executeAstGrep } from '../engine/astgrep';
-import { resolveWorkspacePath, resolveProjectRoot } from '../engine/path-resolver';
+import {
+  parseSafePositiveInt,
+  parseStringList,
+  resolveProjectRoot,
+  resolveWorkspacePath,
+} from '../engine/path-resolver';
 import type { McpToolDefinition } from './types';
 
 export const findCodeTool: McpToolDefinition = {
@@ -92,97 +97,102 @@ export const findCodeTool: McpToolDefinition = {
       };
     }
 
-    // Mode B: In-memory test of pattern or rule
-    if (codeSnippet && (args.rule_yaml || pattern)) {
-      const rawMatches = await executeAstGrep({
-        pattern: pattern ? String(pattern) : undefined,
-        rule: args.rule_yaml ? String(args.rule_yaml) : undefined,
-        code: codeSnippet,
-        language: language || 'ts',
-      });
-      const result = {
-        matchCount: rawMatches.length,
-        matches: rawMatches,
-      };
+    try {
+      // Mode B: In-memory test of pattern or rule
+      if (codeSnippet && (args.rule_yaml || pattern)) {
+        const rawMatches = await executeAstGrep({
+          pattern: pattern ? String(pattern) : undefined,
+          rule: args.rule_yaml ? String(args.rule_yaml) : undefined,
+          code: codeSnippet,
+          language: language || 'ts',
+        });
+        const result = {
+          matchCount: rawMatches.length,
+          matches: rawMatches,
+        };
+        return {
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+        };
+      }
+
+      // Resolve target directory or file with ergonomic fallback to active root
+      const targetPath = rawTargetPath ? resolveWorkspacePath(rawTargetPath) : resolveProjectRoot();
+
+      const excludeDirs = parseStringList(args.exclude_dirs ?? args.excludeDirs);
+      const maxResults = parseSafePositiveInt(args.max_results ?? args.maxResults);
+
+      // Mode C: Component usage search
+      const componentName = args.component || args.component_name || args.componentName;
+      if (componentName) {
+        const matches = await findComponentUsage({
+          componentName: String(componentName),
+          targetPath,
+          scope: args.scope as any,
+          maxResults,
+          excludeDirs,
+        });
+        return {
+          content: [
+            {
+              type: 'text',
+              text: isJson ? JSON.stringify(matches, null, 2) : formatMatchesAsText(matches),
+            },
+          ],
+        };
+      }
+
+      // Mode D: YAML rule search
+      if (args.rule_yaml) {
+        const matches = await findCodeByRule({
+          rule: String(args.rule_yaml),
+          targetPath,
+          maxResults,
+          excludeDirs,
+        });
+        return {
+          content: [
+            {
+              type: 'text',
+              text: isJson ? JSON.stringify(matches, null, 2) : formatMatchesAsText(matches),
+            },
+          ],
+        };
+      }
+
+      // Mode E: Pattern search
+      if (pattern) {
+        const matches = await findCode({
+          pattern: String(pattern),
+          targetPath,
+          language,
+          maxResults,
+          excludeDirs,
+        });
+        return {
+          content: [
+            {
+              type: 'text',
+              text: isJson ? JSON.stringify(matches, null, 2) : formatMatchesAsText(matches),
+            },
+          ],
+        };
+      }
+
       return {
-        content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-      };
-    }
-
-    // Resolve target directory or file with ergonomic fallback to active root
-    const targetPath = rawTargetPath ? resolveWorkspacePath(rawTargetPath) : resolveProjectRoot();
-
-    const excludeDirs = Array.isArray(args.exclude_dirs)
-      ? args.exclude_dirs.map(String)
-      : typeof args.exclude_dirs === 'string'
-        ? (args.exclude_dirs as string).split(',').map((s) => s.trim()).filter(Boolean)
-        : undefined;
-
-    // Mode C: Component usage search
-    const componentName = args.component || args.component_name;
-    if (componentName) {
-      const matches = await findComponentUsage({
-        componentName: String(componentName),
-        targetPath,
-        scope: args.scope as any,
-        maxResults: args.max_results ? Number(args.max_results) : undefined,
-        excludeDirs,
-      });
-      return {
+        isError: true,
         content: [
           {
             type: 'text',
-            text: isJson ? JSON.stringify(matches, null, 2) : formatMatchesAsText(matches),
+            text: "Please provide 'pattern', 'component', 'rule_yaml', or 'code' to search or test.",
           },
         ],
       };
-    }
-
-    // Mode D: YAML rule search
-    if (args.rule_yaml) {
-      const matches = await findCodeByRule({
-        rule: String(args.rule_yaml),
-        targetPath,
-        maxResults: args.max_results ? Number(args.max_results) : undefined,
-        excludeDirs,
-      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
       return {
-        content: [
-          {
-            type: 'text',
-            text: isJson ? JSON.stringify(matches, null, 2) : formatMatchesAsText(matches),
-          },
-        ],
+        isError: true,
+        content: [{ type: 'text', text: `Failed to execute code search: ${msg}` }],
       };
     }
-
-    // Mode E: Pattern search
-    if (pattern) {
-      const matches = await findCode({
-        pattern: String(pattern),
-        targetPath,
-        language,
-        maxResults: args.max_results ? Number(args.max_results) : undefined,
-        excludeDirs,
-      });
-      return {
-        content: [
-          {
-            type: 'text',
-            text: isJson ? JSON.stringify(matches, null, 2) : formatMatchesAsText(matches),
-          },
-        ],
-      };
-    }
-
-    return {
-      isError: true,
-      content: [
-        {
-          type: 'text',
-          text: "Please provide 'pattern', 'component', 'rule_yaml', or 'code' to search or test.",
-        },
-      ],
-    };
   },
 };
