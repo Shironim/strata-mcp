@@ -142,7 +142,7 @@ describe('Precision Symbol Slicer Engine', () => {
     const tsFile = join(tempDir, 'LargeFunction.ts');
 
     // Generate an 80-line function
-    const bodyLines = Array.from({ length: 78 }, (_, i) => `  const x_${i} = ${i};`);
+    const bodyLines = Array.from({ length: 77 }, (_, i) => `  const x_${i} = ${i};`);
     const content = [
       'export function hugeFunction() {',
       ...bodyLines,
