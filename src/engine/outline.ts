@@ -25,6 +25,13 @@ interface TsConfigPaths {
 const tsConfigCache = new Map<string, TsConfigPaths | null>();
 
 /**
+ * Clears the cached tsconfig paths mapping.
+ */
+export function clearTsConfigCache(): void {
+  tsConfigCache.clear();
+}
+
+/**
  * Loads and caches compilerOptions.paths from tsconfig.json or jsconfig.json.
  */
 function loadTsConfigPaths(workspaceRoot: string): TsConfigPaths | null {
@@ -55,7 +62,6 @@ function loadTsConfigPaths(workspaceRoot: string): TsConfigPaths | null {
     }
   }
 
-  tsConfigCache.set(workspaceRoot, null);
   return null;
 }
 

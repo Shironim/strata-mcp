@@ -1,12 +1,16 @@
-import { describe, expect, it, beforeAll, afterAll } from 'bun:test';
+import { describe, expect, it, beforeAll, afterAll, beforeEach } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { extractComponentOutline, formatOutlineAsText } from '../../src/engine/outline';
+import { clearTsConfigCache, extractComponentOutline, formatOutlineAsText } from '../../src/engine/outline';
 
 describe('extractComponentOutline', () => {
   let tmpDir: string;
   let samplePath: string;
+
+  beforeEach(() => {
+    clearTsConfigCache();
+  });
 
   beforeAll(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'strata-outline-'));
