@@ -135,4 +135,42 @@ describe('Precision Symbol Slicer Engine', () => {
     // Clean up
     await fs.rm(tempDir, { recursive: true, force: true });
   });
+
+  it('truncates verbatim code dump when symbol exceeds 50 lines to prevent context bloat', async () => {
+    const tempDir = join(tmpdir(), `strata-slicer-trunc-test-${Date.now()}`);
+    await fs.mkdir(tempDir, { recursive: true });
+    const tsFile = join(tempDir, 'LargeFunction.ts');
+
+    // Generate an 80-line function
+    const bodyLines = Array.from({ length: 78 }, (_, i) => `  const x_${i} = ${i};`);
+    const content = [
+      'export function hugeFunction() {',
+      ...bodyLines,
+      '  return 42;',
+      '}',
+    ].join('\n');
+
+    await fs.writeFile(tsFile, content, 'utf8');
+
+    const result = await sliceSymbol({
+      path: tsFile,
+      symbolName: 'hugeFunction',
+      includeBlastRadius: false,
+    });
+
+    expect(result).not.toBeNull();
+    expect(result!.isTruncated).toBe(true);
+    expect(result!.endLine - result!.startLine + 1).toBe(80);
+    expect(result!.code).toContain('TRUNCATED:');
+    expect(result!.code).toContain('Use view_file');
+
+    const formatted = formatSymbolSliceAsText(result!);
+    expect(formatted).toContain('Context Guard Notice');
+    expect(formatted).toContain('exceeds 50-line dump threshold');
+    expect(formatted).toContain('view_file');
+
+    // Clean up
+    await fs.rm(tempDir, { recursive: true, force: true });
+  });
 });
+

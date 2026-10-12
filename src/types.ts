@@ -291,6 +291,7 @@ export interface ComponentContract {
   reactivitySmells?: ReactivitySmell[];
   boundaryContracts?: BoundaryContract[];
   formContracts?: FormContract[];
+  symbolOutline?: ComponentSymbolOutline;
 }
 
 export interface ContractOptions {
@@ -529,7 +530,60 @@ export type SymbolKind =
   | 'interface'
   | 'type'
   | 'variable'
+  | 'computed'
+  | 'watcher'
+  | 'method'
+  | 'composable'
   | 'unknown';
+
+export interface ComplexitySmell {
+  isHighComplexity: boolean;
+  threshold: number;
+  totalLines: number;
+  warning: string;
+}
+
+export interface ResolvedCalleeReference {
+  symbol: string;
+  sourceModule?: string;
+  targetFilePath?: string;
+  targetRange?: {
+    startLine: number;
+    endLine: number;
+    lineCount: number;
+  };
+  isResolved: boolean;
+}
+
+export interface FunctionOutlineItem {
+  name: string;
+  kind: 'function' | 'arrow-function' | 'method' | 'computed' | 'watcher' | 'composable';
+  startLine: number;
+  endLine: number;
+  lineCount: number;
+  signature?: string;
+  isExported: boolean;
+  internalCalls: string[];
+  resolvedCalls?: ResolvedCalleeReference[];
+  complexitySmell?: ComplexitySmell;
+}
+
+export interface ComponentSymbolOutline {
+  filePath: string;
+  framework: string;
+  totalFunctions: number;
+  highComplexityCount: number;
+  functions: FunctionOutlineItem[];
+  _meta?: EngineMetadata;
+}
+
+export interface ExtractOutlineOptions {
+  path: string;
+  maxFunctionLines?: number;
+  resolveCalls?: boolean;
+  workspaceRoot?: string;
+  outputFormat?: 'text' | 'json';
+}
 
 export interface SymbolSliceResult {
   symbolName: string;
@@ -539,12 +593,15 @@ export interface SymbolSliceResult {
   endLine: number;
   code: string;
   signature?: string;
+  complexitySmell?: ComplexitySmell;
   blastRadius?: {
     totalConsumers: number;
     callers: Array<{ filePath: string; line?: number }>;
     coveringTests?: string[];
     internalCalls?: string[];
+    resolvedCalls?: ResolvedCalleeReference[];
   };
+  isTruncated?: boolean;
   _meta?: EngineMetadata;
 }
 
@@ -553,6 +610,7 @@ export interface SliceSymbolOptions {
   symbolName: string;
   workspaceRoot?: string;
   includeBlastRadius?: boolean;
+  maxDisplayLines?: number;
   outputFormat?: 'text' | 'json';
 }
 

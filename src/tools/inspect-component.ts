@@ -7,6 +7,7 @@ import {
   formatReactivitySmellsAsText,
 } from '../engine/reactivity';
 import { extractComponentContract, formatContractAsText } from '../engine/contract';
+import { extractComponentOutline, formatOutlineAsText } from '../engine/outline';
 import { resolveWorkspacePath } from '../engine/path-resolver';
 import type { McpToolDefinition } from './types';
 
@@ -40,6 +41,16 @@ export const inspectComponentTool: McpToolDefinition = {
         type: 'boolean',
         description:
           'When true (default), identifies un-imported global symbols, Ziggy route() helpers, and auto-imported composables',
+      },
+      outline: {
+        type: 'boolean',
+        description:
+          'When true, extracts full symbol outline of all functions, methods, and computed properties with exact line ranges, cross-file callee targets, and complexity smells (alias: include_outline)',
+      },
+      max_function_lines: {
+        type: 'number',
+        description:
+          'Line count threshold for high-complexity warning (default: 300)',
       },
       format: {
         type: 'string',
@@ -93,8 +104,25 @@ export const inspectComponentTool: McpToolDefinition = {
 
     const isJson = args.output_format === 'json' || args.format === 'json';
     const symbolName = args.symbol || args.symbol_name;
+    const isOutline = Boolean(args.outline || args.include_outline || args.outline_symbols);
 
     try {
+      // Sub-action A0: Component Symbol Outline with line ranges & callee mappings
+      if (isOutline) {
+        const outlineResult = await extractComponentOutline(filePath, {
+          path: filePath,
+          maxFunctionLines: args.max_function_lines ? Number(args.max_function_lines) : undefined,
+        });
+        return {
+          content: [
+            {
+              type: 'text',
+              text: isJson ? JSON.stringify(outlineResult, null, 2) : formatOutlineAsText(outlineResult),
+            },
+          ],
+        };
+      }
+
       // Sub-action A: Symbol slicing
       if (symbolName) {
         const result = await sliceSymbol({

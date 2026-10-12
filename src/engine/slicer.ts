@@ -131,24 +131,32 @@ export function extractSignature(codeSnippet: string): string | undefined {
 
 /**
  * Finds internal calls or identifiers used within a code slice.
+ * Supports direct calls (fn()) and namespace member calls (ns.fn()), capped at maxCalls (default: 30).
  */
-export function extractInternalCalls(codeSnippet: string, selfSymbol: string): string[] {
-  const callRegex = /\b([A-Za-z0-9_$]+)\s*\(/g;
+export function extractInternalCalls(codeSnippet: string, selfSymbol: string, maxCalls: number = 30): string[] {
+  const callRegex = /(?:([A-Za-z0-9_$]+)\.)?([A-Za-z0-9_$]+)\s*\(/g;
   const calls = new Set<string>();
   const keywords = new Set([
     'if', 'for', 'while', 'switch', 'catch', 'import', 'export', 'return',
     'function', 'require', 'typeof', 'instanceof', 'void', 'delete', selfSymbol
   ]);
+  const ignoredObjects = new Set([
+    'this', 'console', 'Math', 'JSON', 'Object', 'Array', 'Promise', 'Reflect', 'Symbol'
+  ]);
 
   let match: RegExpExecArray | null;
   while ((match = callRegex.exec(codeSnippet)) !== null) {
-    const fn = match[1];
-    if (!keywords.has(fn) && fn.length > 1) {
+    const obj = match[1];
+    const fn = match[2];
+
+    if (obj && !ignoredObjects.has(obj) && fn.length > 1) {
+      calls.add(`${obj}.${fn}`);
+    } else if (!keywords.has(fn) && fn.length > 1) {
       calls.add(fn);
     }
   }
 
-  return Array.from(calls).slice(0, 10);
+  return Array.from(calls).slice(0, maxCalls);
 }
 
 /**
@@ -281,15 +289,44 @@ export async function sliceSymbol(options: SliceSymbolOptions): Promise<SymbolSl
       }
     }
 
+    const lineCount = endLine - startLine + 1;
+    const maxDisplayLines = options.maxDisplayLines ?? 50;
+    let finalCode = formattedCode;
+    let isTruncated = false;
+
+    if (lineCount > maxDisplayLines) {
+      isTruncated = true;
+      const head = slicedLines.slice(0, 10).map((line, idx) => `${startLine + idx}: ${line}`);
+      const tail = slicedLines.slice(-5).map((line, idx) => `${endLine - 5 + idx + 1}: ${line}`);
+      finalCode = [
+        ...head,
+        `  // ... [TRUNCATED: ${lineCount - 15} lines omitted to prevent context bloat] ...`,
+        `  // Use view_file(StartLine: ${startLine}, EndLine: ${endLine}) to read targeted lines`,
+        ...tail,
+      ].join('\n');
+    }
+
+    const complexitySmell =
+      lineCount > 300
+        ? {
+            isHighComplexity: true,
+            threshold: 300,
+            totalLines: lineCount,
+            warning: `Symbol '${options.symbolName}' spans ${lineCount} lines (exceeds 300-line threshold). Candidate for decomposition/refactoring.`,
+          }
+        : undefined;
+
     return {
       symbolName: options.symbolName,
       kind,
       filePath: targetFile,
       startLine,
       endLine,
-      code: formattedCode,
+      code: finalCode,
       signature,
+      complexitySmell,
       blastRadius,
+      isTruncated,
     };
   }
 
@@ -304,8 +341,18 @@ export function formatSymbolSliceAsText(result: SymbolSliceResult): string {
   lines.push(`### Symbol: \`${result.symbolName}\` (${result.kind})`);
   lines.push(`**File:** \`${result.filePath}:${result.startLine}-${result.endLine}\``);
 
+  if (result.complexitySmell) {
+    lines.push(`\n⚠️ **High-Complexity Smell (${result.complexitySmell.totalLines} lines):** ${result.complexitySmell.warning}`);
+  }
+
   if (result.signature) {
     lines.push(`**Signature:** \`${result.signature}\``);
+  }
+
+  if (result.isTruncated) {
+    const lineCount = result.endLine - result.startLine + 1;
+    lines.push(`\n⚠️ **Context Guard Notice:** Symbol spans ${lineCount} lines (exceeds 50-line dump threshold). Truncated to preview.`);
+    lines.push(`> [!TIP] Gunakan \`view_file\` dengan parameter \`StartLine: ${result.startLine}\` dan \`EndLine: ${result.endLine}\` untuk membaca bagian yang diperlukan secara presisi tanpa context rot.\n`);
   }
 
   lines.push('\n```typescript');

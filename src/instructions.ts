@@ -20,11 +20,11 @@ Always operate in two distinct phases:
 2. **Phase 2: Post-Flight Verification Gate (Batch-First, Once After All Edits Complete)**
    - **Batch-First Editing**: Complete the ENTIRE planned sequence of code modifications on the target file/batch first.
    - **No Micro-Verification Looping**: Do NOT run verification between small, incremental edits.
-   - Run \`inspect_component(path: "...", audit_events: true)\` exactly **ONCE** after all edits are finished to verify:
+   - Run \`inspect_component(path: "...", audit_events: true)\` after edits for targeted diagnostics:
      - **Broken Handlers**: Template events (e.g., \`@click="handleSubmit"\`) pointing to undeclared script functions.
      - **Dead Handlers**: Obsolete methods left behind after refactoring.
      - **Reactivity Smells**: Vue 3 props destructuring without \`toRefs\`, direct prop mutations, or React inline allocation traps.
-   - *Advantage*: Delivers instant semantic verification (< 50ms, < 20 lines) without noisy, token-heavy terminal builds or linter logs.
+   - *Verification scope*: These diagnostics supplement compiler, lint, and behavioral tests; they do not prove runtime correctness. Latency and output size depend on the component.
 
 ## Core Tool Quick Selector
 
@@ -36,7 +36,7 @@ Always operate in two distinct phases:
 | **Downward Component Hierarchy** | \`get_component_tree\` | \`path\` (or \`entry_path\` / \`route\`), \`direction: "downward"\` | Complete rendered child tree & props drilling detection. |
 | **Upward Blast Radius** | \`get_component_tree\` | \`path: "...", direction: "upward"\` | All parent components and pages impacted by modifying a leaf file. |
 | **Route Map & Topology** | \`get_routes\` | \`path?: "...", framework?: "next-app"|"nuxt"|"astro"|"inertia"\` | Instant file-based routing topology, layouts, dynamic parameters, and page handlers. |
-| **Outbound API Contracts** | \`get_api_contracts\` | \`path?: "...", scope_path?: "..."\` | Maps API endpoints, HTTP methods, network boundaries, and \`backendTargetHint\` (universal route-to-controller resolution). |
+| **Outbound API Contracts** | \`get_api_contracts\` | \`path?: "...", scope_path?: "..."\` | Maps API endpoints, HTTP methods, network boundaries, and \`backendTargetHint\` (inferred backend symbol candidates, not verified route-to-controller links). |
 | **Trace State & Composables** | \`trace_state\` | \`identifier: "...", depth: 1|2+, direction?: "consumers"|"dependencies"|"both"\` | Map consuming components for Pinia/Zustand stores, contexts, composables. |
 | **Health, Duplication & APIs** | \`audit_frontend\` | \`target?: "all"|"routes"|"dead-components"|"dead-state"|"similar-templates"|"design-tokens"|"bundle-health"|"api-contracts"|"archetype-drift"\` | Diagnostic manifest of dead components/state, duplicated templates, design token drift, hydration weight, archetype drift, and routes/APIs. |
 | **Prescriptive Patch Plan** | \`generate_patch_plan\` | \`path: "...", refactor_type: "rename_prop"|"remove_prop"|"rename_event"|"rename_model"|"rename_slot", old_name: "...", new_name?: "..."\` | Prescriptive AST patch recommendations (file, line, column, replacement snippet) across all consumers. |
@@ -46,9 +46,9 @@ Always operate in two distinct phases:
 
 Strata maintains a high-speed SQLite dependency graph at \`.strata/graph.db\` with native background realtime watching:
 
-1. **Reactive Hot Cache Daemon**: Integrated native filesystem watcher (\`node:fs.watch\`) continuously updates the SQLite graph in the background (<100ms debounce), delivering instant hot cache hits (<1ms) without disk crawl overhead.
-2. **Recursive Blast Radius Traversal**: When refactoring shared UI or utilities, run \`get_component_tree(direction: "upward")\`. Strata executes recursive Common Table Expressions (CTE) over the \`edges\` table, instantly uncovering every consumer without touching disk.
-3. **Prescriptive Code Migrations**: Combine blast radius discovery with \`generate_patch_plan\` to obtain direct, deterministic AST patches across all affected consumers.
+1. **Background Delta Sync**: The filesystem watcher (\`node:fs.watch\`) debounces source changes (100ms by default) and runs the same delta sync as the CLI. Each sync scans file metadata and parses changed files; debounce time is not a latency guarantee.
+2. **Upward Blast Radius Traversal**: \`get_component_tree(direction: "upward")\` reads workspace source and resolves consumers in memory. SQL blast-radius helpers exist for database queries but are not the MCP tree execution path.
+3. **Prescriptive Code Migrations**: Combine blast radius discovery with \`generate_patch_plan\` to obtain AST patch recommendations within the traversed consumers. Review patches and run tests before applying a refactor.
 4. **Multi-Hop State Impact**: When altering a store or composable, use \`trace_state\` with \`depth: 2+\` to follow chained composable consumption across the graph.
 5. **Direct SQLite Analytics (Advanced)**: The SQLite database at \`.strata/graph.db\` contains 5 indexed tables (\`files\`, \`components\`, \`edges\`, \`state_deps\`, \`routes\`). You can directly run SQL queries against it to extract custom architectural metrics (e.g., detecting "God Components" with high fan-out, critical foundation components with high fan-in, or finding orphan files).
 `.trim();
