@@ -1,5 +1,7 @@
 import { promises as fs } from 'node:fs';
-import { extname, join, relative } from 'node:path';
+import ignore, { type Ignore } from 'ignore';
+import { findProjectRoot } from './path-resolver';
+import { extname, join, relative, resolve, dirname, sep } from 'node:path';
 
 export const SUPPORTED_SCRIPT_EXTENSIONS = new Set(['.ts', '.js', '.tsx', '.jsx', '.mjs', '.cjs']);
 
@@ -55,6 +57,8 @@ export const IGNORED_DIRS = new Set([
 
   // AI & Indexer Caches
   '.codegraph',
+  '.strata',
+  '.vue-ast',
   '.gemini',
   '.cursor',
   '.continue',
@@ -63,34 +67,27 @@ export const IGNORED_DIRS = new Set([
 export interface CollectOptions {
   excludeDirs?: string[];
   respectIgnoreFiles?: boolean;
+  /** Workspace boundary for scoped scans, including nested packages. */
+  ignoreRoot?: string;
 }
 
 /**
  * Loads ignore rules from .strataignore or .gitignore in the target directory.
  */
-export async function loadIgnorePatterns(dirPath: string): Promise<Set<string>> {
-  const patterns = new Set<string>();
-  const candidateFiles = ['.strataignore', '.gitignore'];
-
-  for (const file of candidateFiles) {
-    const ignoreFilePath = join(dirPath, file);
+async function loadIgnoreRules(dirPath: string): Promise<string[]> {
+  const rules: string[] = [];
+  for (const file of ['.gitignore', '.strataignore']) {
     try {
-      const content = await fs.readFile(ignoreFilePath, 'utf8');
-      const lines = content.split('\n');
-      for (let line of lines) {
-        line = line.trim();
-        if (!line || line.startsWith('#')) continue;
-        const clean = line.replace(/^\/+|\/+$/g, '').replace(/\\/g, '/');
-        if (clean) {
-          patterns.add(clean);
-        }
-      }
-    } catch {
-      // Ignore if file doesn't exist or is not readable
+      rules.push(...(await fs.readFile(join(dirPath, file), 'utf8')).split('\n'));
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
     }
   }
+  return rules;
+}
 
-  return patterns;
+export async function loadIgnorePatterns(dirPath: string): Promise<Set<string>> {
+  return new Set((await loadIgnoreRules(dirPath)).filter(line => line && !line.startsWith('#')));
 }
 
 /**
@@ -100,10 +97,8 @@ export async function collectFiles(
   dirPath: string,
   options?: CollectOptions
 ): Promise<string[]> {
+  dirPath = resolve(dirPath);
   const stat = await fs.stat(dirPath);
-  if (!stat.isDirectory()) {
-    return [dirPath];
-  }
 
   const results: string[] = [];
   const customExcludeSet = new Set(
@@ -112,37 +107,59 @@ export async function collectFiles(
       .filter(Boolean)
   );
 
-  let fileIgnoreSet = new Set<string>();
-  if (options?.respectIgnoreFiles !== false) {
-    fileIgnoreSet = await loadIgnorePatterns(dirPath);
-  }
-
-  function isIgnored(entryName: string, relativePath: string): boolean {
+  function isExcluded(entryName: string, relativePath: string): boolean {
     if (IGNORED_DIRS.has(entryName)) return true;
-    if (customExcludeSet.has(entryName) || customExcludeSet.has(relativePath)) return true;
-    if (fileIgnoreSet.has(entryName) || fileIgnoreSet.has(relativePath)) return true;
-
-    // Check if relative path starts with any excluded prefix
     for (const pattern of customExcludeSet) {
-      if (relativePath === pattern || relativePath.startsWith(`${pattern}/`)) return true;
+      if (entryName === pattern || relativePath === pattern || relativePath.startsWith(`${pattern}/`)) return true;
     }
-    for (const pattern of fileIgnoreSet) {
-      if (relativePath === pattern || relativePath.startsWith(`${pattern}/`)) return true;
-    }
-
     return false;
   }
 
-  async function walk(currentDir: string) {
+  type IgnoreContext = { base: string; matcher: Ignore };
+  function isIgnored(fullPath: string, directory: boolean, contexts: IgnoreContext[]): boolean {
+    let ignored = false;
+    for (const { base, matcher } of contexts) {
+      const path = relative(base, fullPath).replace(/\\/g, '/') + (directory ? '/' : '');
+      const result = matcher.test(path);
+      if (result.ignored) ignored = true;
+      else if (result.unignored) ignored = false;
+    }
+    return ignored;
+  }
+
+  const inherited: IgnoreContext[] = [];
+  if (options?.respectIgnoreFiles !== false) {
+    const root = options?.ignoreRoot ? resolve(options.ignoreRoot) : findProjectRoot(dirPath);
+    const ancestors: string[] = [];
+    let parent = dirname(dirPath);
+    while (dirPath !== root && (parent === root || parent.startsWith(root + sep))) {
+      ancestors.unshift(parent);
+      if (parent === root) break;
+      parent = dirname(parent);
+    }
+    for (const base of ancestors) {
+      if (inherited.length && isIgnored(base, true, inherited)) return [];
+      inherited.push({ base, matcher: ignore().add(await loadIgnoreRules(base)) });
+    }
+    if (inherited.length && isIgnored(dirPath, stat.isDirectory(), inherited)) return [];
+  }
+  if (!stat.isDirectory()) return [dirPath];
+
+  async function walk(currentDir: string, inherited: IgnoreContext[] = []) {
+    const contexts = [...inherited];
+    if (options?.respectIgnoreFiles !== false) {
+      contexts.push({ base: currentDir, matcher: ignore().add(await loadIgnoreRules(currentDir)) });
+    }
     const entries = await fs.readdir(currentDir, { withFileTypes: true });
     for (const entry of entries) {
       const fullPath = join(currentDir, entry.name);
       const relPath = relative(dirPath, fullPath).replace(/\\/g, '/');
 
-      if (isIgnored(entry.name, relPath)) continue;
+      if (isExcluded(entry.name, relPath)) continue;
+      if (isIgnored(fullPath, entry.isDirectory(), contexts)) continue;
 
       if (entry.isDirectory()) {
-        await walk(fullPath);
+        await walk(fullPath, contexts);
       } else if (entry.isFile()) {
         const ext = extname(entry.name).toLowerCase();
         if (ext === '.vue' || ext === '.astro' || SUPPORTED_SCRIPT_EXTENSIONS.has(ext)) {
@@ -152,6 +169,6 @@ export async function collectFiles(
     }
   }
 
-  await walk(dirPath);
+  await walk(dirPath, inherited);
   return results;
 }

@@ -1,6 +1,12 @@
 import { promises as fs } from 'node:fs';
 import { resolve, relative, basename } from 'node:path';
 import { collectFiles } from './collector';
+import ts from 'typescript';
+import { createDocumentAdapter } from '../adapters/factory';
+import { remapPosition } from './remapper';
+import { parse as parseDom, NodeTypes } from '@vue/compiler-dom';
+import { walkVueDom } from './graph/ast-helpers';
+import { extractTemplateExpressions } from './template';
 import { findProjectRoot } from './path-resolver';
 import { STRATA_VERSION } from '../version';
 import type {
@@ -198,211 +204,125 @@ export function normalizeEndpointUrl(rawUrl: string): string {
   return cleaned;
 }
 
-/**
- * Extracts payload parameter names from body/data options object literal string.
- */
-function extractPayloadParams(optionsStr?: string): string[] | undefined {
-  if (!optionsStr) return undefined;
+function objectProperty(object: ts.Expression | undefined, name: string): ts.Expression | undefined {
+  if (!object || !ts.isObjectLiteralExpression(object)) return undefined;
+  const property = object.properties.find(p => ts.isPropertyAssignment(p) &&
+    (ts.isIdentifier(p.name) || ts.isStringLiteral(p.name)) && p.name.text === name);
+  return property && ts.isPropertyAssignment(property) ? property.initializer : undefined;
+}
 
-  const bodyMatch = optionsStr.match(/(?:body|data)\s*:\s*(?:JSON\.stringify\s*\(\s*)?\{([^}]+)\}/);
-  if (bodyMatch && bodyMatch[1]) {
-    return bodyMatch[1]
-      .split(',')
-      .map((item) => item.split(':')[0].trim())
-      .filter((param) => /^[a-zA-Z0-9_$]+$/.test(param));
+function literalEndpoint(node: ts.Expression | undefined, sf: ts.SourceFile): string | undefined {
+  if (!node) return undefined;
+  if (ts.isStringLiteralLike(node) || ts.isTemplateExpression(node)) {
+    return normalizeEndpointUrl(node.getText(sf));
   }
-
+  if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken && ts.isStringLiteralLike(node.left)) {
+    return normalizeEndpointUrl(node.getText(sf));
+  }
   return undefined;
 }
 
-/**
- * Extracts HTTP method from request options object literal string.
- */
-function extractMethodFromOptions(optionsStr?: string): ApiMethod {
-  if (!optionsStr) return 'GET';
-
-  const methodMatch = optionsStr.match(/method\s*:\s*['"`](GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)['"`]/i);
-  if (methodMatch && methodMatch[1]) {
-    return methodMatch[1].toUpperCase() as ApiMethod;
-  }
-
-  return 'GET';
-}
-
-/**
- * Scans a source code string and detects all outbound API requests.
- */
+/** Extracts syntactic API calls; backend symbols remain inferred candidates. */
 export function extractApiContractsFromCode(code: string, filePath: string): ApiContractItem[] {
   const items: ApiContractItem[] = [];
-  const lines = code.split('\n');
-
-  // 1. axios.<method>(url, data?, config?)
-  const AXIOS_METHOD_REGEX =
-    /\baxios\.(get|post|put|patch|delete|head|options)\s*(?:<[^>]+>)?\s*\(\s*(`[^`]+`|'[^']+'|"[^"]+")(?:\s*\+\s*([a-zA-Z0-9_$.]+))?(?:\s*,\s*([^)]*))?\)/gi;
-
-  // 2. $fetch(url, options?) or useFetch(url, options?)
-  const NUXT_FETCH_REGEX =
-    /\b(\$fetch|useFetch)\s*(?:<[^>]+>)?\s*\(\s*(`[^`]+`|'[^']+'|"[^"]+")(?:\s*\+\s*([a-zA-Z0-9_$.]+))?(?:\s*,\s*(\{[\s\S]*?\}))?\)/gi;
-
-  // 3. fetch(url, options?)
-  const NATIVE_FETCH_REGEX =
-    /\bfetch\s*\(\s*(`[^`]+`|'[^']+'|"[^"]+")(?:\s*\+\s*([a-zA-Z0-9_$.]+))?(?:\s*,\s*(\{[\s\S]*?\}))?\s*\)/gi;
-
-  // 4. useQuery({ queryKey: [...], queryFn: ... })
-  const USE_QUERY_REGEX =
-    /\buseQuery\s*\(\s*\{[\s\S]*?queryKey\s*:\s*\[([^\]]+)\]/gi;
-
-  // 5. SWR: useSWR(url, fetcher?)
-  const SWR_REGEX =
-    /\buseSWR(?:<[^>]+>)?\s*\(\s*(`[^`]+`|'[^']+'|"[^"]+")/gi;
-
-  // 6. Inertia router calls: router.post(url, data)
-  const INERTIA_ROUTER_REGEX =
-    /\brouter\.(post|put|patch|delete|get|visit)\s*\(\s*(?:route\s*\(\s*['"]([^'"]+)['"]\s*\)|(`[^`]+`|'[^']+'|"[^"]+"))/gi;
-
-  // Helper to compute line and column from regex index
-  function getLineCol(index: number): { line: number; column: number } {
-    let currentLen = 0;
-    for (let i = 0; i < lines.length; i++) {
-      const lineLen = lines[i].length + 1; // +1 for newline
-      if (currentLen + lineLen > index) {
-        return { line: i + 1, column: index - currentLen + 1 };
+  const adapter = createDocumentAdapter(filePath, code);
+  const blocks = adapter.getScriptBlocks();
+  const template = adapter.getTemplateBlock();
+  if (template && adapter.type === 'vue') {
+    for (const expression of extractTemplateExpressions(template.content)) {
+      const start = remapPosition(expression.start.line, expression.start.column, template.loc.start);
+      for (const item of extractApiContractsFromCode(expression.content, 'expression.ts')) {
+        items.push({ ...item, file: filePath, ...remapPosition(item.line, item.column, { ...start, offset: 0 }) });
       }
-      currentLen += lineLen;
-    }
-    return { line: 1, column: 1 };
-  }
-
-  // Scan Axios
-  let match: RegExpExecArray | null;
-  while ((match = AXIOS_METHOD_REGEX.exec(code)) !== null) {
-    const rawMethod = match[1].toUpperCase() as ApiMethod;
-    const rawUrl = match[2];
-    const concatVar = match[3];
-    const dataOrOptions = match[4];
-    const loc = getLineCol(match.index);
-    const fullUrl = concatVar ? `${rawUrl} + ${concatVar}` : rawUrl;
-    const endpoint = normalizeEndpointUrl(fullUrl);
-
-    items.push({
-      file: filePath,
-      line: loc.line,
-      column: loc.column,
-      endpoint,
-      method: rawMethod,
-      clientKind: 'axios',
-      payloadParams: extractPayloadParams(dataOrOptions),
-      backendTargetHint: synthesizeBackendTargetHint(rawMethod, endpoint),
-    });
-  }
-
-  // Scan Nuxt / VueUse $fetch and useFetch
-  while ((match = NUXT_FETCH_REGEX.exec(code)) !== null) {
-    const clientKind = match[1] === '$fetch' ? '$fetch' : 'useFetch';
-    const rawUrl = match[2];
-    const concatVar = match[3];
-    const optionsStr = match[4];
-    const loc = getLineCol(match.index);
-    const fullUrl = concatVar ? `${rawUrl} + ${concatVar}` : rawUrl;
-    const endpoint = normalizeEndpointUrl(fullUrl);
-    const method = extractMethodFromOptions(optionsStr);
-
-    items.push({
-      file: filePath,
-      line: loc.line,
-      column: loc.column,
-      endpoint,
-      method,
-      clientKind,
-      payloadParams: extractPayloadParams(optionsStr),
-      backendTargetHint: synthesizeBackendTargetHint(method, endpoint),
-    });
-  }
-
-  // Scan native fetch
-  while ((match = NATIVE_FETCH_REGEX.exec(code)) !== null) {
-    // Avoid double counting if it matched $fetch / useFetch
-    const preText = code.slice(Math.max(0, match.index - 5), match.index);
-    if (preText.endsWith('$') || preText.endsWith('use')) {
-      continue;
-    }
-
-    const rawUrl = match[1];
-    const concatVar = match[2];
-    const optionsStr = match[3];
-    const loc = getLineCol(match.index);
-    const fullUrl = concatVar ? `${rawUrl} + ${concatVar}` : rawUrl;
-    const endpoint = normalizeEndpointUrl(fullUrl);
-    const method = extractMethodFromOptions(optionsStr);
-
-    items.push({
-      file: filePath,
-      line: loc.line,
-      column: loc.column,
-      endpoint,
-      method,
-      clientKind: 'fetch',
-      payloadParams: extractPayloadParams(optionsStr),
-      backendTargetHint: synthesizeBackendTargetHint(method, endpoint),
-    });
-  }
-
-  // Scan TanStack useQuery
-  while ((match = USE_QUERY_REGEX.exec(code)) !== null) {
-    const keyContent = match[1];
-    const urlMatch = keyContent.match(/['"`]([^'"`]+)['"`]/);
-    if (urlMatch && (urlMatch[1].startsWith('/') || urlMatch[1].startsWith('http') || urlMatch[1].includes('api'))) {
-      const loc = getLineCol(match.index);
-      const endpoint = normalizeEndpointUrl(urlMatch[1]);
-      items.push({
-        file: filePath,
-        line: loc.line,
-        column: loc.column,
-        endpoint,
-        method: 'GET',
-        clientKind: 'useQuery',
-        backendTargetHint: synthesizeBackendTargetHint('GET', endpoint),
-      });
     }
   }
-
-  // Scan SWR: useSWR(url, fetcher)
-  while ((match = SWR_REGEX.exec(code)) !== null) {
-    const rawUrl = match[1];
-    const loc = getLineCol(match.index);
-    const endpoint = normalizeEndpointUrl(rawUrl);
-    items.push({
-      file: filePath,
-      line: loc.line,
-      column: loc.column,
-      endpoint,
-      method: 'GET',
-      clientKind: 'custom',
-      backendTargetHint: synthesizeBackendTargetHint('GET', endpoint),
+  if (template && adapter.type === 'astro') {
+    const ast = parseDom(template.content, { onError: () => {} });
+    walkVueDom(ast, el => {
+      if (el.tag !== 'script') return;
+      const type = el.props.find(p => p.type === NodeTypes.ATTRIBUTE && p.name === 'type');
+      if (type?.type === NodeTypes.ATTRIBUTE && type.value &&
+        !['module', 'text/javascript', 'application/javascript'].includes(type.value.content)) return;
+      for (const child of el.children) {
+        if (child.type !== NodeTypes.TEXT) continue;
+        const start = remapPosition(child.loc.start.line, child.loc.start.column, template.loc.start);
+        const end = remapPosition(child.loc.end.line, child.loc.end.column, template.loc.start);
+        blocks.push({ type: 'script', content: child.loc.source, lang: 'ts', loc: {
+          start: { ...start, offset: template.loc.start.offset + child.loc.start.offset },
+          end: { ...end, offset: template.loc.start.offset + child.loc.end.offset },
+        } });
+      }
     });
   }
-
-  // Scan Inertia router calls: router.post, router.visit, router.get, etc.
-  while ((match = INERTIA_ROUTER_REGEX.exec(code)) !== null) {
-    const rawMethod = match[1].toUpperCase();
-    const method: ApiMethod = rawMethod === 'VISIT' ? 'GET' : (rawMethod as ApiMethod);
-    const isZiggy = Boolean(match[2]);
-    const rawEndpoint = isZiggy ? `route('${match[2]}')` : match[3];
-    if (rawEndpoint) {
-      const loc = getLineCol(match.index);
-      const endpoint = isZiggy ? rawEndpoint : normalizeEndpointUrl(rawEndpoint);
-      items.push({
-        file: filePath,
-        line: loc.line,
-        column: loc.column,
-        endpoint,
-        method,
-        clientKind: 'custom',
-        backendTargetHint: synthesizeBackendTargetHint(method, endpoint),
-      });
+  for (const block of blocks) {
+    const sf = ts.createSourceFile(filePath, block.content, ts.ScriptTarget.Latest, true,
+      block.lang === 'tsx' || block.lang === 'jsx' ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
+    function visit(node: ts.Node): void {
+      if (ts.isCallExpression(node)) {
+        const callee = node.expression.getText(sf);
+        let method: ApiMethod = 'GET';
+        let clientKind: ApiClientKind | undefined;
+        let endpoint: string | undefined;
+        let options: ts.Expression | undefined;
+        let payload: ts.Expression | undefined;
+        const axios = callee.match(/^axios\.(get|post|put|patch|delete|head|options)$/i);
+        const router = callee.match(/^router\.(post|put|patch|delete|get|visit)$/i);
+        if (axios) {
+          clientKind = 'axios';
+          method = axios[1].toUpperCase() as ApiMethod;
+          endpoint = literalEndpoint(node.arguments[0], sf);
+          if (['POST', 'PUT', 'PATCH'].includes(method)) payload = node.arguments[1];
+          else options = node.arguments[1];
+        } else if (['fetch', '$fetch', 'useFetch'].includes(callee)) {
+          clientKind = callee as ApiClientKind;
+          endpoint = literalEndpoint(node.arguments[0], sf);
+          options = node.arguments[1];
+          const methodNode = objectProperty(options, 'method');
+          if (methodNode && ts.isStringLiteralLike(methodNode)) {
+            const value = methodNode.text.toUpperCase();
+            if (/^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)$/.test(value)) method = value as ApiMethod;
+          }
+        } else if (router) {
+          clientKind = 'custom';
+          method = router[1].toLowerCase() === 'visit' ? 'GET' : router[1].toUpperCase() as ApiMethod;
+          const url = node.arguments[0];
+          if (url && ts.isCallExpression(url) && url.expression.getText(sf) === 'route' && url.arguments[0] && ts.isStringLiteralLike(url.arguments[0])) {
+            endpoint = `route('${url.arguments[0].text}')`;
+          } else endpoint = literalEndpoint(url, sf);
+        } else if (callee === 'useSWR') {
+          clientKind = 'custom';
+          endpoint = literalEndpoint(node.arguments[0], sf);
+        } else if (callee === 'useQuery') {
+          const key = objectProperty(node.arguments[0], 'queryKey');
+          if (key && ts.isArrayLiteralExpression(key)) {
+            const candidate = key.elements.find(el => ts.isStringLiteralLike(el) &&
+              (el.text.startsWith('/') || el.text.startsWith('http') || el.text.includes('api')));
+            if (candidate && ts.isStringLiteralLike(candidate)) {
+              clientKind = 'useQuery';
+              endpoint = candidate.text;
+            }
+          }
+        }
+        if (clientKind && endpoint) {
+          payload ??= objectProperty(options, 'body') ?? objectProperty(options, 'data');
+          if (payload && ts.isCallExpression(payload) && payload.expression.getText(sf) === 'JSON.stringify') {
+            payload = payload.arguments[0];
+          }
+          const payloadParams = payload && ts.isObjectLiteralExpression(payload)
+            ? payload.properties.flatMap(p => (ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p)) &&
+              (ts.isIdentifier(p.name) || ts.isStringLiteral(p.name)) ? [p.name.text] : [])
+            : undefined;
+          const position = sf.getLineAndCharacterOfPosition(node.getStart(sf));
+          const absolute = remapPosition(position.line + 1, position.character + 1, block.loc.start);
+          items.push({ file: filePath, ...absolute, endpoint, method, clientKind,
+            payloadParams: payloadParams?.length ? payloadParams : undefined,
+            backendTargetHint: synthesizeBackendTargetHint(method, endpoint) });
+        }
+      }
+      ts.forEachChild(node, visit);
     }
+    visit(sf);
   }
-
   return items;
 }
 
@@ -414,7 +334,7 @@ export async function extractWorkspaceApiContracts(
 ): Promise<ApiContractResult> {
   const root = options?.targetPath ? resolve(options.targetPath) : (findProjectRoot(process.cwd()) ?? process.cwd());
   const scanTarget = options?.scopePath ? resolve(root, options.scopePath) : root;
-  const files = await collectFiles(scanTarget, { excludeDirs: options?.excludeDirs });
+  const files = await collectFiles(scanTarget, { excludeDirs: options?.excludeDirs, ignoreRoot: root });
 
   const allEndpoints: ApiContractItem[] = [];
   const endpointSummary: Record<string, { methods: ApiMethod[]; callers: string[] }> = {};

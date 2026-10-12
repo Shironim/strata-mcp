@@ -2,7 +2,9 @@ import { promises as fs, existsSync } from 'node:fs';
 import { basename, extname, resolve } from 'node:path';
 import { parse as parseDom, NodeTypes, type ElementNode, type RootNode, type TemplateChildNode } from '@vue/compiler-dom';
 import { parseSfc } from './splitter';
-import { getComponentTree } from './tree';
+import { getComponentTree, extractLocalImports, resolveImportPath, resolveBarrelExport } from './tree';
+import ts from 'typescript';
+import { loadAliasConfig } from './resolver';
 import { findProjectRoot } from './path-resolver';
 import { STRATA_VERSION } from '../version';
 import { escapeRegExp } from './patterns';
@@ -406,70 +408,32 @@ function scanJsxProps(
   const patches: ComponentPatchItem[] = [];
   const cleanOld = cleanIdentifier(oldName);
   const cleanNew = newName ? cleanIdentifier(newName) : undefined;
-  const oldKebab = toKebabCase(cleanOld);
-  const oldCamel = toCamelCase(cleanOld);
-  const newCamel = cleanNew ? toCamelCase(cleanNew) : '';
-  const lines = code.split('\n');
-
-  for (let i = 0; i < lines.length; i++) {
-    const lineContent = lines[i];
-    const lineNum = i + 1;
-
-    for (const tag of targetTags) {
-      if (!lineContent.includes(`<${tag}`) && !lineContent.includes(`<${tag} `)) {
-        continue;
-      }
-
-      // Prop or event attribute pattern in JSX
-      const attrPattern = new RegExp(`\\b(${escapeRegExp(cleanOld)}|${escapeRegExp(oldCamel)}|${escapeRegExp(oldKebab)})(=|\\s|>|$)`, 'g');
-      let match: RegExpExecArray | null;
-
-      while ((match = attrPattern.exec(lineContent)) !== null) {
-        const colNum = match.index + 1;
-        const matchedProp = match[1];
-
-        if (
-          refactorType === 'rename_prop' ||
-          refactorType === 'rename_event' ||
-          refactorType === 'rename_model' ||
-          refactorType === 'rename_slot'
-        ) {
-          if (cleanNew) {
-            patches.push({
-              file: filePath,
-              line: lineNum,
-              column: colNum,
-              targetTag: tag,
-              oldSnippet: matchedProp,
-              newSnippet: newCamel,
-              description: `Rename JSX attribute "${matchedProp}" to "${newCamel}" on <${tag}>`,
-            });
-          }
-        } else if (
-          refactorType === 'remove_prop' ||
-          refactorType === 'remove_event' ||
-          refactorType === 'remove_model' ||
-          refactorType === 'remove_slot'
-        ) {
-          // Identify full JSX attribute expression
-          const fullAttrRegex = new RegExp(`\\b${matchedProp}(?:=(?:\{[^}]*\}|"[^"]*"|'[^']*'))?`, 'g');
-          fullAttrRegex.lastIndex = match.index;
-          const fullMatch = fullAttrRegex.exec(lineContent);
-          const oldSnippet = fullMatch ? fullMatch[0] : matchedProp;
-
+  const sf = ts.createSourceFile(filePath, code, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const renames = refactorType.startsWith('rename_');
+  function visit(node: ts.Node): void {
+    if (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) {
+      const tag = node.tagName.getText(sf);
+      if (targetTags.has(tag)) {
+        for (const attr of node.attributes.properties) {
+          if (!ts.isJsxAttribute(attr) || !matchVueProp(attr.name.getText(sf), cleanOld)) continue;
+          if (renames && !cleanNew) continue;
+          const target = renames ? attr.name : attr;
+          const position = sf.getLineAndCharacterOfPosition(target.getStart(sf));
           patches.push({
             file: filePath,
-            line: lineNum,
-            column: colNum,
+            line: position.line + 1,
+            column: position.character + 1,
             targetTag: tag,
-            oldSnippet,
-            newSnippet: '',
-            description: `Remove JSX attribute "${matchedProp}" on <${tag}>`,
+            oldSnippet: target.getText(sf),
+            newSnippet: renames ? toCamelCase(cleanNew!) : '',
+            description: `${renames ? 'Rename' : 'Remove'} JSX attribute "${attr.name.getText(sf)}" on <${tag}>`,
           });
         }
       }
     }
+    ts.forEachChild(node, visit);
   }
+  visit(sf);
 
   return patches;
 }
@@ -517,6 +481,18 @@ export async function generatePatchPlan(options: PatchPlanOptions): Promise<Patc
     try {
       const content = await fs.readFile(consumerPath, 'utf-8');
       const ext = extname(consumerPath).toLowerCase();
+      const aliasConfig = await loadAliasConfig(consumerPath);
+      const consumerTags = new Set(ext === '.tsx' || ext === '.jsx' ? [] : targetTags);
+      for (const imp of extractLocalImports(content, aliasConfig)) {
+        let importedPath = resolveImportPath(consumerPath, imp.source, aliasConfig);
+        if (importedPath && /[/\\]index\.[tj]sx?$/.test(importedPath)) {
+          importedPath = resolveBarrelExport(importedPath, imp.name, aliasConfig) ?? importedPath;
+        }
+        if (importedPath && resolve(importedPath) === absComponentPath) {
+          consumerTags.add(imp.alias || imp.name);
+        }
+      }
+
 
       if (ext === '.vue') {
         const sfc = parseSfc(content, consumerPath);
@@ -525,7 +501,7 @@ export async function generatePatchPlan(options: PatchPlanOptions): Promise<Patc
             sfc.template.content,
             sfc.template.loc.start.line,
             sfc.template.loc.start.column,
-            targetTags,
+            consumerTags,
             refactorType,
             cleanOld,
             cleanNew,
@@ -539,7 +515,7 @@ export async function generatePatchPlan(options: PatchPlanOptions): Promise<Patc
           content,
           1,
           1,
-          targetTags,
+          consumerTags,
           refactorType,
           cleanOld,
           cleanNew,
@@ -549,7 +525,7 @@ export async function generatePatchPlan(options: PatchPlanOptions): Promise<Patc
       } else if (ext === '.tsx' || ext === '.jsx') {
         const jsxPatches = scanJsxProps(
           content,
-          targetTags,
+          consumerTags,
           refactorType,
           cleanOld,
           cleanNew,

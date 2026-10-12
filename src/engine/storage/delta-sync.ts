@@ -1,6 +1,6 @@
 import { Database } from 'bun:sqlite';
 import { promises as fs } from 'node:fs';
-import { basename, dirname, extname, normalize, resolve } from 'node:path';
+import { basename, extname, normalize, resolve, sep } from 'node:path';
 import { collectFiles } from '../collector';
 import {
   detectFramework,
@@ -13,7 +13,11 @@ import {
   isPageFile,
   extractPassedProps,
   extractComponentContextNodes,
+  resolveImportPath,
+  resolveBarrelExport,
 } from '../tree';
+import { loadAliasConfig } from '../resolver';
+import { canonicalizePath } from '../path-resolver';
 import { getCandidateNames } from '../template';
 import { scanRoutes } from '../routes';
 import {
@@ -61,7 +65,7 @@ export async function hashChecker(
   scopePath?: string
 ): Promise<WorkspaceDelta> {
   const scanTarget = scopePath ? resolve(absRoot, scopePath) : absRoot;
-  const allDiskFiles = await collectFiles(scanTarget);
+  const allDiskFiles = await collectFiles(scanTarget, { ignoreRoot: absRoot });
   const candidateFiles = allDiskFiles.filter((f) => {
     const ext = extname(f).toLowerCase();
     const norm = f.replace(/\\/g, '/');
@@ -123,7 +127,7 @@ export async function hashChecker(
   const normScanTarget = normalize(scanTarget);
   for (const [path, dbInfo] of dbMap.entries()) {
     // If scopePath is provided, only mark deletion for files residing within scopePath
-    if (scopePath && !path.startsWith(normScanTarget)) {
+    if (scopePath && path !== normScanTarget && !path.startsWith(normScanTarget + sep)) {
       continue;
     }
     if (!diskMap.has(path)) {
@@ -147,51 +151,45 @@ export async function hashChecker(
 export async function batchParser(
   toProcess: string[],
   absRoot: string,
-  diskMap: Map<string, { fullPath: string; mtime: number; size: number }>
+  _diskMap: Map<string, { fullPath: string; mtime: number; size: number }>
 ): Promise<ParsedWorkspaceBatch> {
   const parsedFiles = new Map<string, ParsedFilePayload>();
 
   for (const path of toProcess) {
     try {
       const content = await fs.readFile(path, 'utf8');
-      const framework = detectFramework(path);
+      const framework = detectFramework(path, content);
       const boundary = extractRenderBoundary(path, content, framework);
       const stateDeps = extractStateDependencies(content, framework);
       const compName = basename(path, extname(path));
       const contract = await extractComponentContract(path, content);
-      const allImports = extractLocalImports(content);
+      const aliasConfig = await loadAliasConfig(path);
+      const allImports = extractLocalImports(content, aliasConfig);
       const { providers, consumers } = extractComponentContextNodes(path, content);
 
       const edges: Array<{ targetPath: string; isDynamic: boolean; payload?: EdgePayload }> = [];
       for (const imp of allImports) {
-        if (imp.source.startsWith('.')) {
-          const targetCandidate = resolve(dirname(path), imp.source);
-          let matchedPath: string | undefined;
+        let matchedPath = resolveImportPath(path, imp.source, aliasConfig);
+        if (matchedPath && /[/\\]index\.[tj]sx?$/.test(matchedPath)) {
+          matchedPath = resolveBarrelExport(matchedPath, imp.name, aliasConfig) ?? matchedPath;
+        }
+        if (matchedPath) matchedPath = canonicalizePath(matchedPath);
 
-          for (const ext of ['', '.vue', '.tsx', '.jsx', '.astro', '.ts', '.js', '/index.ts', '/index.vue']) {
-            const testP = normalize(targetCandidate + ext);
-            if (diskMap.has(testP)) {
-              matchedPath = testP;
-              break;
-            }
-          }
+        if (matchedPath) {
+          const candidateNames = getCandidateNames(imp.alias || imp.name || basename(matchedPath, extname(matchedPath)));
+          const passedProps = extractPassedProps(content, candidateNames);
 
-          if (matchedPath) {
-            const candidateNames = getCandidateNames(imp.name || basename(matchedPath, extname(matchedPath)));
-            const passedProps = extractPassedProps(content, candidateNames);
-
-            edges.push({
-              targetPath: matchedPath,
-              isDynamic: imp.isDynamic ?? false,
-              payload: {
-                passedProps: passedProps.length > 0 ? passedProps : undefined,
-                contexts: (providers.length > 0 || consumers.length > 0) ? {
-                  provided: providers.length > 0 ? providers : undefined,
-                  consumed: consumers.length > 0 ? consumers : undefined,
-                } : undefined,
-              },
-            });
-          }
+          edges.push({
+            targetPath: matchedPath,
+            isDynamic: imp.isDynamic ?? false,
+            payload: {
+              passedProps: passedProps.length > 0 ? passedProps : undefined,
+              contexts: (providers.length > 0 || consumers.length > 0) ? {
+                provided: providers.length > 0 ? providers : undefined,
+                consumed: consumers.length > 0 ? consumers : undefined,
+              } : undefined,
+            },
+          });
         }
       }
 
@@ -269,10 +267,11 @@ export function transactionCommitter(
 
   const toProcess = [...delta.added, ...delta.modified];
   const modifiedSet = new Set(delta.modified);
+  const deletedSet = new Set(delta.deleted);
   const fileIdMap = new Map<string, number>();
 
   for (const [path, info] of delta.dbMap.entries()) {
-    fileIdMap.set(path, info.id);
+    if (!deletedSet.has(info.id)) fileIdMap.set(path, info.id);
   }
 
   const transaction = db.transaction(() => {
@@ -439,11 +438,12 @@ export function transactionCommitter(
  */
 export async function syncWorkspace(
   workspaceRoot: string,
-  scopePath?: string
+  scopePath?: string,
+  database?: Database
 ): Promise<SyncStats> {
   const startTime = performance.now();
-  const absRoot = resolve(workspaceRoot);
-  const db = getWorkspaceDatabase(absRoot);
+  const absRoot = canonicalizePath(workspaceRoot);
+  const db = database ?? getWorkspaceDatabase(absRoot);
 
   // 1. Gather files and detect delta
   const delta = await hashChecker(absRoot, db, scopePath);

@@ -205,7 +205,7 @@ export async function findUnusedState(
 
   // 1. Identify all state candidate files in the workspace or scoped sub-path
   const scanTarget = options?.scopePath ? resolve(absRoot, options.scopePath) : absRoot;
-  const allFiles = await collectFiles(scanTarget);
+  const allFiles = await collectFiles(scanTarget, { ignoreRoot: absRoot });
   const stateCandidates = allFiles.filter((f) => {
     const norm = f.replace(/\\/g, '/').toLowerCase();
     const ext = extname(f).toLowerCase();
