@@ -1,10 +1,17 @@
 import { existsSync, mkdirSync, promises as fs, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import {
+  STRATA_FRONTEND_RULE,
+  STRATA_INSPECT_SKILL,
+  STRATA_POST_WRITE_HOOK,
+  STRATA_CURSOR_RULE,
+  STRATA_CLAUDE_COMMAND,
+  STRATA_GOOSEHINTS,
+} from './templates';
 
 export type AgentHarness =
   | 'claude'
   | 'cursor'
-  | 'vscode'
   | 'codex'
   | 'opencode'
   | 'antigravity'
@@ -334,6 +341,44 @@ async function configureCursorHooks(projectRoot: string): Promise<HarnessConfigR
 }
 
 /**
+ * Configures Google Antigravity PostToolUse lifecycle hook to auto-sync Strata graph in .gemini/hooks.json.
+ */
+async function configureGeminiHooks(projectRoot: string): Promise<HarnessConfigResult | null> {
+  const geminiDir = join(projectRoot, '.gemini');
+  if (!existsSync(geminiDir)) {
+    await fs.mkdir(geminiDir, { recursive: true });
+  }
+  const hooksPath = join(geminiDir, 'hooks.json');
+  const result = await readJsonConfigFile<Record<string, any>>(hooksPath);
+  if (result.status === 'malformed') {
+    console.error(`  ✕ Error: Malformed JSON in '.gemini/hooks.json': ${result.error}. Preserving existing file without modification.`);
+    return { harness: 'Google Antigravity', file: '.gemini/hooks.json', action: 'failed', error: result.error };
+  }
+
+  const config = result.status === 'valid' ? result.data : {};
+  if (config['strata-autosync']) {
+    return { harness: 'Google Antigravity', file: '.gemini/hooks.json', action: 'skipped' };
+  }
+
+  config['strata-autosync'] = {
+    PostToolUse: [
+      {
+        matcher: 'replace_file_content|write_to_file',
+        hooks: [
+          {
+            type: 'command',
+            command: 'strata sync --json',
+          },
+        ],
+      },
+    ],
+  };
+
+  await fs.writeFile(hooksPath, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
+  return { harness: 'Google Antigravity', file: '.gemini/hooks.json', action: result.status === 'valid' ? 'updated' : 'created' };
+}
+
+/**
  * Configures local project MCP settings for selected agent harnesses.
  */
 export async function setupHarnessConfigs(
@@ -378,14 +423,7 @@ export async function setupHarnessConfigs(
     }
   }
 
-  // 3. VS Code (.vscode/mcp.json)
-  if (shouldApply('vscode')) {
-    const file = join(projectRoot, '.vscode', 'mcp.json');
-    const res = await writeStandardMcpConfig(file, 'servers', force);
-    results.push({ harness: 'VS Code', file: '.vscode/mcp.json', action: res.action, error: res.error });
-  }
-
-  // Codex (.codex/config.toml) (INIT-06, INIT-10)
+  // 3. Codex (.codex/config.toml) (INIT-06, INIT-10)
   if (shouldApply('codex')) {
     const codexDir = join(projectRoot, '.codex');
     const tomlPath = join(codexDir, 'config.toml');
@@ -400,13 +438,22 @@ export async function setupHarnessConfigs(
     results.push({ harness: 'OpenCode', file: 'opencode.json', action: res.action, error: res.error });
   }
 
-  // 5. Antigravity (.agents/skills & rules are created by default init)
+  // 5. Google Antigravity (.gemini/mcp_config.json & .gemini/hooks.json)
   if (shouldApply('antigravity')) {
-    results.push({
-      harness: 'Google Antigravity',
-      file: '.agents/skills/strata-inspect/SKILL.md',
-      action: 'created',
-    });
+    const geminiDir = join(projectRoot, '.gemini');
+    if (!existsSync(geminiDir)) {
+      await fs.mkdir(geminiDir, { recursive: true });
+    }
+    const file = join(geminiDir, 'mcp_config.json');
+    const res = await writeStandardMcpConfig(file, 'mcpServers', force);
+    const hookRes = await configureGeminiHooks(projectRoot);
+    if (res.action === 'failed') {
+      results.push({ harness: 'Google Antigravity', file: '.gemini/mcp_config.json', action: 'failed', error: res.error });
+    } else if (hookRes && hookRes.action === 'failed') {
+      results.push({ harness: 'Google Antigravity', file: '.gemini/hooks.json', action: 'failed', error: hookRes.error });
+    } else {
+      results.push({ harness: 'Google Antigravity', file: '.gemini/mcp_config.json', action: res.action });
+    }
   }
 
   // 6. Goose (.goose/mcp.json)
@@ -416,11 +463,174 @@ export async function setupHarnessConfigs(
     results.push({ harness: 'Goose', file: '.goose/mcp.json', action: res.action, error: res.error });
   }
 
-  // 7. Pi / Oh My Pi (.pi/mcp.json)
+  // 7. Pi / Oh My Pi (.pi/mcp.json & .omp/mcp.json)
   if (shouldApply('pi')) {
-    const file = join(projectRoot, '.pi', 'mcp.json');
-    const res = await writeStandardMcpConfig(file, 'mcpServers', force);
-    results.push({ harness: 'Pi / Oh My Pi', file: '.pi/mcp.json', action: res.action, error: res.error });
+    const piFile = join(projectRoot, '.pi', 'mcp.json');
+    const piRes = await writeStandardMcpConfig(piFile, 'mcpServers', force);
+    results.push({ harness: 'Pi', file: '.pi/mcp.json', action: piRes.action, error: piRes.error });
+
+    const ompFile = join(projectRoot, '.omp', 'mcp.json');
+    const ompRes = await writeStandardMcpConfig(ompFile, 'mcpServers', force);
+    results.push({ harness: 'Oh My Pi', file: '.omp/mcp.json', action: ompRes.action, error: ompRes.error });
+  }
+
+  return results;
+}
+
+/**
+ * Safely writes or non-destructively appends markdown guidance without duplicating content.
+ */
+async function writeMarkdownGuidance(
+  filePath: string,
+  content: string,
+  force: boolean = false
+): Promise<ConfigAction> {
+  const dir = dirname(filePath);
+  if (!existsSync(dir)) {
+    await fs.mkdir(dir, { recursive: true });
+  }
+
+  if (existsSync(filePath)) {
+    const existing = await fs.readFile(filePath, 'utf8');
+    if (existing.includes('strata-mcp') || existing.includes('Strata-MCP')) {
+      return 'skipped';
+    }
+    const updated = existing.trimEnd() + '\n\n' + content;
+    await fs.writeFile(filePath, updated, 'utf8');
+    return 'updated';
+  }
+
+  await fs.writeFile(filePath, content, 'utf8');
+  return 'created';
+}
+
+/**
+ * Writes a dedicated artifact file (overwrites only if force is true).
+ */
+async function writeDedicatedArtifact(
+  filePath: string,
+  content: string,
+  force: boolean = false,
+  mode?: number
+): Promise<ConfigAction> {
+  const dir = dirname(filePath);
+  if (!existsSync(dir)) {
+    await fs.mkdir(dir, { recursive: true });
+  }
+
+  if (existsSync(filePath) && !force) {
+    return 'skipped';
+  }
+
+  const isExisting = existsSync(filePath);
+  await fs.writeFile(filePath, content, mode ? { encoding: 'utf8', mode } : 'utf8');
+  if (mode) {
+    await fs.chmod(filePath, mode);
+  }
+  return isExisting ? 'updated' : 'created';
+}
+
+/**
+ * Generates per-harness rules, skills, and lifecycle hook scripts.
+ */
+export async function setupHarnessArtifacts(
+  projectRoot: string,
+  harnesses: AgentHarness[],
+  force: boolean = false
+): Promise<HarnessConfigResult[]> {
+  const results: HarnessConfigResult[] = [];
+  const selectedSet = new Set(harnesses.map(h => h.toLowerCase()));
+  const shouldApply = (h: AgentHarness) => selectedSet.has('all') || selectedSet.has(h);
+
+  const record = (harness: string, file: string, action: ConfigAction) => {
+    results.push({ harness, file, action });
+  };
+
+  // 1. Claude Code
+  if (shouldApply('claude')) {
+    const rAction = await writeMarkdownGuidance(join(projectRoot, 'CLAUDE.md'), STRATA_FRONTEND_RULE, force);
+    record('Claude Code', 'CLAUDE.md', rAction);
+
+    const cAction = await writeDedicatedArtifact(join(projectRoot, '.claude', 'commands', 'strata-inspect.md'), STRATA_CLAUDE_COMMAND, force);
+    record('Claude Code', '.claude/commands/strata-inspect.md', cAction);
+
+    const hAction = await writeDedicatedArtifact(join(projectRoot, '.agents', 'hooks', 'strata-post-write.sh'), STRATA_POST_WRITE_HOOK, force, 0o755);
+    record('Claude Code', '.agents/hooks/strata-post-write.sh', hAction);
+  }
+
+  // 2. Cursor
+  if (shouldApply('cursor')) {
+    const rAction = await writeDedicatedArtifact(join(projectRoot, '.cursor', 'rules', 'strata-frontend.mdc'), STRATA_CURSOR_RULE, force);
+    record('Cursor', '.cursor/rules/strata-frontend.mdc', rAction);
+
+    const hAction = await writeDedicatedArtifact(join(projectRoot, '.agents', 'hooks', 'strata-post-write.sh'), STRATA_POST_WRITE_HOOK, force, 0o755);
+    record('Cursor', '.agents/hooks/strata-post-write.sh', hAction);
+  }
+
+  // 3. Codex
+  if (shouldApply('codex')) {
+    const rAction = await writeMarkdownGuidance(join(projectRoot, 'AGENTS.md'), STRATA_FRONTEND_RULE, force);
+    record('Codex', 'AGENTS.md', rAction);
+  }
+
+  // 5. OpenCode
+  if (shouldApply('opencode')) {
+    const agAction = await writeMarkdownGuidance(join(projectRoot, 'AGENTS.md'), STRATA_FRONTEND_RULE, force);
+    record('OpenCode', 'AGENTS.md', agAction);
+
+    const rAction = await writeDedicatedArtifact(join(projectRoot, '.agents', 'rules', 'strata-frontend.md'), STRATA_FRONTEND_RULE, force);
+    record('OpenCode', '.agents/rules/strata-frontend.md', rAction);
+
+    const sAction = await writeDedicatedArtifact(join(projectRoot, '.agents', 'skills', 'strata-inspect', 'SKILL.md'), STRATA_INSPECT_SKILL, force);
+    record('OpenCode', '.agents/skills/strata-inspect/SKILL.md', sAction);
+
+    const hAction = await writeDedicatedArtifact(join(projectRoot, '.agents', 'hooks', 'strata-post-write.sh'), STRATA_POST_WRITE_HOOK, force, 0o755);
+    record('OpenCode', '.agents/hooks/strata-post-write.sh', hAction);
+  }
+
+  // 6. Google Antigravity (.gemini/)
+  if (shouldApply('antigravity')) {
+    const gmAction = await writeMarkdownGuidance(join(projectRoot, 'GEMINI.md'), STRATA_FRONTEND_RULE, force);
+    record('Google Antigravity', 'GEMINI.md', gmAction);
+
+    const rAction = await writeDedicatedArtifact(join(projectRoot, '.gemini', 'rules', 'strata-frontend.md'), STRATA_FRONTEND_RULE, force);
+    record('Google Antigravity', '.gemini/rules/strata-frontend.md', rAction);
+
+    const sAction = await writeDedicatedArtifact(join(projectRoot, '.gemini', 'skills', 'strata-inspect', 'SKILL.md'), STRATA_INSPECT_SKILL, force);
+    record('Google Antigravity', '.gemini/skills/strata-inspect/SKILL.md', sAction);
+
+    const hAction = await writeDedicatedArtifact(join(projectRoot, '.gemini', 'hooks', 'strata-post-write.sh'), STRATA_POST_WRITE_HOOK, force, 0o755);
+    record('Google Antigravity', '.gemini/hooks/strata-post-write.sh', hAction);
+  }
+
+  // 7. Goose
+  if (shouldApply('goose')) {
+    const rAction = await writeMarkdownGuidance(join(projectRoot, '.goosehints'), STRATA_GOOSEHINTS, force);
+    record('Goose', '.goosehints', rAction);
+  }
+
+  // 8. Pi / Oh My Pi
+  if (shouldApply('pi')) {
+    const rAction = await writeMarkdownGuidance(join(projectRoot, 'AGENTS.md'), STRATA_FRONTEND_RULE, force);
+    record('Pi / Oh My Pi', 'AGENTS.md', rAction);
+
+    const piSkillAction = await writeDedicatedArtifact(join(projectRoot, '.pi', 'skills', 'strata-inspect', 'SKILL.md'), STRATA_INSPECT_SKILL, force);
+    record('Pi', '.pi/skills/strata-inspect/SKILL.md', piSkillAction);
+
+    const ompSkillAction = await writeDedicatedArtifact(join(projectRoot, '.omp', 'skills', 'strata-inspect', 'SKILL.md'), STRATA_INSPECT_SKILL, force);
+    record('Oh My Pi', '.omp/skills/strata-inspect/SKILL.md', ompSkillAction);
+  }
+
+  // 9. Skip / Fallback
+  if (selectedSet.has('skip')) {
+    const rAction = await writeDedicatedArtifact(join(projectRoot, '.agents', 'rules', 'strata-frontend.md'), STRATA_FRONTEND_RULE, force);
+    record('Fallback Rules', '.agents/rules/strata-frontend.md', rAction);
+
+    const sAction = await writeDedicatedArtifact(join(projectRoot, '.agents', 'skills', 'strata-inspect', 'SKILL.md'), STRATA_INSPECT_SKILL, force);
+    record('Fallback Rules', '.agents/skills/strata-inspect/SKILL.md', sAction);
+
+    const hAction = await writeDedicatedArtifact(join(projectRoot, '.agents', 'hooks', 'strata-post-write.sh'), STRATA_POST_WRITE_HOOK, force, 0o755);
+    record('Fallback Rules', '.agents/hooks/strata-post-write.sh', hAction);
   }
 
   return results;

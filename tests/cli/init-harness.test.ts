@@ -36,7 +36,7 @@ test('all harness configurations use the shared server entrypoint without tool a
   const root = tempDir();
   const results = await setupHarnessConfigs(root, ['all']);
   expect(results).toHaveLength(8);
-  for (const file of ['.mcp.json', '.cursor/mcp.json', '.vscode/mcp.json', '.goose/mcp.json', '.pi/mcp.json']) {
+  for (const file of ['.mcp.json', '.cursor/mcp.json', '.goose/mcp.json', '.pi/mcp.json', '.omp/mcp.json', '.gemini/mcp_config.json']) {
     const data = JSON.parse(readFileSync(join(root, file), 'utf8'));
     const server = (data.mcpServers ?? data.servers).strata;
     expect(server).toEqual({ command: 'strata', args: ['serve'] });
@@ -80,15 +80,14 @@ test('handleStrataInit initializes project, agent artifacts, and harness config'
   });
 
   expect(existsSync(join(root, '.strata'))).toBe(true);
-  expect(existsSync(join(root, '.agents', 'rules', 'strata-frontend.md'))).toBe(true);
-  expect(existsSync(join(root, '.agents', 'skills', 'strata-inspect', 'SKILL.md'))).toBe(true);
+  expect(existsSync(join(root, 'CLAUDE.md'))).toBe(true);
+  expect(existsSync(join(root, '.claude', 'commands', 'strata-inspect.md'))).toBe(true);
   expect(existsSync(join(root, '.mcp.json'))).toBe(true);
+  expect(existsSync(join(root, '.claude', 'settings.json'))).toBe(true);
 
-  const rule = readFileSync(join(root, '.agents', 'rules', 'strata-frontend.md'), 'utf8');
-  const skill = readFileSync(join(root, '.agents', 'skills', 'strata-inspect', 'SKILL.md'), 'utf8');
+  const rule = readFileSync(join(root, 'CLAUDE.md'), 'utf8');
   expect(rule).toBe(STRATA_FRONTEND_RULE);
-  expect(skill).toBe(STRATA_INSPECT_SKILL);
-  for (const content of [rule, skill, STRATA_INSTRUCTIONS]) {
+  for (const content of [rule, STRATA_INSPECT_SKILL, STRATA_INSTRUCTIONS]) {
     expect(content).not.toMatch(/get_routes|get_api_contracts/);
     for (const tool of TOOL_CATALOG) expect(content).toContain(tool.name);
     expect(content).toContain('routes');
@@ -97,6 +96,28 @@ test('handleStrataInit initializes project, agent artifacts, and harness config'
 
   const gitignore = readFileSync(join(root, '.gitignore'), 'utf8');
   expect(gitignore).toContain('.strata/');
+});
+
+test('handleStrataInit initializes Google Antigravity with .gemini and GEMINI.md', async () => {
+  const root = tempDir();
+  writeFileSync(join(root, 'package.json'), '{"name":"my-app","dependencies":{"vue":"3"}}');
+  writeFileSync(join(root, 'App.vue'), '<template><div>Test</div></template>');
+
+  await handleStrataInit({
+    cwd: root,
+    harness: 'antigravity',
+    yes: true,
+  });
+
+  expect(existsSync(join(root, '.strata'))).toBe(true);
+  expect(existsSync(join(root, 'GEMINI.md'))).toBe(true);
+  expect(existsSync(join(root, '.gemini', 'rules', 'strata-frontend.md'))).toBe(true);
+  expect(existsSync(join(root, '.gemini', 'skills', 'strata-inspect', 'SKILL.md'))).toBe(true);
+  expect(existsSync(join(root, '.gemini', 'mcp_config.json'))).toBe(true);
+  expect(existsSync(join(root, '.gemini', 'hooks.json'))).toBe(true);
+
+  const geminiConfig = JSON.parse(readFileSync(join(root, '.gemini', 'mcp_config.json'), 'utf8'));
+  expect(geminiConfig.mcpServers?.strata?.command).toBe('strata');
 });
 
 test('setupHarnessConfigs defensively preserves malformed JSON without data loss', async () => {
@@ -134,5 +155,45 @@ test('setupHarnessConfigs configures Codex CLI config.toml', async () => {
   const tomlContent = readFileSync(tomlPath, 'utf8');
   expect(tomlContent).toContain('[mcp_servers.strata]');
   expect(tomlContent).toContain('command = "strata"');
+});
+
+test('handleStrataInit initializes OpenAI Codex with AGENTS.md and .codex/config.toml', async () => {
+  const root = tempDir();
+  writeFileSync(join(root, 'package.json'), '{"name":"my-app"}');
+
+  await handleStrataInit({
+    cwd: root,
+    harness: 'codex',
+    yes: true,
+  });
+
+  expect(existsSync(join(root, '.strata'))).toBe(true);
+  expect(existsSync(join(root, 'AGENTS.md'))).toBe(true);
+  expect(existsSync(join(root, '.codex', 'config.toml'))).toBe(true);
+
+  const agentsRule = readFileSync(join(root, 'AGENTS.md'), 'utf8');
+  expect(agentsRule).toContain('strata-mcp');
+});
+
+test('handleStrataInit initializes Pi / Oh My Pi with AGENTS.md, .pi/mcp.json, and skills', async () => {
+  const root = tempDir();
+  writeFileSync(join(root, 'package.json'), '{"name":"my-app"}');
+
+  await handleStrataInit({
+    cwd: root,
+    harness: 'pi',
+    yes: true,
+  });
+
+  expect(existsSync(join(root, '.strata'))).toBe(true);
+  expect(existsSync(join(root, 'AGENTS.md'))).toBe(true);
+  expect(existsSync(join(root, 'PI.md'))).toBe(false);
+  expect(existsSync(join(root, '.pi', 'mcp.json'))).toBe(true);
+  expect(existsSync(join(root, '.pi', 'skills', 'strata-inspect', 'SKILL.md'))).toBe(true);
+  expect(existsSync(join(root, '.omp', 'mcp.json'))).toBe(true);
+  expect(existsSync(join(root, '.omp', 'skills', 'strata-inspect', 'SKILL.md'))).toBe(true);
+
+  const agentsRule = readFileSync(join(root, 'AGENTS.md'), 'utf8');
+  expect(agentsRule).toContain('strata-mcp');
 });
 

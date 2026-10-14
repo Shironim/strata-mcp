@@ -161,25 +161,25 @@ describe('Audit Bug Fixes: INIT-01 to INIT-11', () => {
     expect(parseHarnessArg('')).toEqual(['all']);
     expect(parseHarnessArg('all')).toEqual(['all']);
     expect(parseHarnessArg('skip')).toEqual(['skip']);
+    expect(parseHarnessArg('pi')).toEqual(['pi']);
+    expect(parseHarnessArg('omp')).toEqual(['pi']);
   });
 
-  // INIT-10: Menu option '3' configures both VS Code and Codex
-  it('INIT-10: choice "3" configures both VS Code and Codex; "codex" only configures Codex', async () => {
-    expect(parseHarnessArg('3')).toEqual(['vscode', 'codex']);
-    expect(parseHarnessArg('vscode')).toEqual(['vscode']);
+  // INIT-10: Menu option '3' configures OpenAI Codex
+  it('INIT-10: choice "3" and "codex" configure OpenAI Codex', async () => {
+    expect(parseHarnessArg('3')).toEqual(['codex']);
     expect(parseHarnessArg('codex')).toEqual(['codex']);
+    expect(parseHarnessArg('openai-codex')).toEqual(['codex']);
 
     const rootCodexOnly = tempDir('init-10-codex-only-');
     const resultsCodex = await setupHarnessConfigs(rootCodexOnly, ['codex']);
     expect(resultsCodex).toHaveLength(1);
     expect(resultsCodex[0].harness).toBe('Codex');
     expect(existsSync(join(rootCodexOnly, '.codex', 'config.toml'))).toBe(true);
-    expect(existsSync(join(rootCodexOnly, '.vscode', 'mcp.json'))).toBe(false);
 
     const rootChoice3 = tempDir('init-10-choice3-');
     const results3 = await setupHarnessConfigs(rootChoice3, parseHarnessArg('3'));
-    expect(results3).toHaveLength(2);
-    expect(existsSync(join(rootChoice3, '.vscode', 'mcp.json'))).toBe(true);
+    expect(results3).toHaveLength(1);
     expect(existsSync(join(rootChoice3, '.codex', 'config.toml'))).toBe(true);
   });
 

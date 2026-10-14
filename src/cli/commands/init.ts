@@ -3,9 +3,8 @@ import { existsSync, promises as fs } from 'node:fs';
 import { join, resolve } from 'node:path';
 import * as readline from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
-import { STRATA_FRONTEND_RULE, STRATA_INSPECT_SKILL, STRATA_POST_WRITE_HOOK } from '../templates';
 import { syncWorkspace } from '../../engine/database';
-import { setupHarnessConfigs, type AgentHarness } from '../mcp-configs';
+import { setupHarnessConfigs, setupHarnessArtifacts, type AgentHarness } from '../mcp-configs';
 import { STRATA_VERSION } from '../../version';
 
 export interface StrataInitOptions {
@@ -74,7 +73,6 @@ async function detectProjectFramework(projectRoot: string): Promise<string> {
 /**
  * Parses user input or CLI flags into recognized AgentHarness entries.
  * Throws actionable error for unrecognized harness values (INIT-09).
- * Returns both vscode and codex for choice '3' (INIT-10).
  */
 export function parseHarnessArg(arg?: string): AgentHarness[] {
   if (!arg) return ['all'];
@@ -89,11 +87,8 @@ export function parseHarnessArg(arg?: string): AgentHarness[] {
     case 'cursor':
       return ['cursor'];
     case '3':
-      return ['vscode', 'codex'];
-    case 'vscode':
-    case 'vs-code':
-      return ['vscode'];
     case 'codex':
+    case 'openai-codex':
       return ['codex'];
     case '4':
     case 'opencode':
@@ -109,6 +104,7 @@ export function parseHarnessArg(arg?: string): AgentHarness[] {
     case 'pi':
     case 'oh-my-pi':
     case 'ohmypi':
+    case 'omp':
       return ['pi'];
     case '8':
     case 'all':
@@ -119,7 +115,7 @@ export function parseHarnessArg(arg?: string): AgentHarness[] {
       return ['skip'];
     default:
       throw new Error(
-        `Unknown agent harness: '${arg}'. Valid options: claude, cursor, vscode, codex, opencode, antigravity, goose, pi, all, skip (or 1-9)`
+        `Unknown agent harness: '${arg}'. Valid options: claude, cursor, codex, opencode, antigravity, goose, pi, omp, all, skip (or 1-9)`
       );
   }
 }
@@ -129,13 +125,13 @@ export function parseHarnessArg(arg?: string): AgentHarness[] {
  */
 async function promptHarnessChoice(): Promise<AgentHarness[]> {
   console.log(`?  Select AI Agent Harness to configure for this project:`);
-  console.log(`   [1] Claude Code        (.mcp.json & .claude/settings.json)`);
-  console.log(`   [2] Cursor             (.cursor/mcp.json & .cursor/hooks.json)`);
-  console.log(`   [3] VS Code / Codex    (.vscode/mcp.json & .codex/config.toml)`);
-  console.log(`   [4] OpenCode           (opencode.json)`);
-  console.log(`   [5] Google Antigravity (.agents/skills + rules)`);
-  console.log(`   [6] Goose              (.goose/mcp.json)`);
-  console.log(`   [7] Pi / Oh My Pi      (.pi/mcp.json)`);
+  console.log(`   [1] Claude Code        (.mcp.json, .claude/settings.json, CLAUDE.md)`);
+  console.log(`   [2] Cursor             (.cursor/mcp.json, .cursor/hooks.json, .cursor/rules/)`);
+  console.log(`   [3] OpenAI Codex       (.codex/config.toml & AGENTS.md)`);
+  console.log(`   [4] OpenCode           (opencode.json, AGENTS.md, .agents/skills/)`);
+  console.log(`   [5] Google Antigravity (.gemini/mcp_config.json, GEMINI.md, .gemini/skills/)`);
+  console.log(`   [6] Goose              (.goose/mcp.json & .goosehints)`);
+  console.log(`   [7] Pi / Oh My Pi      (.pi/ & .omp/ mcp.json & AGENTS.md)`);
   console.log(`   [8] All (Multi-Harness - recommended)`);
   console.log(`   [9] Skip MCP Config    (Rules & SQLite index only)\n`);
 
@@ -187,36 +183,20 @@ export async function handleStrataInit(options: StrataInitOptions = {}): Promise
 
   console.log(`\n${cyan}◇${reset}  Creating local project structure & agent artifacts:`);
 
-  // 1. Prepare directory structure for agent harness & cache
-  const agentsDir = join(cwd, '.agents');
-  const rulesDir = join(agentsDir, 'rules');
-  const skillsDir = join(agentsDir, 'skills', 'strata-inspect');
-  const hooksDir = join(agentsDir, 'hooks');
+  // 1. Prepare directory structure for graph cache
   const strataDir = join(cwd, '.strata');
-
-  await fs.mkdir(rulesDir, { recursive: true });
-  await fs.mkdir(skillsDir, { recursive: true });
-  await fs.mkdir(hooksDir, { recursive: true });
   await fs.mkdir(strataDir, { recursive: true });
 
   console.log(`${cyan}│${reset}  ${green}✔${reset} .strata/                   ${dim}(Isolated SQLite graph cache)${reset}`);
 
-  // 2. Write agent harness rules, skills, and hooks (respecting --force)
-  const targets = [
-    { label: '.agents/rules/strata-frontend.md', path: join(rulesDir, 'strata-frontend.md'), content: STRATA_FRONTEND_RULE },
-    { label: '.agents/skills/strata-inspect/SKILL.md', path: join(skillsDir, 'SKILL.md'), content: STRATA_INSPECT_SKILL },
-    { label: '.agents/hooks/strata-post-write.sh', path: join(hooksDir, 'strata-post-write.sh'), content: STRATA_POST_WRITE_HOOK, mode: 0o755 },
-  ];
-
-  for (const t of targets) {
-    if (!force && existsSync(t.path)) {
-      console.log(`${cyan}│${reset}  ${dim}• Skipped existing: ${t.label} (use --force to overwrite)${reset}`);
+  // 2. Write agent harness rules, skills, and hooks (respecting selected harness & --force)
+  const artifactResults = await setupHarnessArtifacts(cwd, selectedHarnesses, force);
+  for (const art of artifactResults) {
+    if (art.action === 'skipped') {
+      console.log(`${cyan}│${reset}  ${dim}• Skipped existing: ${art.file} (use --force to overwrite)${reset}`);
     } else {
-      await fs.writeFile(t.path, t.content, t.mode ? { encoding: 'utf8', mode: t.mode } : 'utf8');
-      if (t.mode) {
-        await fs.chmod(t.path, t.mode);
-      }
-      console.log(`${cyan}│${reset}  ${green}✔${reset} ${t.label}`);
+      const actionText = art.action === 'updated' ? 'merged/updated' : 'configured';
+      console.log(`${cyan}│${reset}  ${green}✔${reset} ${art.file.padEnd(35)} ${dim}(${art.harness} ${actionText})${reset}`);
     }
   }
 

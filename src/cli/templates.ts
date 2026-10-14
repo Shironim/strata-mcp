@@ -129,7 +129,7 @@ except Exception: pass
       fi
 
       if [ -z "$FILE_PATH" ]; then
-        FILE_PATH="$(printf '%s' "$STDIN_DATA" | sed -n 's/.*"\(file_path\|path\)"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\2/p' | head -n 1)"
+        FILE_PATH="$(printf '%s' "$STDIN_DATA" | sed -n 's/.*"\(file_path\|path\)"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\\2/p' | head -n 1)"
       fi
     fi
   fi
@@ -159,3 +159,50 @@ esac
 
 exit 0
 `;
+
+export const STRATA_CURSOR_RULE = `---
+description: Strata-MCP Frontend Structural Intelligence Engine
+globs: **/*.{vue,tsx,jsx,astro,ts,js}
+alwaysApply: false
+---
+
+` + STRATA_FRONTEND_RULE;
+
+export const STRATA_CLAUDE_COMMAND = `---
+description: Deep frontend AST component inspection, component trees, reactivity tracking, routes, API contracts, architectural health audits, and deterministic patch planning using strata-mcp.
+---
+
+# /strata-inspect
+
+Gunakan tool \`strata-mcp\` untuk inspeksi struktural frontend daripada membaca file utuh:
+- \`inspect_component\`: Kontrak publik komponen (props, emits, slots) & precision slicing fungsi.
+- \`get_component_tree\`: Hierarki pohon komponen dan props drilling (upward/downward).
+- \`find_code\`: Pencarian pola kode berbasis AST struktural.
+- \`trace_state\`: Pelacakan mutasi dan pembacaan state (Pinia, Context, Zustand).
+- \`audit_frontend\`: Audit routes, api-contracts, dead-components, bundle-health.
+- \`generate_patch_plan\`: Perencanaan refactoring AST deterministik.
+`;
+
+export const STRATA_GOOSEHINTS = `# Strata-MCP Frontend Guidelines
+Prioritaskan penggunaan tool MCP strata-mcp (inspect_component, get_component_tree, find_code, audit_frontend) daripada pembacaan file mentah saat menganalisis komponen UI (Vue, React/Next, Astro).
+`;
+
+export const STRATA_GEMINI_HOOKS = JSON.stringify(
+  {
+    'strata-autosync': {
+      PostToolUse: [
+        {
+          matcher: 'replace_file_content|write_to_file',
+          hooks: [
+            {
+              type: 'command',
+              command: 'strata sync --json',
+            },
+          ],
+        },
+      ],
+    },
+  },
+  null,
+  2
+) + '\n';
