@@ -6,6 +6,8 @@
 
 ---
 
+> Pembaruan 2026-10-14: desain watcher stdio di brief ini bersifat historis. Server saat ini memakai worker analisis sementara dan sync saat pemanggilan tool yang bergantung pada graph; watcher tersedia terpisah melalui CLI watch. Database aktif adalah `.strata/graph.db`. Rujuk instruksi server dan README untuk kontrak saat ini; anchor historis tidak disegel ulang.
+
 ## Overview & Problem Statement
 - **Konteks & Alasan**: `strata-mcp` adalah engine structural AST search & intelligence frontend (Vue SFC, React/Next, Astro) yang dirancang untuk membantu AI Agent memahami komponen UI tanpa membaca seluruh file mentah. Saat ini, `strata-mcp` belum memiliki workflow `init` untuk mem-provision agent harness (rules & skills di `.agents/`), dan mekanisme sinkronisasi database graph (`.strata/cache.db`) masih memerlukan pemanggilan manual (`strata sync`), sehingga berisiko *stale graph* saat agent mengedit file kode.
 - **Tujuan Utama**:

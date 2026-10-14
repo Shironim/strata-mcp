@@ -6,6 +6,8 @@
 
 ---
 
+> Pembaruan 2026-10-14: brief ini merekam implementasi historis delapan tool. Kontrak aktif sekarang memiliki enam tool; routes dan API contracts tersedia melalui `audit_frontend(target: "routes" | "api-contracts")`. Dua wrapper/tool lama telah dihapus. Rujuk README untuk migrasi. Anchor historis tidak disegel ulang oleh perubahan ini.
+
 ## Overview & Problem Statement
 - **Konteks & Alasan**: Berdasarkan hasil audit review-ai-code menjelang publikasi ke npmjs, ditemukan dua isu arsitektural pada `@dimassetoid/strata-mcp`:
   1. **Asimetri Fungsionalitas CLI vs MCP Server**: Engine memiliki dua kapabilitas ekstraksi tingkat tinggi yang sangat berharga—[`scanRoutes`](src/engine/routes.ts) dan [`extractWorkspaceApiContracts`](src/engine/api-contract.ts)—namun keduanya hanya dapat diakses melalui CLI (`strata routes` dan `strata apis`). AI Agent yang berkomunikasi via protokol MCP tidak dapat mengakses rute frontend maupun kontrak endpoint API komponen.
