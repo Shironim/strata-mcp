@@ -5,6 +5,10 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ToolCallResponse } from './tools/types';
 
+export interface AnalysisResponse extends ToolCallResponse {
+  projectRoot?: string;
+}
+
 export const ANALYSIS_LIMITS = {
   requestBytes: 2 * 1024 * 1024, responseBytes: 8 * 1024 * 1024,
   stderrBytes: 64 * 1024, queued: 4, timeoutMs: 120000,
@@ -12,7 +16,7 @@ export const ANALYSIS_LIMITS = {
 };
 
 interface Job {
-  input: string; signal?: AbortSignal; resolve: (response: ToolCallResponse) => void;
+  input: string; signal?: AbortSignal; resolve: (response: AnalysisResponse) => void;
   reject: (error: Error) => void; cancel?: () => void; removeAbort?: () => void;
 }
 
@@ -53,7 +57,7 @@ export class AnalysisSupervisor {
     this.workerPath = options.workerPath ?? join(dirname(modulePath), modulePath.endsWith('.ts') ? 'analysis-worker.ts' : 'analysis-worker.js');
   }
 
-  run(name: string, args: Record<string, unknown>, rootHint?: string, signal?: AbortSignal): Promise<ToolCallResponse> {
+  run(name: string, args: Record<string, unknown>, rootHint?: string, signal?: AbortSignal): Promise<AnalysisResponse> {
     if (this.closed) return Promise.reject(new Error('SERVER_CLOSED: analysis supervisor is closed'));
     if (signal?.aborted) return Promise.reject(new Error('REQUEST_CANCELLED: analysis cancelled'));
     // Check the serialized request before retaining it in the queue.
@@ -93,7 +97,7 @@ export class AnalysisSupervisor {
     });
   }
 
-  private async execute(job: Job): Promise<ToolCallResponse> {
+  private async execute(job: Job): Promise<AnalysisResponse> {
     const workDir = mkdtempSync(join(tmpdir(), 'strata-analysis-'));
     let fd: number | undefined;
     try {
@@ -101,7 +105,7 @@ export class AnalysisSupervisor {
       const outputPath = join(workDir, 'response.json');
       writeFileSync(inputPath, job.input, { mode: 0o600 });
       fd = openSync(inputPath, 'r');
-      return await new Promise<ToolCallResponse>((resolve, reject) => {
+      return await new Promise<AnalysisResponse>((resolve, reject) => {
         const child = spawn(process.execPath, [this.workerPath, outputPath], {
           stdio: [fd!, 'pipe', 'pipe'], detached: process.platform !== 'win32',
           env: { ...process.env, TMPDIR: workDir, TMP: workDir, TEMP: workDir },
@@ -147,7 +151,7 @@ export class AnalysisSupervisor {
             if (failure) throw failure;
             if (code !== 0) throw new Error(`ANALYSIS_FAILED: worker exited ${code}: ${stderr.toString('utf8').slice(-1024)}`);
             if (statSync(outputPath).size > this.limits.responseBytes) throw new Error('RESPONSE_TOO_LARGE: maximum response is 8 MiB');
-            const response = JSON.parse(readFileSync(outputPath, 'utf8')) as ToolCallResponse;
+            const response = JSON.parse(readFileSync(outputPath, 'utf8')) as AnalysisResponse;
             if (!Array.isArray(response?.content) || !response.content.every(item => item.type === 'text' && typeof item.text === 'string')) throw new Error('ANALYSIS_FAILED: invalid worker response');
             resolve(response);
           } catch (err) { reject(err instanceof Error ? err : new Error(String(err))); }

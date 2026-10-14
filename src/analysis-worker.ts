@@ -1,12 +1,13 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { findTool } from './tools';
 import { closeAllDatabases } from './engine/storage/schema';
-import { setLastKnownProjectRoot } from './engine/path-resolver';
+import { getLastKnownProjectRoot, setLastKnownProjectRoot } from './engine/path-resolver';
 import { ANALYSIS_LIMITS } from './analysis-supervisor';
 import type { ToolCallResponse } from './tools/types';
 
 async function main(): Promise<void> {
   let response: ToolCallResponse;
+  let detectedRoot: string | undefined;
   try {
     const input = readFileSync(0, 'utf8');
     if (Buffer.byteLength(input) > ANALYSIS_LIMITS.requestBytes) throw new Error('REQUEST_TOO_LARGE');
@@ -15,13 +16,24 @@ async function main(): Promise<void> {
     const tool = findTool(name);
     if (!tool) throw new Error(`UNKNOWN_TOOL: ${name}`);
     response = await tool.handler(args);
+    if (!response.isError) {
+      detectedRoot = getLastKnownProjectRoot();
+    }
   } catch (err) {
     response = { isError: true, content: [{ type: 'text', text: err instanceof Error ? err.message : String(err) }] };
   } finally { closeAllDatabases(); }
-  const output = JSON.stringify(response);
-  if (Buffer.byteLength(output) > ANALYSIS_LIMITS.responseBytes) response = { isError: true, content: [{ type: 'text', text: 'RESPONSE_TOO_LARGE: maximum response is 8 MiB' }] };
+  const payload = {
+    ...response,
+    ...(detectedRoot ? { projectRoot: detectedRoot } : {}),
+  };
+  const output = JSON.stringify(payload);
+  if (Buffer.byteLength(output) > ANALYSIS_LIMITS.responseBytes) {
+    response = { isError: true, content: [{ type: 'text', text: 'RESPONSE_TOO_LARGE: maximum response is 8 MiB' }] };
+    writeFileSync(process.argv[2], JSON.stringify(response), { mode: 0o600 });
+    return;
+  }
   // Regular files also work where sandboxed Bun socket writes are denied.
-  writeFileSync(process.argv[2], JSON.stringify(response), { mode: 0o600 });
+  writeFileSync(process.argv[2], output, { mode: 0o600 });
 }
 
 if (import.meta.main) main().then(() => process.exit(0), err => { console.error(String(err)); process.exit(1); });

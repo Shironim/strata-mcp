@@ -123,6 +123,7 @@ export function resolveWorkspacePath(rawPath: string, rootHint?: string): string
   // Helper to determine if path is genuinely a system root absolute path
   const isSystemRootAbsolute =
     isWindowsAbsolute ||
+    (isAbsolute(trimmed) && existsSync(canonicalizePath(trimmed))) ||
     /^\/(?:home|Users|var|tmp|root|opt|etc|mnt|media)\b/i.test(trimmed) ||
     (isAbsolute(trimmed) && rootHint && canonicalizePath(trimmed).startsWith(canonicalizePath(rootHint))) ||
     (isAbsolute(trimmed) && lastKnownProjectRoot && canonicalizePath(trimmed).startsWith(canonicalizePath(lastKnownProjectRoot))) ||
@@ -144,7 +145,7 @@ export function resolveWorkspacePath(rawPath: string, rootHint?: string): string
   // Candidate 1: Check against rootHint if provided (handles both "src/..." and "/src/...")
   if (rootHint) {
     const resolvedHint = canonicalizePath(rootHint.trim().replace(/^['"]|['"]$/g, ''));
-    if (canonicalizePath(trimmed).startsWith(resolvedHint)) {
+    if (isAbsolute(trimmed) && canonicalizePath(trimmed).startsWith(resolvedHint)) {
       return canonicalizePath(trimmed);
     }
     const relativePart = normalizedSlashes.replace(/^[/\\]+/, '');
@@ -236,7 +237,7 @@ export function resolveToolTargetPath(
       : typeof args?.path === 'string'
       ? args.path
       : defaultPath;
-  return resolveWorkspacePath(rawPath);
+  return resolveWorkspacePath(rawPath, args?.root);
 }
 
 /**

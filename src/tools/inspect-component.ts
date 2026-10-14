@@ -17,8 +17,9 @@ import type { McpToolDefinition } from './types';
 export const inspectComponentTool: McpToolDefinition = {
   ...TOOL_CATALOG[1],
   handler: async (args: Record<string, any>) => {
-    const targetPathHint = (args.target_path || args.targetPath || args.project_root || args.root)
-      ? String(args.target_path || args.targetPath || args.project_root || args.root)
+    const rawTargetHint = args.root || args.project_root || args.target_path || args.targetPath;
+    const targetPathHint = rawTargetHint && !/\.(vue|tsx|jsx|svelte|astro|ts|js)$/i.test(String(rawTargetHint))
+      ? String(rawTargetHint)
       : undefined;
     const rawPath = (args.path || args.file_path || args.filePath || args.target_path || args.targetPath || args.component || args.component_path)
       ? String(args.path || args.file_path || args.filePath || args.target_path || args.targetPath || args.component || args.component_path)
