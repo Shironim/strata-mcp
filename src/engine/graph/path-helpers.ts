@@ -4,6 +4,8 @@ import { escapeRegExp } from '../patterns';
 import { findProjectRoot } from '../path-resolver';
 import type { AliasConfig } from '../resolver';
 import type { ExtractedImport } from '../../types';
+import ts from 'typescript';
+import { createDocumentAdapter } from '../../adapters/factory';
 
 export { findProjectRoot };
 export type { ExtractedImport };
@@ -116,94 +118,59 @@ export function resolveBarrelExport(
 }
 
 /**
- * Extracts local component imports (static and dynamic lazy imports) from source code.
+ * Extracts runtime import bindings, including namespace members and lazy factories.
  */
-export function extractLocalImports(
+export function extractImports(
   content: string,
-  aliasConfig?: AliasConfig | null
+  filePath?: string
 ): ExtractedImport[] {
   const imports: ExtractedImport[] = [];
-
-  // 1. Static imports
-  const staticImportMatches = content.matchAll(STATIC_IMPORT_PATTERN);
-
-  for (const m of staticImportMatches) {
-    const clause = m[1].trim();
-    const source = m[2].trim();
-
-    // Skip third-party packages (not relative, absolute, or a configured alias)
-    const isLocal =
-      source.startsWith('.') ||
-      source.startsWith('/') ||
-      (aliasConfig?.isAlias(source) ?? false);
-    if (!isLocal) continue;
-
-    // Default import: import ProductCard from './ProductCard.vue'
-    const defaultMatch = clause.match(DEFAULT_IMPORT_CLAUSE_PATTERN);
-    if (defaultMatch) {
-      imports.push({
-        name: defaultMatch[1],
-        alias: undefined,
-        source,
-        isDynamic: false,
-      });
+  const inferredPath = filePath ?? (/^\s*---/.test(content) ? 'file.astro' : /^\s*<(?:script|template)\b/.test(content) ? 'file.vue' : 'file.tsx');
+  const code = createDocumentAdapter(inferredPath, content).getScriptBlocks().map(b => b.content).join('\n');
+  const sf = ts.createSourceFile('file.tsx', code, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const namespaces = new Map<string, string>();
+  const add = (name: string, source: string, isDynamic: boolean, alias?: string) => {
+    if (!imports.some(i => i.name === name && i.alias === alias && i.source === source)) {
+      imports.push({ name, source, isDynamic, alias });
     }
-
-    // Named imports: import { BaseButton as ActionButton, StatusBadge } from './components'
-    const namedBlockMatch = clause.match(NAMED_IMPORT_BLOCK_PATTERN);
-    if (namedBlockMatch) {
-      const items = namedBlockMatch[1].split(',');
-      for (const item of items) {
-        const trimmed = item.trim();
-        if (trimmed.startsWith('type ')) continue;
-        const asMatch = trimmed.match(NAMED_IMPORT_ITEM_PATTERN);
-        if (asMatch) {
-          imports.push({
-            name: asMatch[1],
-            alias: asMatch[2],
-            source,
-            isDynamic: false,
-          });
+  };
+  for (const stmt of sf.statements) {
+    if (!ts.isImportDeclaration(stmt) || !ts.isStringLiteral(stmt.moduleSpecifier) || !stmt.importClause || stmt.importClause.isTypeOnly) continue;
+    const source = stmt.moduleSpecifier.text;
+    const clause = stmt.importClause;
+    if (clause.name) add(clause.name.text, source, false);
+    if (clause.namedBindings && ts.isNamedImports(clause.namedBindings)) {
+      for (const el of clause.namedBindings.elements) {
+        if (!el.isTypeOnly) add(el.propertyName?.text ?? el.name.text, source, false, el.propertyName ? el.name.text : undefined);
+      }
+    } else if (clause.namedBindings && ts.isNamespaceImport(clause.namedBindings)) {
+      namespaces.set(clause.namedBindings.name.text, source);
+    }
+  }
+  function visit(node: ts.Node): void {
+    if (ts.isPropertyAccessExpression(node) && ts.isIdentifier(node.expression)) {
+      const source = namespaces.get(node.expression.text);
+      if (source) add(node.name.text, source, false, node.getText(sf));
+    }
+    if ((ts.isVariableDeclaration(node) || ts.isPropertyAssignment(node)) && node.initializer && ts.isCallExpression(node.initializer)) {
+      const call = node.initializer;
+      const factory = call.expression.getText(sf);
+      if (['defineAsyncComponent', 'lazy', 'React.lazy', 'dynamic'].includes(factory)) {
+        let body: ts.Node | undefined = call.arguments[0];
+        if (body && (ts.isArrowFunction(body) || ts.isFunctionExpression(body))) body = body.body;
+        if (body && ts.isBlock(body)) body = body.statements.find(ts.isReturnStatement)?.expression;
+        if (body && ts.isCallExpression(body) && body.expression.kind === ts.SyntaxKind.ImportKeyword && body.arguments[0] && ts.isStringLiteralLike(body.arguments[0])) {
+          if (ts.isIdentifier(node.name) || ts.isStringLiteral(node.name)) add(node.name.text, body.arguments[0].text, true);
         }
       }
     }
+    ts.forEachChild(node, visit);
   }
-
-  // 2. Dynamic lazy imports: defineAsyncComponent, React.lazy, dynamic(), import()
-  const dynamicMatches = content.matchAll(DYNAMIC_IMPORT_PATTERN);
-
-  for (const m of dynamicMatches) {
-    const source = m[2].trim();
-    const isLocal =
-      source.startsWith('.') ||
-      source.startsWith('/') ||
-      (aliasConfig?.isAlias(source) ?? false);
-    if (isLocal) {
-      imports.push({
-        name: m[1],
-        alias: undefined,
-        source,
-        isDynamic: true,
-      });
-    }
-  }
-
-  const inlineDynamicMatches = content.matchAll(INLINE_ASYNC_COMPONENT_PATTERN);
-  for (const m of inlineDynamicMatches) {
-    const source = m[2].trim();
-    const isLocal =
-      source.startsWith('.') ||
-      source.startsWith('/') ||
-      (aliasConfig?.isAlias(source) ?? false);
-    if (isLocal) {
-      imports.push({
-        name: m[1],
-        alias: undefined,
-        source,
-        isDynamic: true,
-      });
-    }
-  }
-
+  visit(sf);
   return imports;
+}
+
+/** Keeps the public local-import contract; all bindings are available for shadow checks. */
+export function extractLocalImports(content: string, aliasConfig?: AliasConfig | null, filePath?: string): ExtractedImport[] {
+  return extractImports(content, filePath).filter(i => i.source.startsWith('.') || i.source.startsWith('/') || aliasConfig?.isAlias(i.source));
 }

@@ -19,36 +19,53 @@ function isReactEventHandler(propName: string): boolean {
   return REACT_EVENT_HANDLER_PATTERN.test(propName);
 }
 
+/**
+ * Locates the TypeScript interface, type alias, or inline type literal for the entry React component
+ * by inspecting component function parameters or React.FC type arguments.
+ */
+function findReactPropsSnippet(content: string, filePath: string, componentName: string): string | null {
+  const sf = ts.createSourceFile(filePath, content, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const declaredTypes = new Map<string, ts.InterfaceDeclaration | ts.TypeAliasDeclaration>();
+  const components = new Map<string, ts.FunctionDeclaration | ts.VariableDeclaration>();
+  let entry: ts.FunctionDeclaration | ts.VariableDeclaration | ts.Expression | undefined;
+  for (const stmt of sf.statements) {
+    if (ts.isInterfaceDeclaration(stmt) || ts.isTypeAliasDeclaration(stmt)) declaredTypes.set(stmt.name.text, stmt);
+    if (ts.isFunctionDeclaration(stmt)) {
+      if (stmt.name) components.set(stmt.name.text, stmt);
+      if (stmt.modifiers?.some(m => m.kind === ts.SyntaxKind.DefaultKeyword)) entry = stmt;
+    }
+    if (ts.isVariableStatement(stmt)) for (const decl of stmt.declarationList.declarations) {
+      if (ts.isIdentifier(decl.name)) components.set(decl.name.text, decl);
+    }
+    if (ts.isExportAssignment(stmt) && !stmt.isExportEquals) entry = stmt.expression;
+  }
+  if (entry && ts.isIdentifier(entry)) entry = components.get(entry.text);
+  entry ??= components.get(componentName);
+  let targetType: ts.TypeNode | undefined;
+  if (entry && ts.isVariableDeclaration(entry)) {
+    if (entry.type && ts.isTypeReferenceNode(entry.type) && /^(React\.)?(FC|FunctionComponent)$/.test(entry.type.typeName.getText(sf))) targetType = entry.type.typeArguments?.[0];
+    if (entry.initializer && (ts.isArrowFunction(entry.initializer) || ts.isFunctionExpression(entry.initializer))) targetType = entry.initializer.parameters[0]?.type ?? targetType;
+  } else if (entry && (ts.isFunctionDeclaration(entry) || ts.isArrowFunction(entry) || ts.isFunctionExpression(entry))) targetType = entry.parameters[0]?.type;
+  if (targetType) {
+    if (ts.isTypeReferenceNode(targetType)) return declaredTypes.get(targetType.typeName.getText(sf))?.getText(sf) ?? null;
+    if (ts.isTypeLiteralNode(targetType)) return `type Props = ${targetType.getText(sf)}`;
+    return null;
+  }
+  // Retain conventional untyped-component declarations without matching suffixes of unrelated names.
+  return (declaredTypes.get(`${componentName}Props`) ?? declaredTypes.get('Props'))?.getText(sf) ?? null;
+}
+
 export async function extractReactContract(filePath: string, content: string): Promise<ComponentContract> {
   const component = basename(filePath, extname(filePath));
   const props: ComponentPropContract[] = [];
   const emits: ComponentEmitContract[] = [];
   const slots: string[] = [];
 
-  // 1. Search for Props interface or type
-  // Pattern candidate names: [Component]Props, Props
+  // Search for Props interface or type using TypeScript AST resolution
   try {
-    const ifaceMatches = await executeAstGrep({
-      code: content,
-      rule: `
-id: react-props-iface
-language: tsx
-rule:
-  any:
-    - kind: interface_declaration
-      has:
-        field: name
-        regex: '(?:Props|${component}Props)$'
-    - kind: type_alias_declaration
-      has:
-        field: name
-        regex: '(?:Props|${component}Props)$'
-`,
-      language: 'tsx',
-    });
-
-    if (ifaceMatches.length > 0) {
-      const extracted = await extractPropertySignatures(ifaceMatches[0].text, 'tsx');
+    const propsSnippet = findReactPropsSnippet(content, filePath, component);
+    if (propsSnippet) {
+      const extracted = await extractPropertySignatures(propsSnippet, 'tsx');
       for (const p of extracted) {
         if (p.name === 'children') {
           slots.push('default');

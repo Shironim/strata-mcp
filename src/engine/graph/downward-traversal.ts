@@ -349,147 +349,7 @@ async function getDownwardComponentTree(
   const contextRelations: ContextDependencyRelation[] = [];
   const danglingConsumers: ContextDependencyRelation[] = [];
 
-  // ---------------------------------------------------------------------------
-  // 1. FAST PATH: SQLite In-Memory / WAL Graph Traversal (Recursive CTE)
-  // ---------------------------------------------------------------------------
-  try {
-    const db = getWorkspaceDatabase(projectRoot);
-    const normEntry = normalize(entryPath);
-    const rootRow = db
-      .prepare('SELECT id, path, is_page FROM files WHERE path = ?')
-      .get(normEntry) as { id: number; path: string; is_page: number } | undefined;
 
-    if (rootRow) {
-      const rows = db
-        .prepare(`
-          WITH RECURSIVE hierarchy(id, parent_id, depth) AS (
-            SELECT id, NULL, 0 FROM files WHERE path = $entryPath
-            UNION ALL
-            SELECT e.child_file_id, e.parent_file_id, h.depth + 1
-            FROM edges e
-            JOIN hierarchy h ON e.parent_file_id = h.id
-            WHERE h.depth < $maxDepth AND e.is_rendered = 1
-          )
-          SELECT
-            h.depth,
-            p.path AS parent_path,
-            c.path AS child_path,
-            c.is_page,
-            e.import_type,
-            e.payload_json
-          FROM hierarchy h
-          JOIN edges e ON h.id = e.child_file_id AND h.parent_id = e.parent_file_id
-          JOIN files c ON e.child_file_id = c.id
-          JOIN files p ON e.parent_file_id = p.id
-          ORDER BY h.depth ASC;
-        `)
-        .all({ $entryPath: normEntry, $maxDepth: maxDepth }) as Array<{
-          depth: number;
-          parent_path: string;
-          child_path: string;
-          is_page: number;
-          import_type: string;
-          payload_json: string | null;
-        }>;
-
-      if (rows.length > 0) {
-        const rootNode: ComponentTreeNode = {
-          component: basename(rootRow.path),
-          filePath: rootRow.path,
-          depth: 0,
-          isPage: Boolean(rootRow.is_page),
-          children: [],
-        };
-
-        const nodeMap = new Map<string, ComponentTreeNode>();
-        nodeMap.set(normEntry, rootNode);
-        const componentsSet = new Set<string>([normEntry]);
-        let maxDepthFound = 0;
-
-        const fastProviders: ContextDependencyNode[] = [];
-        const fastConsumers: ContextDependencyNode[] = [];
-        const fastContextRelations: ContextDependencyRelation[] = [];
-        const fastDanglingConsumers: ContextDependencyRelation[] = [];
-
-        for (const row of rows) {
-          const parentNode = nodeMap.get(row.parent_path);
-          if (!parentNode) continue;
-
-          if (row.depth > maxDepthFound) maxDepthFound = row.depth;
-          componentsSet.add(row.child_path);
-
-          let payload: EdgePayload | null = null;
-          if (row.payload_json) {
-            try {
-              payload = JSON.parse(row.payload_json);
-            } catch {
-              // ignore malformed payload
-            }
-          }
-
-          if (payload?.contexts?.provided) {
-            fastProviders.push(...payload.contexts.provided);
-          }
-          if (payload?.contexts?.consumed) {
-            fastConsumers.push(...payload.contexts.consumed);
-          }
-
-          const childNode: ComponentTreeNode = {
-            component: basename(row.child_path),
-            filePath: row.child_path,
-            alias: payload?.alias,
-            depth: row.depth,
-            isPage: Boolean(row.is_page),
-            isDynamic: row.import_type === 'dynamic' ? true : undefined,
-            passedProps: payload?.passedProps,
-            children: [],
-          };
-
-          parentNode.children.push(childNode);
-          nodeMap.set(row.child_path, childNode);
-        }
-
-        for (const consumer of fastConsumers) {
-          const matchedProvider = fastProviders.find((p) => p.key === consumer.key);
-          if (matchedProvider) {
-            fastContextRelations.push({
-              key: consumer.key,
-              provider: matchedProvider,
-              consumer,
-              isCoveredInTree: true,
-            });
-          } else {
-            const rel: ContextDependencyRelation = {
-              key: consumer.key,
-              consumer,
-              isCoveredInTree: false,
-              warning: `Context key '${consumer.key}' consumed in '${consumer.component}' has no matching Provider in this hierarchy branch.`,
-            };
-            fastContextRelations.push(rel);
-            fastDanglingConsumers.push(rel);
-          }
-        }
-
-        const contextGraph: ContextDependencyGraph = {
-          providers: fastProviders,
-          consumers: fastConsumers,
-          relations: fastContextRelations,
-          danglingConsumers: fastDanglingConsumers,
-        };
-
-        return {
-          root: rootNode,
-          totalComponents: componentsSet.size,
-          maxDepthReached: maxDepthFound,
-          direction: 'downward',
-          propsDrilling: detectPropsDrilling(rootNode),
-          contextGraph,
-        };
-      }
-    }
-  } catch {
-    // Fallback gracefully to disk traversal if SQLite query fails or table missing
-  }
 
   async function buildSubTree(
     filePath: string,
@@ -552,7 +412,7 @@ async function getDownwardComponentTree(
       }
     }
 
-    const imports = extractLocalImports(content, aliasConfig);
+    const imports = extractLocalImports(content, aliasConfig, normPath);
     const resolvedChildren = new Set<string>();
 
     // 1. Static and dynamic imports

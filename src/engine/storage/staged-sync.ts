@@ -12,8 +12,8 @@ import { isPageFile } from '../tree';
 import { STRATA_VERSION } from '../../version';
 import type { SyncStats } from '../../types';
 
-// Reparse existing edges to populate aliases lost by earlier graph payloads.
-const CACHE_VERSION = `memory-v3:${STRATA_VERSION}`;
+// Reparse imports and state dependencies after AST extraction fixes.
+const CACHE_VERSION = `memory-v4:${STRATA_VERSION}`;
 const CONFIG_FILES = new Set(['package.json', 'tsconfig.json', 'jsconfig.json', '.gitignore', '.strataignore']);
 
 async function hashFile(path: string): Promise<{hash: string; mtime: number; size: number}> {

@@ -1,9 +1,10 @@
 import { readSourceFile } from './source-file';
 import { promises as fs } from 'node:fs';
-import { basename, dirname, extname, relative, resolve } from 'node:path';
+import { basename, dirname, extname, isAbsolute, relative, resolve } from 'node:path';
 import { collectFiles } from './collector';
 import { extractRenderedCustomTags } from './tree';
 import { parseSfc } from './splitter';
+import { parseAstro } from './astro-sfc';
 import type { TemplateSimilarityCluster, TemplateSimilarityResult } from '../types';
 
 interface TemplateFingerprint {
@@ -35,6 +36,14 @@ function extractFingerprint(filePath: string, content: string, rootDir: string):
       } else {
         return null;
       }
+    }
+  } else if (filePath.endsWith('.astro')) {
+    try {
+      const astro = parseAstro(content, filePath);
+      if (!astro.template) return null;
+      templateContent = astro.template.content;
+    } catch {
+      return null;
     }
   } else if (!filePath.endsWith('.tsx') && !filePath.endsWith('.jsx')) {
     // Non-template file without template block
@@ -84,6 +93,7 @@ function computeSimilarity(a: TemplateFingerprint, b: TemplateFingerprint): numb
 
 export interface FindSimilarTemplatesOptions {
   targetPath: string;
+  scopePath?: string;
   threshold?: number;
   excludeDirs?: string[];
 }
@@ -96,6 +106,7 @@ export async function findSimilarTemplates(
 ): Promise<TemplateSimilarityResult> {
   const startTime = performance.now();
   const rootDir = resolve(options.targetPath);
+  const absScope = options.scopePath ? resolve(rootDir, options.scopePath) : undefined;
   const threshold = options.threshold !== undefined ? options.threshold : 0.8;
 
   const allFiles = await collectFiles(rootDir, {
@@ -104,7 +115,12 @@ export async function findSimilarTemplates(
 
   const candidates = allFiles.filter((f) => {
     const ext = extname(f).toLowerCase();
-    return ext === '.vue' || ext === '.astro' || ext === '.tsx' || ext === '.jsx';
+    if (!['.vue', '.astro', '.tsx', '.jsx'].includes(ext)) return false;
+    if (absScope) {
+      const rel = relative(absScope, f);
+      if (rel.startsWith('..') || isAbsolute(rel)) return false;
+    }
+    return true;
   });
 
   // Calculate project-wide dominant component extension to avoid biased fallback

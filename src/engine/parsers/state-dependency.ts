@@ -6,6 +6,9 @@ import type {
 } from '../../types';
 import { COMMON_HOOKS_IGNORE } from '../contract';
 import { escapeRegExp } from '../patterns';
+import ts from 'typescript';
+import { createDocumentAdapter } from '../../adapters/factory';
+import { extractTemplateExpressions } from '../template';
 
 export function extractStateDependencies(
   content: string,
@@ -16,75 +19,85 @@ export function extractStateDependencies(
   const contexts = new Set<string>();
   const composables = new Set<string>();
 
-  // Collect symbols declared/defined in this file to avoid self-dependency (e.g. export function useCartStore())
+  const markup = /^\s*<(?:template|script)\b/.test(content);
+  const astro = /^\s*---/.test(content);
+  const leading = astro ? content.length - content.trimStart().length : 0;
+  const adapter = createDocumentAdapter(astro ? 'file.astro' : markup ? 'file.vue' : 'file.tsx', content.slice(leading));
+  const blocks = adapter.getScriptBlocks().map(b => ({ code: b.content, offset: leading + b.loc.start.offset }));
+  if (astro && !blocks.length) {
+    const match = content.match(/^\s*---[^\S\r\n]*\r?\n([\s\S]*?)\r?\n[ \t]*---/);
+    if (match) blocks.push({ code: match[1], offset: content.indexOf(match[1], leading + 3) });
+  }
+  const template = adapter.getTemplateBlock();
+  if (template && adapter.type === 'vue') {
+    for (const exp of extractTemplateExpressions(template.content)) {
+      const lines = template.content.split('\n');
+      const offset = lines.slice(0, exp.start.line - 1).reduce((n, line) => n + line.length + 1, 0) + exp.start.column - 1;
+      blocks.push({ code: exp.content, offset: leading + template.loc.start.offset + offset });
+    }
+  }
   const declaredDefinitions = new Set<string>();
-  const declRegex = /(?:export\s+)?(?:default\s+)?(?:function|const|let|var|class)\s+([A-Za-z0-9_$]+)/g;
-  for (const m of content.matchAll(declRegex)) {
-    declaredDefinitions.add(m[1]);
-  }
-
-  // 1. Stores: Pinia / Zustand / Redux
-  const storeRegex = /\b(use[A-Za-z0-9_$]*Store)\b/g;
-  for (const m of content.matchAll(storeRegex)) {
-    if (m[1] !== selfComponentName && !declaredDefinitions.has(m[1])) {
-      stores.add(m[1]);
+  const aliases = new Map<string, string>();
+  const storeRegex = /^use[A-Za-z0-9_$]*Store$/;
+  const reduxRegex = /^(useSelector|useDispatch|useAppSelector|useAppDispatch)$/;
+  const hookRegex = /^use[A-Z][A-Za-z0-9_$]*$/;
+  const parsed = blocks.map(b => ({ ...b, sf: ts.createSourceFile('file.tsx', b.code, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX) }));
+  function declarations(node: ts.Node): void {
+    if ((ts.isFunctionDeclaration(node) || ts.isVariableDeclaration(node) || ts.isClassDeclaration(node)) && node.name && ts.isIdentifier(node.name)) declaredDefinitions.add(node.name.text);
+    if (ts.isImportDeclaration(node) && !node.importClause?.isTypeOnly && node.importClause?.namedBindings && ts.isNamedImports(node.importClause.namedBindings)) {
+      for (const el of node.importClause.namedBindings.elements) if (!el.isTypeOnly) aliases.set(el.name.text, el.propertyName?.text ?? el.name.text);
+      if (ts.isStringLiteral(node.moduleSpecifier) && /^@inertiajs\/(vue3|react|svelte|core)$/.test(node.moduleSpecifier.text)) {
+        for (const el of node.importClause.namedBindings.elements) if (!el.isTypeOnly && (el.propertyName?.text ?? el.name.text) === 'router') composables.add(el.name.text);
+      }
     }
+    ts.forEachChild(node, declarations);
   }
-
-  const reduxRegex = /\b(useSelector|useDispatch|useAppSelector|useAppDispatch)\b/g;
-  for (const m of content.matchAll(reduxRegex)) {
-    stores.add(m[1]);
+  parsed.forEach(b => declarations(b.sf));
+  function classify(local: string): void {
+    const name = aliases.get(local) ?? local;
+    if (local === selfComponentName || declaredDefinitions.has(local)) return;
+    if (reduxRegex.test(name)) stores.add(local);
+    else if (name !== 'useStore' && storeRegex.test(name)) stores.add(local);
+    else if (hookRegex.test(name) && name !== 'useContext' && name !== 'useStore' && !COMMON_HOOKS_IGNORE.has(name)) composables.add(local);
   }
-
-  // 2. React Context & Vue inject
-  const contextRegex = /\buseContext\(\s*([A-Za-z0-9_$]+)\s*\)/g;
-  for (const m of content.matchAll(contextRegex)) {
-    contexts.add(m[1]);
-  }
-
-  const vueInjectRegex = /\binject(?:\s*<[^>]*>)?\(\s*['"]?([A-Za-z0-9_$-]+)['"]?/g;
-  for (const m of content.matchAll(vueInjectRegex)) {
-    if (m[1]) contexts.add(m[1]);
-  }
-
-  // 3. Custom Composables / Hooks (useXxx)
-  const hookRegex = /\b(use[A-Z][A-Za-z0-9_$]*)\s*\(/g;
-  for (const m of content.matchAll(hookRegex)) {
-    const hookName = m[1];
-    if (
-      !COMMON_HOOKS_IGNORE.has(hookName) &&
-      !stores.has(hookName) &&
-      hookName !== 'useContext' &&
-      hookName !== selfComponentName &&
-      !declaredDefinitions.has(hookName)
-    ) {
-      composables.add(hookName);
+  // Keep coordinates, but remove non-executable text before access-mode classification.
+  const executable = content.replace(/[^\r\n]/g, ' ').split('');
+  for (const block of parsed) {
+    const { sf, code, offset } = block;
+    const masked = code.split('');
+    const mask = (start: number, end: number) => { for (let i = start; i < end; i++) if (masked[i] !== '\n' && masked[i] !== '\r') masked[i] = ' '; };
+    const scanner = ts.createScanner(ts.ScriptTarget.Latest, false, ts.LanguageVariant.JSX, code);
+    for (let token = scanner.scan(); token !== ts.SyntaxKind.EndOfFileToken; token = scanner.scan()) {
+      if (token === ts.SyntaxKind.SingleLineCommentTrivia || token === ts.SyntaxKind.MultiLineCommentTrivia) mask(scanner.getTokenPos(), scanner.getTextPos());
     }
-  }
-
-  // 4. Inertia Router singleton (Vue 3, React, Svelte, Core) & $inertia global
-  const inertiaRouterImportRegex = /\bimport\s*\{[^}]*\brouter\b[^}]*\}\s*from\s*['"]@inertiajs\/(?:vue3|react|svelte|core)['"]/;
-  const inertiaRouterUsageRegex = /\brouter\.(?:get|post|put|patch|delete|reload|visit)\b/;
-  if (inertiaRouterImportRegex.test(content) || inertiaRouterUsageRegex.test(content)) {
-    composables.add('router');
-  }
-
-  const inertiaGlobalRegex = /\b\$inertia\.(?:get|post|put|patch|delete|reload|visit)\b/;
-  if (inertiaGlobalRegex.test(content)) {
-    composables.add('$inertia');
-  }
-
-  // 5. Nanostores atom extraction (Astro, React, Vue): useStore($atom)
-  const nanostoresRegex = /\buseStore\(\s*([$A-Za-z0-9_]+)\s*\)/g;
-  for (const nm of content.matchAll(nanostoresRegex)) {
-    if (nm[1]) {
-      stores.add(nm[1]);
+    function visit(node: ts.Node): void {
+      if (ts.isTypeNode(node) || ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node) || (ts.isImportDeclaration(node) && node.importClause?.isTypeOnly) || (ts.isImportSpecifier(node) && node.isTypeOnly)) { mask(node.getStart(sf), node.end); return; }
+      if (ts.isImportSpecifier(node)) classify(node.name.text);
+      if (ts.isCallExpression(node)) {
+        if (ts.isIdentifier(node.expression)) {
+          const local = node.expression.text;
+          const name = aliases.get(local) ?? local;
+          const arg = node.arguments[0];
+          if (name === 'useStore' && arg && ts.isIdentifier(arg)) stores.add(arg.text);
+          else if ((name === 'useContext' || name === 'inject') && arg && (ts.isIdentifier(arg) || ts.isStringLiteralLike(arg))) contexts.add(arg.text);
+          else classify(local);
+        } else if (ts.isPropertyAccessExpression(node.expression) && ts.isIdentifier(node.expression.expression)) {
+          const name = node.expression.expression.text;
+          if ((name === 'router' || name === '$inertia') && /^(get|post|put|patch|delete|reload|visit)$/.test(node.expression.name.text)) composables.add(name);
+        }
+      }
+      if (ts.isStringLiteralLike(node) || ts.isJsxText(node) || node.kind === ts.SyntaxKind.RegularExpressionLiteral || node.kind === ts.SyntaxKind.TemplateHead || node.kind === ts.SyntaxKind.TemplateMiddle || node.kind === ts.SyntaxKind.TemplateTail) mask(node.getStart(sf), node.end);
+      ts.forEachChild(node, visit);
     }
+    visit(sf);
+    for (let i = 0; i < masked.length; i++) executable[offset + i] = masked[i];
   }
+  const executableContent = executable.join('');
 
   // 6. Granular tracking of Access Modes (read, write, watch) per dependency
   const items: StateDependencyItem[] = [];
-  const lines = content.split('\n');
+  const lines = executableContent.split('\n');
+  const sourceLines = content.split('\n');
 
   interface TrackedDep {
     kind: 'store' | 'context' | 'composable';
@@ -110,7 +123,7 @@ export function extractStateDependencies(
       `(?:const|let|var)\\s+([A-Za-z0-9_$]+)\\s*=\\s*(?:await\\s+)?${escapeRegExp(ident)}\\s*\\(`,
       'g'
     );
-    for (const match of content.matchAll(instRegex)) {
+    for (const match of executableContent.matchAll(instRegex)) {
       instanceVars.add(match[1]);
     }
 
@@ -119,7 +132,7 @@ export function extractStateDependencies(
       `(?:const|let|var)\\s*\\{([^}]+)\\}\\s*=\\s*(?:await\\s+)?${escapeRegExp(ident)}\\s*\\(`,
       'g'
     );
-    for (const match of content.matchAll(destructureRegex)) {
+    for (const match of executableContent.matchAll(destructureRegex)) {
       const vars = match[1]
         .split(',')
         .map((v) => v.trim().split(':')[0].trim())
@@ -142,7 +155,7 @@ export function extractStateDependencies(
       `(?:const|let|var)\\s*\\[\\s*([A-Za-z0-9_$]+)?\\s*,\\s*([A-Za-z0-9_$]+)\\s*\\]\\s*=\\s*(?:await\\s+)?${escapeRegExp(ident)}\\s*\\(`,
       'g'
     );
-    for (const match of content.matchAll(arrayDestructureRegex)) {
+    for (const match of executableContent.matchAll(arrayDestructureRegex)) {
       if (match[1]) readVars.add(match[1]);
       if (match[2]) actionVars.add(match[2]);
     }
@@ -157,8 +170,8 @@ export function extractStateDependencies(
   for (let idx = 0; idx < lines.length; idx++) {
     const lineNum = idx + 1;
     const line = lines[idx];
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('//') || trimmed.startsWith('/*')) continue;
+    const trimmed = sourceLines[idx].trim();
+    if (!line.trim()) continue;
 
     for (const dep of allTracked) {
       let matchedMode: StateAccessMode | null = null;

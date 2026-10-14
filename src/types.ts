@@ -404,6 +404,7 @@ export interface UnusedComponentsResult {
 
 export interface UnusedComponentsOptions {
   targetPath: string;
+  scopePath?: string;
   ignorePatterns?: string[];
   excludeDirs?: string[];
   excludePages?: boolean;
@@ -448,6 +449,8 @@ export interface RouteManifestResult {
 
 export interface ScanRoutesOptions {
   targetPath: string;
+  excludeDirs?: string[];
+  scopePath?: string;
   frameworkHint?: RouteFramework;
   prefix?: string;
   view?: 'summary' | 'full' | 'tree';
@@ -595,7 +598,9 @@ export interface SymbolSliceResult {
   signature?: string;
   complexitySmell?: ComplexitySmell;
   blastRadius?: {
-    totalConsumers: number;
+    status?: 'verified' | 'unknown';
+    reason?: string;
+    totalConsumers: number | null;
     callers: Array<{ filePath: string; line?: number }>;
     coveringTests?: string[];
     internalCalls?: string[];
@@ -662,6 +667,7 @@ export interface StateChainResult {
 }
 
 export interface TraceStateChainOptions {
+  role?: 'all' | 'mutators' | 'readers';
   identifier: string;
   targetPath?: string;
   direction?: 'consumers' | 'dependencies' | 'both';

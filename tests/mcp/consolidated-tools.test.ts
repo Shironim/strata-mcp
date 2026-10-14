@@ -108,7 +108,7 @@ describe('routes and API contracts through audit_frontend', () => {
       const direct = run([target === 'routes' ? 'routes' : 'apis', root, ...options]);
       const audit = run(['audit', root, '--target', target, ...options]);
       const response = await auditFrontendTool.handler({ path: root, target,
-        view: 'tree', prefix: '/account', scope_path: 'src', format: 'json' });
+        view: 'tree', prefix: '/account', scope_path: target === 'routes' ? 'pages' : 'src', format: 'json' });
       const mcp = JSON.parse(response.content[0].text);
       if (target === 'routes') {
         expect(audit.routes).toEqual(direct.routes);

@@ -338,38 +338,46 @@ export async function extractWorkspaceApiContracts(
   const files = await collectFiles(scanTarget, { excludeDirs: options?.excludeDirs, ignoreRoot: root });
 
   const allEndpoints: ApiContractItem[] = [];
-  const endpointSummary: Record<string, { methods: ApiMethod[]; callers: string[] }> = {};
+  const summaryMap = new Map<string, { methods: ApiMethod[]; callers: string[] }>();
 
   for (const file of files) {
+    let code = '';
     try {
-      const code = await readSourceFile(file);
-      const items = extractApiContractsFromCode(code, file);
-
-      for (const item of items) {
-        allEndpoints.push(item);
-        const key = item.endpoint;
-
-        if (!endpointSummary[key]) {
-          endpointSummary[key] = { methods: [], callers: [] };
-        }
-
-        if (!endpointSummary[key].methods.includes(item.method)) {
-          endpointSummary[key].methods.push(item.method);
-        }
-
-        const relPath = relative(root, item.file);
-        if (!endpointSummary[key].callers.includes(relPath)) {
-          endpointSummary[key].callers.push(relPath);
-        }
-      }
+      code = await readSourceFile(file);
     } catch {
       // Ignore unreadable files
+      continue;
+    }
+
+    const items = extractApiContractsFromCode(code, file);
+
+    for (const item of items) {
+      allEndpoints.push(item);
+      const key = item.endpoint;
+
+      let entry = summaryMap.get(key);
+      if (!entry) {
+        entry = { methods: [], callers: [] };
+        summaryMap.set(key, entry);
+      }
+
+      if (!entry.methods.includes(item.method)) {
+        entry.methods.push(item.method);
+      }
+
+      const relPath = relative(root, item.file);
+      if (!entry.callers.includes(relPath)) {
+        entry.callers.push(relPath);
+      }
     }
   }
 
+  const endpointSummary: Record<string, { methods: ApiMethod[]; callers: string[] }> =
+    Object.fromEntries(summaryMap.entries());
+
   return {
     workspaceRoot: root,
-    totalEndpointsFound: Object.keys(endpointSummary).length,
+    totalEndpointsFound: summaryMap.size,
     endpoints: allEndpoints,
     endpointSummary,
     _meta: {

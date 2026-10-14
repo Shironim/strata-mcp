@@ -62,6 +62,8 @@ export const auditFrontendTool: McpToolDefinition = {
       if (target === 'routes') {
         const manifest = await scanRoutes({
           targetPath,
+          scopePath,
+          excludeDirs,
           frameworkHint,
           prefix: args.prefix ? String(args.prefix) : undefined,
           view: routeView,
@@ -79,6 +81,7 @@ export const auditFrontendTool: McpToolDefinition = {
       if (target === 'dead-components') {
         const result = await findUnusedComponents({
           targetPath,
+          scopePath,
           ignorePatterns,
           excludePages: !includePages,
           excludeDirs,
@@ -94,7 +97,7 @@ export const auditFrontendTool: McpToolDefinition = {
       }
 
       if (target === 'dead-state') {
-        const result = await findUnusedState(targetPath, { scopePath });
+        const result = await findUnusedState(targetPath, { scopePath, excludeDirs });
         return {
           content: [
             {
@@ -108,6 +111,7 @@ export const auditFrontendTool: McpToolDefinition = {
       if (target === 'similar-templates') {
         const result = await findSimilarTemplates({
           targetPath,
+          scopePath,
           threshold,
           excludeDirs,
         });
@@ -199,19 +203,23 @@ export const auditFrontendTool: McpToolDefinition = {
       const [routes, unusedComponents, unusedState, similarTemplates, designSystemAudit, bundleAudit, apiContracts] = await Promise.all([
         scanRoutes({
           targetPath,
+          scopePath,
+          excludeDirs,
           frameworkHint,
           prefix: args.prefix ? String(args.prefix) : undefined,
           view: args.view ? routeView : undefined,
         }),
         findUnusedComponents({
           targetPath,
+          scopePath,
           ignorePatterns,
           excludePages: !includePages,
           excludeDirs,
         }),
-        findUnusedState(targetPath, { scopePath }),
+        findUnusedState(targetPath, { scopePath, excludeDirs }),
         findSimilarTemplates({
           targetPath,
+          scopePath,
           threshold,
           excludeDirs,
         }),

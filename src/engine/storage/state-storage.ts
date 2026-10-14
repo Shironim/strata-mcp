@@ -1,9 +1,11 @@
 import { readSourceFile } from '../source-file';
 import { promises as fs } from 'node:fs';
-import { basename, extname, normalize, resolve } from 'node:path';
+import { basename, extname, isAbsolute, normalize, relative, resolve } from 'node:path';
 import { collectFiles } from '../collector';
 import { getWorkspaceDatabase } from './schema';
 import { syncWorkspace } from './delta-sync';
+import ts from 'typescript';
+import { createDocumentAdapter } from '../../adapters/factory';
 import type {
   StateChainNode,
   StateChainResult,
@@ -197,17 +199,20 @@ export function formatStateImpactAsText(result: StateImpactResult): string {
  */
 export async function findUnusedState(
   workspaceRoot: string,
-  options?: { scopePath?: string }
+  options?: { scopePath?: string; excludeDirs?: string[] }
 ): Promise<UnusedStateResult> {
   const startTime = performance.now();
   const absRoot = resolve(workspaceRoot);
-  await syncWorkspace(absRoot, options?.scopePath);
+  // Scope limits findings; refresh outside consumers before declaring scoped state unused.
+  await syncWorkspace(absRoot);
   const db = getWorkspaceDatabase(absRoot);
 
   // 1. Identify all state candidate files in the workspace or scoped sub-path
   const scanTarget = options?.scopePath ? resolve(absRoot, options.scopePath) : absRoot;
-  const allFiles = await collectFiles(scanTarget, { ignoreRoot: absRoot });
+  const allFiles = await collectFiles(absRoot, { excludeDirs: options?.excludeDirs });
   const stateCandidates = allFiles.filter((f) => {
+    const scopedPath = relative(scanTarget, f);
+    if (scopedPath === '..' || scopedPath.startsWith('../') || scopedPath.startsWith('..\\') || isAbsolute(scopedPath)) return false;
     const norm = f.replace(/\\/g, '/').toLowerCase();
     const ext = extname(f).toLowerCase();
     if (!['.ts', '.js', '.vue', '.tsx', '.jsx'].includes(ext)) return false;
@@ -374,48 +379,75 @@ export async function traceStateChain(
 
   const consumers: StateChainNode[] = [];
   const dependencies: StateChainNode[] = [];
+  const roleFilter = options.role || 'all';
 
-  // 1. Find the declaring file directly in SQLite
-  let declaringFile = db
+  // Helper to check if a file actually declares/exports the identifier
+  async function fileDeclaresIdentifier(filePath: string, ident: string): Promise<boolean> {
+    try {
+      const code = await readSourceFile(filePath);
+      for (const block of createDocumentAdapter(filePath, code).getScriptBlocks()) {
+        const sf = ts.createSourceFile(filePath, block.content, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+        for (const stmt of sf.statements) {
+          if ((ts.isFunctionDeclaration(stmt) || ts.isClassDeclaration(stmt)) && stmt.name?.text === ident) return true;
+          if (ts.isVariableStatement(stmt) && stmt.declarationList.declarations.some(d => ts.isIdentifier(d.name) && d.name.text === ident)) return true;
+          if (ts.isExportDeclaration(stmt) && !stmt.isTypeOnly && !stmt.moduleSpecifier && stmt.exportClause && ts.isNamedExports(stmt.exportClause) && stmt.exportClause.elements.some(e => !e.isTypeOnly && e.name.text === ident)) return true;
+        }
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  }
+
+  // 1. Find the declaring file:
+  // Step A: Check candidate files matching identifier path
+  let declaringFile: { id: number; path: string } | null = null;
+  const pathCandidates = db
     .query(`
       SELECT id, path FROM files
       WHERE path LIKE '%/' || ? || '.%'
          OR path LIKE '%/' || ? || '/index.%'
-      LIMIT 1;
+         OR LOWER(path) LIKE '%/' || LOWER(?) || '.%'
+         OR LOWER(path) LIKE '%/' || LOWER(?) || '/index.%'
     `)
-    .get(identifier, identifier) as { id: number; path: string } | null;
+    .all(identifier, identifier, identifier, identifier) as Array<{ id: number; path: string }>;
 
-  if (!declaringFile) {
-    declaringFile = db
-      .query(`
-        SELECT id, path FROM files
-        WHERE LOWER(path) LIKE '%/' || LOWER(?) || '.%'
-           OR LOWER(path) LIKE '%/' || LOWER(?) || '/index.%'
-        LIMIT 1;
-      `)
-      .get(identifier, identifier) as { id: number; path: string } | null;
+  for (const c of pathCandidates) {
+    if (await fileDeclaresIdentifier(c.path, identifier)) {
+      declaringFile = c;
+      break;
+    }
   }
 
+  // Step B: Check files imported by consumers of identifier
   if (!declaringFile) {
-    declaringFile = db
+    const importedByConsumers = db
       .query(`
-        SELECT f.id, f.path FROM files f
-        JOIN state_deps s ON s.file_id = f.id
-        WHERE s.identifier = ? AND s.access_mode = 'write'
-        LIMIT 1;
-      `)
-      .get(identifier) as { id: number; path: string } | null;
-  }
-
-  if (!declaringFile) {
-    declaringFile = db
-      .query(`
-        SELECT f.id, f.path FROM files f
-        JOIN state_deps s ON s.file_id = f.id
+        SELECT DISTINCT c.id, c.path FROM files c
+        JOIN edges e ON e.child_file_id = c.id
+        JOIN files p ON e.parent_file_id = p.id
+        JOIN state_deps s ON s.file_id = p.id
         WHERE s.identifier = ?
-        LIMIT 1;
       `)
-      .get(identifier) as { id: number; path: string } | null;
+      .all(identifier) as Array<{ id: number; path: string }>;
+
+    for (const c of importedByConsumers) {
+      if (await fileDeclaresIdentifier(c.path, identifier)) {
+        declaringFile = c;
+        break;
+      }
+    }
+  }
+
+  // Step C: Scan all other files in files table for explicit export of identifier
+  if (!declaringFile) {
+    const allFiles = db.query('SELECT id, path FROM files').all() as Array<{ id: number; path: string }>;
+    for (const c of allFiles) {
+      if (await fileDeclaresIdentifier(c.path, identifier)) {
+        declaringFile = c;
+        break;
+      }
+    }
   }
 
   // 2. Consumers (Upward): Files consuming this identifier and components consuming them
@@ -425,25 +457,40 @@ export async function traceStateChain(
 
     const directRows = db
       .query(`
-        SELECT DISTINCT f.id, f.path, s.kind
+        SELECT f.id, f.path, s.kind, s.access_mode
         FROM state_deps s
         JOIN files f ON s.file_id = f.id
         WHERE s.identifier = ?
       `)
-      .all(identifier) as Array<{ id: number; path: string; kind: string }>;
+      .all(identifier) as Array<{ id: number; path: string; kind: string; access_mode: string }>;
 
-    for (const row of directRows) {
-      if (!visitedConsumers.has(row.path)) {
-        visitedConsumers.add(row.path);
+    // Aggregate by file to evaluate mutator vs reader role
+    const directFileMap = new Map<string, { id: number; path: string; kind: string; isMutator: boolean }>();
+    for (const r of directRows) {
+      const existing = directFileMap.get(r.path);
+      const isMutator = r.access_mode === 'write';
+      if (!existing) {
+        directFileMap.set(r.path, { id: r.id, path: r.path, kind: r.kind, isMutator });
+      } else if (isMutator) {
+        existing.isMutator = true;
+      }
+    }
+
+    for (const item of directFileMap.values()) {
+      if (roleFilter === 'mutators' && !item.isMutator) continue;
+      if (roleFilter === 'readers' && item.isMutator) continue;
+
+      if (!visitedConsumers.has(item.path)) {
+        visitedConsumers.add(item.path);
         const node: StateChainNode = {
-          identifier: row.path.split(/[/\\]/).pop() || row.path,
-          filePath: row.path,
-          kind: row.kind as any,
+          identifier: item.path.split(/[/\\]/).pop() || item.path,
+          filePath: item.path,
+          kind: item.kind as any,
           direction: 'consumer',
           depth: 1,
         };
         consumers.push(node);
-        currentFiles.push({ path: row.path, fileId: row.id, depth: 1 });
+        currentFiles.push({ path: item.path, fileId: item.id, depth: 1 });
       }
     }
 

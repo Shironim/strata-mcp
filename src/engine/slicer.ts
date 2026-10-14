@@ -15,6 +15,7 @@ import type { RawMatch, SliceSymbolOptions, SymbolKind, SymbolSliceResult } from
 export function buildSymbolRuleYaml(symbolName: string, lang: string = 'ts'): string {
   const safeLang = lang === 'jsx' || lang === 'tsx' ? 'tsx' : 'ts';
   const escapedName = escapeRegExp(symbolName);
+  const yamlRegex = escapedName.replace(/'/g, "''");
 
   return `id: find-symbol-${Date.now()}
 language: ${safeLang}
@@ -26,32 +27,32 @@ rule:
           - kind: function_declaration
             has:
               field: name
-              regex: "^${escapedName}$"
+              regex: '^${yamlRegex}$'
           - kind: lexical_declaration
             has:
               kind: variable_declarator
               has:
                 field: name
-                regex: "^${escapedName}$"
+                regex: '^${yamlRegex}$'
           - kind: class_declaration
             has:
               field: name
-              regex: "^${escapedName}$"
+              regex: '^${yamlRegex}$'
           - kind: interface_declaration
             has:
               field: name
-              regex: "^${escapedName}$"
+              regex: '^${yamlRegex}$'
           - kind: type_alias_declaration
             has:
               field: name
-              regex: "^${escapedName}$"
+              regex: '^${yamlRegex}$'
     - kind: function_declaration
       not:
         inside:
           kind: export_statement
       has:
         field: name
-        regex: "^${escapedName}$"
+        regex: '^${yamlRegex}$'
     - kind: lexical_declaration
       not:
         inside:
@@ -60,32 +61,32 @@ rule:
         kind: variable_declarator
         has:
           field: name
-          regex: "^${escapedName}$"
+          regex: '^${yamlRegex}$'
     - kind: class_declaration
       not:
         inside:
           kind: export_statement
       has:
         field: name
-        regex: "^${escapedName}$"
+        regex: '^${yamlRegex}$'
     - kind: interface_declaration
       not:
         inside:
           kind: export_statement
       has:
         field: name
-        regex: "^${escapedName}$"
+        regex: '^${yamlRegex}$'
     - kind: type_alias_declaration
       not:
         inside:
           kind: export_statement
       has:
         field: name
-        regex: "^${escapedName}$"
+        regex: '^${yamlRegex}$'
     - kind: method_definition
       has:
         field: name
-        regex: "^${escapedName}$"
+        regex: '^${yamlRegex}$'
 `;
 }
 
@@ -229,6 +230,11 @@ export async function sliceSymbol(options: SliceSymbolOptions): Promise<SymbolSl
     if (options.includeBlastRadius !== false) {
       const workspaceRoot = options.workspaceRoot || findProjectRoot(targetFile) || dirname(targetFile);
       try {
+        const { isWorkspaceIndexed } = await import('./storage/schema');
+        if (!isWorkspaceIndexed(workspaceRoot)) throw new Error('Workspace is not indexed');
+        const { syncWorkspace } = await import('./storage/delta-sync');
+        await syncWorkspace(workspaceRoot);
+
         const db = getWorkspaceDatabase(workspaceRoot);
         const callersList: Array<{ filePath: string; line?: number }> = [];
 
@@ -275,14 +281,17 @@ export async function sliceSymbol(options: SliceSymbolOptions): Promise<SymbolSl
           .map((c) => c.filePath);
 
         blastRadius = {
+          status: 'verified',
           totalConsumers: productionCallers.length,
           callers: productionCallers,
           coveringTests,
           internalCalls,
         };
-      } catch {
+      } catch (error) {
         blastRadius = {
-          totalConsumers: 0,
+          status: 'unknown',
+          reason: error instanceof Error ? error.message : String(error),
+          totalConsumers: null,
           callers: [],
           coveringTests: [],
           internalCalls,
@@ -362,7 +371,9 @@ export function formatSymbolSliceAsText(result: SymbolSliceResult): string {
 
   if (result.blastRadius) {
     lines.push('**Blast Radius:**');
-    if (result.blastRadius.callers.length > 0) {
+    if (result.blastRadius.status === 'unknown') {
+      lines.push(`- Consumers and covering tests: unknown (${result.blastRadius.reason})`);
+    } else if (result.blastRadius.callers.length > 0) {
       lines.push(`- Consumers (${result.blastRadius.totalConsumers} files):`);
       for (const caller of result.blastRadius.callers.slice(0, 10)) {
         lines.push(`  - \`${caller.filePath}\``);
@@ -374,12 +385,13 @@ export function formatSymbolSliceAsText(result: SymbolSliceResult): string {
       lines.push('- Consumers: None found in workspace index');
     }
 
-    if (result.blastRadius.coveringTests && result.blastRadius.coveringTests.length > 0) {
-      lines.push(`- Covering tests: \`${result.blastRadius.coveringTests.slice(0, 5).join('`, `')}\``);
-    } else {
-      lines.push('- Covering tests: ⚠️ no covering tests found');
+    if (result.blastRadius.status !== 'unknown') {
+      if (result.blastRadius.coveringTests?.length) {
+        lines.push(`- Covering tests: \`${result.blastRadius.coveringTests.slice(0, 5).join('\`, \`')}\``);
+      } else {
+        lines.push('- Covering tests: ⚠️ no covering tests found');
+      }
     }
-
     if (result.blastRadius.internalCalls && result.blastRadius.internalCalls.length > 0) {
       lines.push(`- Internal calls: \`${result.blastRadius.internalCalls.join('`, `')}\``);
     }

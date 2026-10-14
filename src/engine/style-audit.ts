@@ -1,6 +1,6 @@
 import { readSourceFile } from './source-file';
 import { promises as fs } from 'node:fs';
-import { extname, relative, resolve } from 'node:path';
+import { extname, isAbsolute, relative, resolve } from 'node:path';
 import { collectFiles } from './collector';
 import type {
   A11yViolation,
@@ -36,7 +36,8 @@ export async function auditDesignTokens(
 ): Promise<DesignSystemAuditResult> {
   const startTime = Date.now();
   const rootDir = resolve(options.targetPath);
-  const allFiles = await collectFiles(rootDir);
+  const absScope = options.scopePath ? resolve(rootDir, options.scopePath) : undefined;
+  const allFiles = await collectFiles(rootDir, { excludeDirs: options.excludeDirs });
 
   const arbitraryTokens: ArbitraryTokenViolation[] = [];
   const radiusDistribution: Record<string, number> = {};
@@ -47,8 +48,11 @@ export async function auditDesignTokens(
     const ext = extname(file).toLowerCase();
     if (!COMPONENT_EXTENSIONS.has(ext)) continue;
 
-    if (options.scopePath && !file.includes(options.scopePath)) {
-      continue;
+    if (absScope) {
+      const rel = relative(absScope, file);
+      if (rel.startsWith('..') || isAbsolute(rel)) {
+        continue;
+      }
     }
 
     let content = '';

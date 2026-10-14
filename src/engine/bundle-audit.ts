@@ -1,6 +1,6 @@
 import { readSourceFile } from './source-file';
 import { promises as fs } from 'node:fs';
-import { extname, relative, resolve } from 'node:path';
+import { extname, isAbsolute, relative, resolve } from 'node:path';
 import { collectFiles } from './collector';
 import type { BundleAuditResult, BundleWeightWarning } from '../types';
 
@@ -48,6 +48,7 @@ export interface AuditBundleOptions {
 export async function auditBundleHealth(options: AuditBundleOptions): Promise<BundleAuditResult> {
   const startTime = performance.now();
   const rootDir = resolve(options.targetPath);
+  const absScope = options.scopePath ? resolve(rootDir, options.scopePath) : undefined;
   const allFiles = await collectFiles(rootDir, { excludeDirs: options.excludeDirs });
 
   const heavyEagerImports: BundleWeightWarning[] = [];
@@ -62,8 +63,11 @@ export async function auditBundleHealth(options: AuditBundleOptions): Promise<Bu
       continue;
     }
 
-    if (options.scopePath && !file.includes(options.scopePath)) {
-      continue;
+    if (absScope) {
+      const rel = relative(absScope, file);
+      if (rel.startsWith('..') || isAbsolute(rel)) {
+        continue;
+      }
     }
 
     let content = '';

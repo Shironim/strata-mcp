@@ -662,7 +662,7 @@ export async function main(argv: string[] = process.argv.slice(2)) {
       const scopePath = (flags['scope-path'] || flags.scopePath || flags.scope_path || flags['scope-filter'] || flags.scopeFilter) as string | undefined;
 
       if (target === 'dead-state') {
-        const result = await findUnusedState(auditPath, { scopePath });
+        const result = await findUnusedState(auditPath, { scopePath, excludeDirs });
         if (isJson) {
           console.log(JSON.stringify(result, null, 2));
         } else {
@@ -674,6 +674,8 @@ export async function main(argv: string[] = process.argv.slice(2)) {
       if (target === 'routes') {
         const result = await scanRoutes({
           targetPath: auditPath,
+          scopePath,
+          excludeDirs,
           frameworkHint: flags.framework as RouteFramework | undefined,
           prefix: (flags.prefix as string) || undefined,
           view: (flags.view as 'summary' | 'full' | 'tree') || 'summary',
@@ -689,6 +691,7 @@ export async function main(argv: string[] = process.argv.slice(2)) {
       if (target === 'similar-templates') {
         const result = await findSimilarTemplates({
           targetPath: auditPath,
+          scopePath,
           threshold: parseSafeFloat(flags.threshold),
           excludeDirs,
         });
@@ -769,19 +772,23 @@ export async function main(argv: string[] = process.argv.slice(2)) {
           await Promise.all([
             scanRoutes({
               targetPath: auditPath,
+              scopePath,
+              excludeDirs,
               frameworkHint: flags.framework as RouteFramework | undefined,
               prefix: (flags.prefix as string) || undefined,
               view: (flags.view as 'summary' | 'full' | 'tree') || undefined,
             }),
             findUnusedComponents({
               targetPath: auditPath,
+              scopePath,
               ignorePatterns: flags.ignore ? String(flags.ignore).split(',') : undefined,
               excludePages: flags['include-pages'] ? false : true,
               excludeDirs,
             }),
-            findUnusedState(auditPath, { scopePath }),
+            findUnusedState(auditPath, { scopePath, excludeDirs }),
             findSimilarTemplates({
               targetPath: auditPath,
+              scopePath,
               threshold: parseSafeFloat(flags.threshold),
               excludeDirs,
             }),

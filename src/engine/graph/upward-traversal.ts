@@ -1,4 +1,5 @@
 import { readSourceFile } from '../source-file';
+import { extractImports } from './path-helpers';
 import { existsSync, promises as fs, statSync, readFileSync } from "node:fs";
 import { basename, dirname, extname, join, normalize, resolve } from "node:path";
 import { collectFiles } from "../collector";
@@ -25,7 +26,6 @@ import {
   isPageFile,
   resolveImportPath,
   resolveBarrelExport,
-  extractLocalImports,
 } from "./resolution";
 import {
   normalizeScopeFilters,
@@ -109,6 +109,21 @@ export async function getUpwardComponentTree(
     }
   }
 
+  // Index component candidate names to detect collisions for auto-import resolution
+  const candidateToFileMap = new Map<string, string[]>();
+  for (const file of allFiles) {
+    const ext = extname(file).toLowerCase();
+    if (ext === '.vue' || ext === '.astro' || ext === '.tsx' || ext === '.jsx') {
+      const base = basename(file, ext);
+      for (const cand of getCandidateNames(base)) {
+        const key = cand.toLowerCase();
+        const list = candidateToFileMap.get(key) || [];
+        if (!list.includes(normalize(file))) list.push(normalize(file));
+        candidateToFileMap.set(key, list);
+      }
+    }
+  }
+
   // Checks if sourceFile directly imports or references targetPath
   function fileConsumesTarget(
     sourceFile: string,
@@ -118,9 +133,12 @@ export async function getUpwardComponentTree(
     if (sourceFile === targetPath) return false;
 
     // Check 1: Static and dynamic imports in source
-    const imports = extractLocalImports(sourceContent, aliasConfig);
+    const imports = extractImports(sourceContent, sourceFile);
+    const explicitlyBoundNames = new Set<string>();
+
     for (const imp of imports) {
-      let resolved = resolveImportPath(sourceFile, imp.source, aliasConfig);
+      const isLocal = imp.source.startsWith('.') || imp.source.startsWith('/') || aliasConfig?.isAlias(imp.source);
+      let resolved = isLocal ? resolveImportPath(sourceFile, imp.source, aliasConfig) : null;
       if (resolved) {
         if (
           resolved.endsWith('index.ts') ||
@@ -134,12 +152,31 @@ export async function getUpwardComponentTree(
           return true;
         }
       }
+      const boundName = imp.alias || imp.name;
+      if (boundName && boundName !== '*') {
+        for (const cand of getCandidateNames(boundName)) explicitlyBoundNames.add(cand.toLowerCase());
+      }
     }
 
     // Check 2: Template / JSX auto-import or direct tag references
+    // Only valid if:
+    // 1. The tag is NOT explicitly imported from another file
+    // 2. The component name uniquely resolves to targetPath in the project without collision
     const targetBase = basename(targetPath, extname(targetPath));
     const candidateNames = getCandidateNames(targetBase);
     for (const cand of candidateNames) {
+      if (explicitlyBoundNames.has(cand.toLowerCase())) {
+        continue;
+      }
+      const matchingFiles = candidateToFileMap.get(cand.toLowerCase()) || [];
+      if (matchingFiles.length > 1) {
+        // Collision: multiple components have this candidate name, requires explicit import
+        continue;
+      }
+      if (matchingFiles.length === 1 && matchingFiles[0] !== targetPath) {
+        continue;
+      }
+
       const tagPattern = new RegExp(
         `<(?:[A-Za-z0-9_$.]+\\.)?${escapeRegExp(cand)}[\\s/>]|:is=['"]${escapeRegExp(cand)}['"]`
       );

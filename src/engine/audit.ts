@@ -1,6 +1,6 @@
 import { readSourceFile } from './source-file';
 import { promises as fs } from 'node:fs';
-import { basename, extname, normalize, relative, resolve } from 'node:path';
+import { basename, extname, isAbsolute, normalize, relative, resolve } from 'node:path';
 import { collectFiles } from './collector';
 import { getCandidateNames } from './template';
 import { detectFramework } from './contract';
@@ -71,24 +71,33 @@ export async function findUnusedComponents(
 ): Promise<UnusedComponentsResult> {
   const startTime = performance.now();
   const targetDir = resolve(options.targetPath);
+  const absScope = options.scopePath ? resolve(targetDir, options.scopePath) : undefined;
   const allFiles = await collectFiles(targetDir, {
     excludeDirs: options.excludeDirs,
   });
 
-  const defaultIgnores = [
-    '**/pages/**',
-    '**/views/**',
-    '**/routes/**',
-    '**/app/**',
+  const defaultTestLayoutIgnores = [
     '**/layouts/**',
     '**/*.stories.*',
     '**/*.test.*',
     '**/*.spec.*',
   ];
 
-  const ignorePatterns = options.ignorePatterns && options.ignorePatterns.length > 0
-    ? options.ignorePatterns
-    : defaultIgnores;
+  const defaultPageIgnores = [
+    '**/pages/**',
+    '**/views/**',
+    '**/routes/**',
+    '**/app/**',
+  ];
+
+  const excludePages = options.excludePages !== false;
+
+  const ignorePatterns =
+    options.ignorePatterns && options.ignorePatterns.length > 0
+      ? options.ignorePatterns
+      : excludePages
+        ? [...defaultPageIgnores, ...defaultTestLayoutIgnores]
+        : defaultTestLayoutIgnores;
 
   function shouldIgnore(filePath: string): boolean {
     const relPath = relative(targetDir, filePath).replace(/\\/g, '/');
@@ -106,7 +115,7 @@ export async function findUnusedComponents(
     return false;
   }
 
-  // Pass 1: Collect component declarations
+  // Pass 1: Collect component declarations (scoped to scopePath if provided)
   const declaredComponents: {
     name: string;
     fileName: string;
@@ -120,6 +129,10 @@ export async function findUnusedComponents(
   for (const file of allFiles) {
     const ext = extname(file).toLowerCase();
     if (!['.vue', '.astro', '.tsx', '.jsx'].includes(ext)) continue;
+    if (absScope) {
+      const rel = relative(absScope, file);
+      if (rel.startsWith('..') || isAbsolute(rel)) continue;
+    }
     if (shouldIgnore(file)) continue;
 
     const base = basename(file, ext);
@@ -186,7 +199,6 @@ export async function findUnusedComponents(
   const unreferencedPages = unused.filter((c) => c.isPage);
 
   // If excludePages is explicitly false, unusedComponents contains both. Otherwise, only pure reusable components.
-  const excludePages = options.excludePages !== false;
   const finalUnused = excludePages ? orphanComponents : unused;
 
   const durationMs = Math.round(performance.now() - startTime);

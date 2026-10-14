@@ -79,19 +79,18 @@ export function extractPatternKeywords(pattern?: string): string[] {
 
 /**
  * Extracts literal keywords from an ast-grep YAML rule to enable fast-path pruning.
+ * Only extracts keywords from unambiguous positive rules; if negative (not),
+ * disjunctive (any), relational (inside, has, follows, precedes), or complex
+ * matchers are present, pruning is skipped to guarantee disk/snippet parity.
  */
 export function extractRuleKeywords(ruleYaml?: string): string[] {
   if (!ruleYaml) return [];
-  const patternMatches = ruleYaml.match(/pattern:\s*['"]?([^'"\r\n]+)['"]?/g);
-  if (!patternMatches) return [];
+  // Prune only a single plain pattern. YAML composition cannot prove mandatory keywords.
+  const rule = ruleYaml.match(/^rule:[ \t]*\r?\n([\s\S]*)/m)?.[1];
+  const value = rule?.match(/^[ \t]+pattern:[ \t]*([^\r\n]+)\s*$/)?.[1].trim();
+  if (!value || /^[{|>&*!]/.test(value)) return [];
+  return extractPatternKeywords(value.replace(/^(['"])([\s\S]*)\1$/, '$2'));
 
-  const allKeywords = new Set<string>();
-  for (const pMatch of patternMatches) {
-    const rawPattern = pMatch.replace(/pattern:\s*['"]?/, '').replace(/['"]$/, '');
-    const kw = extractPatternKeywords(rawPattern);
-    for (const w of kw) allKeywords.add(w);
-  }
-  return Array.from(allKeywords);
 }
 
 /**

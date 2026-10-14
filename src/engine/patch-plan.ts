@@ -3,10 +3,14 @@ import { promises as fs, existsSync } from 'node:fs';
 import { basename, extname, resolve } from 'node:path';
 import { parse as parseDom, NodeTypes, type ElementNode, type RootNode, type TemplateChildNode } from '@vue/compiler-dom';
 import { parseSfc } from './splitter';
-import { getComponentTree, extractLocalImports, resolveImportPath, resolveBarrelExport } from './tree';
+import { parseAstro } from './astro-sfc';
+import { extractImports } from './graph/path-helpers';
+import { getComponentTree, resolveImportPath, resolveBarrelExport } from './tree';
 import ts from 'typescript';
 import { loadAliasConfig } from './resolver';
 import { findProjectRoot } from './path-resolver';
+import { collectFiles } from './collector';
+import { getCandidateNames } from './template';
 import { STRATA_VERSION } from '../version';
 import { escapeRegExp } from './patterns';
 import type {
@@ -98,6 +102,7 @@ function scanVueTemplateProps(
   filePath: string
 ): ComponentPatchItem[] {
   const patches: ComponentPatchItem[] = [];
+  const removedElements = new Set<ElementNode>();
   const cleanOld = cleanIdentifier(oldName);
   const cleanNew = newName ? cleanIdentifier(newName) : undefined;
   const oldKebab = toKebabCase(cleanOld);
@@ -154,15 +159,18 @@ function scanVueTemplateProps(
     rawPropText: string
   ): void {
     if (prop.name !== 'bind' && prop.name) return;
+    if (prop.arg && prop.arg.isStatic === false) return; // Dynamic arguments (:[$prop]) cannot be statically renamed
     const argContent = prop.arg && 'content' in prop.arg ? prop.arg.content : '';
     if (!matchVueProp(argContent, cleanOld)) return;
 
     if (refactorType === 'rename_prop' && newName) {
       const targetReplacementAttr = argContent.includes('-') ? newKebab : newCamel;
-      const isShorthand = rawPropText.startsWith(':');
-      const prefix = isShorthand ? ':' : 'v-bind:';
-      const expPart = prop.exp && 'content' in prop.exp ? `="${prop.exp.content}"` : '';
-      const newSnippet = `${prefix}${targetReplacementAttr}${expPart}`;
+      // Preserve exact prefix, modifiers (.camel, .prop), quote styling and multiline expression
+      let newSnippet = rawPropText.replace(
+        new RegExp(`(^v-bind:|^:)${escapeRegExp(argContent)}(?=[.=\\s]|$)`),
+        `$1${targetReplacementAttr}`
+      );
+      if (!rawPropText.includes('=')) newSnippet += `="${toCamelCase(argContent)}"`;
 
       patches.push({
         file: filePath,
@@ -194,15 +202,17 @@ function scanVueTemplateProps(
     rawPropText: string
   ): void {
     if (prop.name !== 'on') return;
+    if (prop.arg && prop.arg.isStatic === false) return; // Dynamic events (@[$event]) cannot be statically renamed
     const eventName = prop.arg && 'content' in prop.arg ? prop.arg.content : '';
     if (!matchVueEvent(eventName, cleanOld)) return;
 
     if (refactorType === 'rename_event' && newName) {
       const targetReplacementEvent = eventName.includes('-') ? newKebab : newCamel;
-      const isShorthand = rawPropText.startsWith('@');
-      const prefix = isShorthand ? '@' : 'v-on:';
-      const expPart = prop.exp && 'content' in prop.exp ? `="${prop.exp.content}"` : '';
-      const newSnippet = `${prefix}${targetReplacementEvent}${expPart}`;
+      // Preserve exact prefix, modifiers (.once, .stop, .prevent), quote styling and expressions
+      const newSnippet = rawPropText.replace(
+        new RegExp(`(^v-on:|^@)${escapeRegExp(eventName)}(?=[.=\\s]|$)`),
+        `$1${targetReplacementEvent}`
+      );
 
       patches.push({
         file: filePath,
@@ -283,7 +293,7 @@ function scanVueTemplateProps(
     absCol: number,
     rawPropText: string
   ): void {
-    if (prop.name !== 'slot') return;
+    if (prop.name !== 'slot' || (prop.arg && !prop.arg.isStatic)) return;
     const slotName = prop.arg && 'content' in prop.arg ? prop.arg.content : 'default';
     const matches =
       matchVueProp(slotName, cleanOld) ||
@@ -333,6 +343,7 @@ function scanVueTemplateProps(
   function walk(node: RootNode | TemplateChildNode): void {
     if (node.type === NodeTypes.ELEMENT) {
       const el = node as ElementNode;
+      if (removedElements.has(el)) return;
       const tagMatches = targetTags.has(el.tag) || targetTags.has(toKebabCase(el.tag));
 
       if (tagMatches) {
@@ -358,9 +369,21 @@ function scanVueTemplateProps(
             if (prop.type === NodeTypes.DIRECTIVE) {
               handleModelDirective(prop, el, absLine, absCol, rawPropText);
             }
-          } else if (refactorType === 'rename_slot' || refactorType === 'remove_slot') {
+          } else if (refactorType === 'rename_slot') {
             if (prop.type === NodeTypes.DIRECTIVE) {
               handleSlotDirective(prop, el.tag, absLine, absCol, rawPropText);
+            }
+          } else if (refactorType === 'remove_slot') {
+            if (prop.type === NodeTypes.DIRECTIVE && prop.name === 'slot' && (!prop.arg || ('isStatic' in prop.arg && prop.arg.isStatic))) {
+              const slotName = prop.arg && 'content' in prop.arg ? prop.arg.content : 'default';
+              if (matchVueProp(slotName, cleanOld) || (slotName === 'default' && cleanOld === 'slot')) {
+                patches.push({ file: filePath,
+                  line: templateStartLine + el.loc.start.line - 1,
+                  column: el.loc.start.line === 1 ? templateStartCol + el.loc.start.column - 1 : el.loc.start.column,
+                  targetTag: el.tag, oldSnippet: el.loc.source, newSnippet: '',
+                  description: `Remove direct slot "${slotName}" subtree on <${el.tag}>` });
+                return;
+              }
             }
           }
         }
@@ -371,13 +394,38 @@ function scanVueTemplateProps(
             if (child.type === NodeTypes.ELEMENT && (child as ElementNode).tag === 'template') {
               const templateChild = child as ElementNode;
               for (const tProp of templateChild.props) {
-                if (tProp.type === NodeTypes.DIRECTIVE && tProp.name === 'slot') {
-                  const tLine = templateStartLine + tProp.loc.start.line - 1;
-                  const tCol =
-                    tProp.loc.start.line === 1
-                      ? templateStartCol + tProp.loc.start.column - 1
-                      : tProp.loc.start.column;
-                  handleSlotDirective(tProp, el.tag, tLine, tCol, tProp.loc.source);
+                if (tProp.type === NodeTypes.DIRECTIVE && tProp.name === 'slot' && (!tProp.arg || ('isStatic' in tProp.arg && tProp.arg.isStatic))) {
+                  const slotName = tProp.arg && 'content' in tProp.arg ? tProp.arg.content : 'default';
+                  const matches =
+                    matchVueProp(slotName, cleanOld) ||
+                    (slotName === 'default' && (cleanOld === 'default' || cleanOld === 'slot'));
+                  if (!matches) continue;
+
+                  if (refactorType === 'rename_slot' && newName) {
+                    const tLine = templateStartLine + tProp.loc.start.line - 1;
+                    const tCol =
+                      tProp.loc.start.line === 1
+                        ? templateStartCol + tProp.loc.start.column - 1
+                        : tProp.loc.start.column;
+                    handleSlotDirective(tProp, el.tag, tLine, tCol, tProp.loc.source);
+                  } else if (refactorType === 'remove_slot') {
+                    removedElements.add(templateChild);
+                    // Remove the entire <template ...>...</template> subtree to avoid dangling scoped bindings
+                    const elemLine = templateStartLine + templateChild.loc.start.line - 1;
+                    const elemCol =
+                      templateChild.loc.start.line === 1
+                        ? templateStartCol + templateChild.loc.start.column - 1
+                        : templateChild.loc.start.column;
+                    patches.push({
+                      file: filePath,
+                      line: elemLine,
+                      column: elemCol,
+                      targetTag: el.tag,
+                      oldSnippet: templateChild.loc.source,
+                      newSnippet: '',
+                      description: `Remove slot "${slotName}" template subtree on <${el.tag}>`,
+                    });
+                  }
                 }
               }
             }
@@ -414,7 +462,7 @@ function scanJsxProps(
   function visit(node: ts.Node): void {
     if (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) {
       const tag = node.tagName.getText(sf);
-      if (targetTags.has(tag)) {
+      if (targetTags.has(tag) || targetTags.has(toKebabCase(tag))) {
         for (const attr of node.attributes.properties) {
           if (!ts.isJsxAttribute(attr) || !matchVueProp(attr.name.getText(sf), cleanOld)) continue;
           if (renames && !cleanNew) continue;
@@ -428,6 +476,58 @@ function scanJsxProps(
             oldSnippet: target.getText(sf),
             newSnippet: renames ? toCamelCase(cleanNew!) : '',
             description: `${renames ? 'Rename' : 'Remove'} JSX attribute "${attr.name.getText(sf)}" on <${tag}>`,
+          });
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(sf);
+
+  return patches;
+}
+
+/**
+ * Scans Astro files for component usage and props using AST parsing,
+ * handling expressions with spaces, ternary, objects, multiline expressions, spread, and client directives.
+ */
+function scanAstroProps(
+  code: string,
+  targetTags: Set<string>,
+  refactorType: PatchRefactorType,
+  oldName: string,
+  newName: string | undefined,
+  filePath: string
+): ComponentPatchItem[] {
+  const patches: ComponentPatchItem[] = [];
+  const cleanOld = cleanIdentifier(oldName);
+  const cleanNew = newName ? cleanIdentifier(newName) : undefined;
+  const renames = refactorType.startsWith('rename_');
+
+  // Mask frontmatter without moving any source offsets, including CRLF and comments.
+  const template = parseAstro(code, filePath).template;
+  const offset = template?.loc.start.offset ?? 0;
+  const transformedCode = code.slice(0, offset).replace(/[^\r\n]/g, ' ') + code.slice(offset);
+
+  const sf = ts.createSourceFile(filePath, transformedCode, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+
+  function visit(node: ts.Node): void {
+    if (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) {
+      const tag = node.tagName.getText(sf);
+      if (targetTags.has(tag) || targetTags.has(toKebabCase(tag))) {
+        for (const attr of node.attributes.properties) {
+          if (!ts.isJsxAttribute(attr) || !matchVueProp(attr.name.getText(sf), cleanOld)) continue;
+          if (renames && !cleanNew) continue;
+          const target = renames ? attr.name : attr;
+          const position = sf.getLineAndCharacterOfPosition(target.getStart(sf));
+          patches.push({
+            file: filePath,
+            line: position.line + 1,
+            column: position.character + 1,
+            targetTag: tag,
+            oldSnippet: target.getText(sf),
+            newSnippet: renames ? (attr.name.getText(sf).includes('-') ? toKebabCase(cleanNew!) : toCamelCase(cleanNew!)) : '',
+            description: `${renames ? 'Rename' : 'Remove'} Astro attribute "${attr.name.getText(sf)}" on <${tag}>`,
           });
         }
       }
@@ -461,6 +561,22 @@ export async function generatePatchPlan(options: PatchPlanOptions): Promise<Patc
   }
   const projectRoot = targetPath ? resolve(targetPath) : findProjectRoot(componentPath);
   const absComponentPath = resolve(componentPath);
+
+  // Index component candidate names in project to detect collision for auto-imports
+  const allProjectFiles = await collectFiles(projectRoot);
+  const candidateToFileMap = new Map<string, string[]>();
+  for (const file of allProjectFiles) {
+    const ext = extname(file).toLowerCase();
+    if (ext === '.vue' || ext === '.astro' || ext === '.tsx' || ext === '.jsx') {
+      const base = basename(file, ext);
+      for (const cand of getCandidateNames(base)) {
+        const key = cand.toLowerCase();
+        const list = candidateToFileMap.get(key) || [];
+        if (!list.includes(resolve(file))) list.push(resolve(file));
+        candidateToFileMap.set(key, list);
+      }
+    }
+  }
 
   const compName = basename(absComponentPath, extname(absComponentPath));
   const targetTags = getCandidateTagNames(compName);
@@ -496,17 +612,40 @@ export async function generatePatchPlan(options: PatchPlanOptions): Promise<Patc
       const content = await readSourceFile(consumerPath);
       const ext = extname(consumerPath).toLowerCase();
       const aliasConfig = await loadAliasConfig(consumerPath);
-      const consumerTags = new Set(ext === '.tsx' || ext === '.jsx' ? [] : targetTags);
-      for (const imp of extractLocalImports(content, aliasConfig)) {
-        let importedPath = resolveImportPath(consumerPath, imp.source, aliasConfig);
+      const consumerTags = new Set<string>();
+      const boundToOther = new Set<string>();
+
+      for (const imp of extractImports(content, consumerPath)) {
+        const isLocal = imp.source.startsWith('.') || imp.source.startsWith('/') || aliasConfig?.isAlias(imp.source);
+        let importedPath = isLocal ? resolveImportPath(consumerPath, imp.source, aliasConfig) : null;
         if (importedPath && /[/\\]index\.[tj]sx?$/.test(importedPath)) {
           importedPath = resolveBarrelExport(importedPath, imp.name, aliasConfig) ?? importedPath;
         }
         if (importedPath && resolve(importedPath) === absComponentPath) {
-          consumerTags.add(imp.alias || imp.name);
+          const importName = imp.alias || imp.name;
+          consumerTags.add(importName);
+          for (const cand of getCandidateNames(importName)) {
+            consumerTags.add(cand);
+          }
+        } else {
+          const boundName = imp.alias || imp.name;
+          if (boundName && boundName !== '*') {
+            for (const cand of getCandidateNames(boundName)) {
+              boundToOther.add(cand.toLowerCase());
+            }
+          }
         }
       }
 
+      // Check auto-import for Vue and Astro only if not explicitly bound to another component
+      if (ext !== '.tsx' && ext !== '.jsx') {
+        for (const tag of targetTags) {
+          if (!boundToOther.has(tag.toLowerCase())) {
+            const matching = candidateToFileMap.get(tag.toLowerCase()) || [];
+            if (matching.length === 1 && matching[0] === absComponentPath) consumerTags.add(tag);
+          }
+        }
+      }
 
       if (ext === '.vue') {
         const sfc = parseSfc(content, consumerPath);
@@ -524,11 +663,8 @@ export async function generatePatchPlan(options: PatchPlanOptions): Promise<Patc
           allPatches.push(...templatePatches);
         }
       } else if (ext === '.astro') {
-        // Astro templates can be parsed via DOM parser
-        const astroTemplatePatches = scanVueTemplateProps(
+        const astroTemplatePatches = scanAstroProps(
           content,
-          1,
-          1,
           consumerTags,
           refactorType,
           cleanOld,

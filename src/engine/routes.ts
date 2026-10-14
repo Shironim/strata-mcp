@@ -1,6 +1,6 @@
 import { readSourceFile } from './source-file';
 import { existsSync, promises as fs } from 'node:fs';
-import { basename, dirname, extname, join, normalize, relative, resolve } from 'node:path';
+import { basename, dirname, extname, isAbsolute, join, normalize, relative, resolve } from 'node:path';
 import { collectFiles } from './collector';
 import type {
   ResolveRouteEntryOptions,
@@ -76,7 +76,8 @@ export async function detectRouteFramework(
   const hasNuxtConfig =
     existsSync(join(normTarget, 'nuxt.config.ts')) ||
     existsSync(join(normTarget, 'nuxt.config.js')) ||
-    existsSync(join(normTarget, 'app.vue'));
+    existsSync(join(normTarget, 'app.vue')) ||
+    existsSync(join(normTarget, 'app', 'app.vue'));
   const hasAstroConfig =
     existsSync(join(normTarget, 'astro.config.mjs')) ||
     existsSync(join(normTarget, 'astro.config.ts'));
@@ -85,9 +86,14 @@ export async function detectRouteFramework(
     existsSync(join(normTarget, 'next.config.mjs')) ||
     existsSync(join(normTarget, 'next.config.ts'));
 
-  // 1. Nuxt 3 (if nuxt config or app.vue is present)
+  // 1. Nuxt 3 & 4 (if nuxt config or app.vue is present)
   if (hasNuxtConfig) {
-    for (const candidate of [join(normTarget, 'pages'), join(normTarget, 'src', 'pages')]) {
+    for (const candidate of [
+      join(normTarget, 'app', 'pages'),
+      join(normTarget, 'src', 'app', 'pages'),
+      join(normTarget, 'pages'),
+      join(normTarget, 'src', 'pages'),
+    ]) {
       if (existsSync(candidate)) {
         return { framework: 'nuxt', baseDir: candidate };
       }
@@ -129,9 +135,14 @@ export async function detectRouteFramework(
     }
   }
 
-  // 5. Nuxt 3 fallback (check for .vue files in pages directory)
+  // 5. Nuxt fallback (check for .vue files in pages directory)
   if (!hasNextConfig) {
-    for (const candidate of [join(normTarget, 'pages'), join(normTarget, 'src', 'pages')]) {
+    for (const candidate of [
+      join(normTarget, 'app', 'pages'),
+      join(normTarget, 'src', 'app', 'pages'),
+      join(normTarget, 'pages'),
+      join(normTarget, 'src', 'pages'),
+    ]) {
       if (existsSync(candidate)) {
         const files = await collectFiles(candidate);
         const hasVuePages = files.some((f) => f.endsWith('.vue'));
@@ -284,8 +295,14 @@ async function scanNuxtPages(baseDir: string, projectRoot: string): Promise<Rout
   const routes: RouteInfo[] = [];
 
   // Check default layout
-  const defaultLayout = join(projectRoot, 'layouts', 'default.vue');
-  const hasDefaultLayout = existsSync(defaultLayout);
+  const defaultLayoutCandidates = [
+    join(projectRoot, 'app', 'layouts', 'default.vue'),
+    join(projectRoot, 'src', 'app', 'layouts', 'default.vue'),
+    join(projectRoot, 'layouts', 'default.vue'),
+    join(projectRoot, 'src', 'layouts', 'default.vue'),
+  ];
+  const defaultLayout = defaultLayoutCandidates.find((c) => existsSync(c));
+  const hasDefaultLayout = Boolean(defaultLayout);
 
   for (const file of files) {
     if (!file.endsWith('.vue')) continue;
@@ -307,8 +324,15 @@ async function scanNuxtPages(baseDir: string, projectRoot: string): Promise<Rout
       } else {
         const layoutMatch = content.match(/layout:\s*['"]([^'"]+)['"]/);
         if (layoutMatch) {
-          const customLayout = join(projectRoot, 'layouts', `${layoutMatch[1]}.vue`);
-          if (existsSync(customLayout)) {
+          const layoutName = layoutMatch[1];
+          const customCandidates = [
+            join(projectRoot, 'app', 'layouts', `${layoutName}.vue`),
+            join(projectRoot, 'src', 'app', 'layouts', `${layoutName}.vue`),
+            join(projectRoot, 'layouts', `${layoutName}.vue`),
+            join(projectRoot, 'src', 'layouts', `${layoutName}.vue`),
+          ];
+          const customLayout = customCandidates.find((c) => existsSync(c));
+          if (customLayout) {
             pageLayouts = [normalize(customLayout)];
           }
         }
@@ -317,7 +341,7 @@ async function scanNuxtPages(baseDir: string, projectRoot: string): Promise<Rout
       // ignore
     }
 
-    if (!pageLayouts && !explicitlyDisabledLayout && hasDefaultLayout) {
+    if (!pageLayouts && !explicitlyDisabledLayout && hasDefaultLayout && defaultLayout) {
       pageLayouts = [normalize(defaultLayout)];
     }
 
@@ -517,27 +541,33 @@ export function computeRouteSummaries(routes: RouteInfo[]): Record<string, numbe
 export async function scanRoutes(options: ScanRoutesOptions): Promise<RouteManifestResult> {
   const startTime = performance.now();
   const targetPath = resolve(options.targetPath);
-  const detection = await detectRouteFramework(targetPath);
+  const effectiveScanTarget = targetPath;
+  const detection = await detectRouteFramework(effectiveScanTarget);
   const framework = options.frameworkHint || detection.framework;
   let baseDir = detection.baseDir;
 
   if (options.frameworkHint && options.frameworkHint !== detection.framework) {
     const hintCandidates: Record<string, string[]> = {
-      'next-app': [join(targetPath, 'src', 'app'), join(targetPath, 'app')],
-      'next-pages': [join(targetPath, 'pages'), join(targetPath, 'src', 'pages')],
-      'nuxt': [join(targetPath, 'pages'), join(targetPath, 'src', 'pages')],
-      'astro': [join(targetPath, 'src', 'pages'), join(targetPath, 'pages')],
+      'next-app': [join(effectiveScanTarget, 'src', 'app'), join(effectiveScanTarget, 'app')],
+      'next-pages': [join(effectiveScanTarget, 'pages'), join(effectiveScanTarget, 'src', 'pages')],
+      'nuxt': [
+        join(effectiveScanTarget, 'app', 'pages'),
+        join(effectiveScanTarget, 'src', 'app', 'pages'),
+        join(effectiveScanTarget, 'pages'),
+        join(effectiveScanTarget, 'src', 'pages'),
+      ],
+      'astro': [join(effectiveScanTarget, 'src', 'pages'), join(effectiveScanTarget, 'pages')],
       'inertia': [
-        join(targetPath, 'resources', 'js', 'Pages'),
-        join(targetPath, 'resources', 'js', 'pages'),
-        join(targetPath, 'resources', 'scripts', 'Pages'),
-        join(targetPath, 'src', 'pages'),
+        join(effectiveScanTarget, 'resources', 'js', 'Pages'),
+        join(effectiveScanTarget, 'resources', 'js', 'pages'),
+        join(effectiveScanTarget, 'resources', 'scripts', 'Pages'),
+        join(effectiveScanTarget, 'src', 'pages'),
       ],
       'vue-router': [
-        join(targetPath, 'src', 'views'),
-        join(targetPath, 'views'),
-        join(targetPath, 'src', 'pages'),
-        join(targetPath, 'pages'),
+        join(effectiveScanTarget, 'src', 'views'),
+        join(effectiveScanTarget, 'views'),
+        join(effectiveScanTarget, 'src', 'pages'),
+        join(effectiveScanTarget, 'pages'),
       ],
     };
     const candidates = hintCandidates[options.frameworkHint];
@@ -556,7 +586,7 @@ export async function scanRoutes(options: ScanRoutesOptions): Promise<RouteManif
       routes = await scanNextAppRouter(baseDir);
       break;
     case 'nuxt':
-      routes = await scanNuxtPages(baseDir, targetPath);
+      routes = await scanNuxtPages(baseDir, effectiveScanTarget);
       break;
     case 'astro':
       routes = await scanAstroPages(baseDir);
@@ -610,6 +640,20 @@ export async function scanRoutes(options: ScanRoutesOptions): Promise<RouteManif
       }
       break;
     }
+  }
+
+  if (options.excludeDirs?.length) {
+    const allowed = new Set(await collectFiles(targetPath, { excludeDirs: options.excludeDirs }));
+    routes = routes.filter(r => allowed.has(r.filePath));
+  }
+
+  // Filter by scopePath if provided
+  if (options.scopePath) {
+    const absScope = resolve(targetPath, options.scopePath);
+    routes = routes.filter((r) => {
+      const rel = relative(absScope, r.filePath);
+      return !rel.startsWith('..') && !isAbsolute(rel);
+    });
   }
 
   // Filter by prefix if provided

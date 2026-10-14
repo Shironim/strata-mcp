@@ -7,6 +7,7 @@ import {
   formatStateChainAsText,
 } from '../engine/database';
 import {
+  findProjectRoot,
   parseSafePositiveInt,
   resolveProjectRoot,
   resolveWorkspacePath,
@@ -63,8 +64,20 @@ export const traceStateTool: McpToolDefinition = {
     }
 
     try {
-      const targetPath = resolveProjectRoot(rawTargetPath);
+      let targetPath: string;
+      if (rawTargetPath) {
+        const resolved = resolveWorkspacePath(rawTargetPath);
+        if (fs.existsSync(resolved) && fs.statSync(resolved).isFile()) {
+          targetPath = findProjectRoot(resolved) || resolveProjectRoot(rawTargetPath);
+        } else {
+          targetPath = resolveProjectRoot(rawTargetPath);
+        }
+      } else {
+        targetPath = resolveProjectRoot();
+      }
+
       const isJson = args.output_format === 'json' || args.format === 'json';
+      const role = (args.role as 'all' | 'mutators' | 'readers') || 'all';
 
       const { isWorkspaceIndexed } = await import('../engine/storage/schema');
       if (!isWorkspaceIndexed(targetPath)) {
@@ -92,6 +105,7 @@ export const traceStateTool: McpToolDefinition = {
           identifier,
           direction: (args.direction as 'consumers' | 'dependencies' | 'both') || 'both',
           maxDepth: depth,
+          role,
         });
         return {
           content: [
@@ -103,7 +117,6 @@ export const traceStateTool: McpToolDefinition = {
         };
       }
 
-      const role = (args.role as 'all' | 'mutators' | 'readers') || 'all';
       const result = await queryStateImpact(targetPath, identifier, role);
       return {
         content: [
