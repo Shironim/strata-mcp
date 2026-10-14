@@ -38,105 +38,289 @@ import { STRATA_VERSION } from './version';
 import { StrataTelemetry, formatSummaryAsText } from './engine/telemetry';
 import type { PatchRefactorType, RouteFramework } from './types';
 
-function printHelp() {
+export function printRootHelp() {
   console.log(`
-strata — Multi-Framework Frontend Structural Code Search & Intelligence CLI
+strata — Frontend Structural Code Search & Intelligence CLI
 
 Usage:
   strata <command> [options]
+  strata <command> --help        Show options for a specific command
 
-Commands:
-  serve                                   Start MCP stdio daemon server
-  init [target-dir]                       Initialize strata index, local MCP configs, and agent rules
-                                          (Options: --harness <name>, --force, --yes)
-  search, find <pattern>                  AST structural code search across codebase
-  find-component-usage, usage <component> Find all usages and callers of a component
-  contract, extract-contract <file>       Extract public component contract (props, emits, slots)
-  tree, component-tree [entry-file]       Inspect component dependency hierarchy
-  patch-plan, patch <file>                Generate precision refactoring patch plan
-  archetype <file>                        Audit page archetype & structural drift against exemplar
-  apis, api-contracts [target-dir]        Extract backend/frontend API integration contracts
-  routes, scan-routes [target-dir]        Scan and resolve file-based routing paths
-  impact, state-impact <state-id>         Trace blast radius and state consumers
-  unused-state, dead-state [target-dir]   Audit unused stores, composables, or state variables
-  stats, telemetry [target-dir]           Show tool latency percentiles, error rates, and telemetry stats
-  sync [target-dir]                       Synchronize project cache and index database
-  unused, audit [target-dir]              Audit frontend health (dead components, state, design, bundle, or all)
-  rule <rule-file-or-yaml>                Execute custom ast-grep lint and audit rules
+Operational Commands:
+  serve                          Start MCP stdio daemon server
+  init [dir]                     Initialize strata index, configs, and agent rules
+  sync [dir]                     Synchronize project cache and index database
+
+Core Analytical Commands (Aligned with 6 MCP Tools):
+  find, search <pattern>         AST code search (--component, --rule, --lang)
+  inspect, contract <file>       Inspect component contract (--symbol, --audit-events)
+  tree, component-tree [entry]   Inspect component hierarchy tree (--route, --direction)
+  trace, impact <state-id>       Trace state blast radius and consumers (--depth, --role)
+  audit [dir]                    Audit frontend architecture (--target, --threshold)
+  patch, patch-plan <file>       Generate prescriptive refactoring patch plan
+  stats, telemetry [dir]         Show tool latency, error rates, and telemetry stats
+
+Direct Shortcuts:
+  routes, apis, dead-state, archetype, usage, rule
 
 Global Options:
-  -p, --path <dir|file>                   Target directory or file (default: .)
-  -v, --version                           Show version number
-  --json                                  Output raw JSON instead of formatted text
-  -h, --help                              Show this help message
-
-Command-specific Options:
-  init:
-    --force                               Overwrite existing config files and instructions
-
-  patch-plan:
-    --refactor, --refactor-type <type>    Refactor operation: rename_prop | remove_prop | rename_event | rename_model | rename_slot (default: rename_prop)
-    --old, --old-name <name>              Current/old identifier or property name
-    --new, --new-name <name>              New identifier or property name (required for rename_*)
-
-  tree:
-    --route <route-path>                  URL route path to resolve (e.g. "/catalog")
-    --depth, --max-depth <number>         Max hierarchy tree depth (default: 3)
-    --direction <dir>                     Traversal direction: downward (down) | upward (up) (default: downward)
-    --alias, --alias-map <prefix=path>    Path alias mapping, comma-separated or JSON (e.g. "@/=resources/js/")
-    --scope-filter, --scope-path <scope>  Domain or package filter (e.g. "apps/web")
-
-  routes:
-    --prefix <prefix>                     Filter routes by URL prefix (e.g. "/api", "/auth")
-    --view <mode>                         View layout: summary | full | tree (default: auto)
-    --framework <hint>                    Framework hint (next-app, nuxt, astro, inertia)
-
-  unused, audit:
-    --target <target>                     Audit target: dead-components (default) | dead-state | routes | similar-templates | design-tokens | bundle-health | api-contracts | archetype-drift | all
-    --threshold <number>                  Similarity threshold for template redundancy (default: 0.8)
-    --exemplar <file>                     Exemplar page path for archetype-drift comparison
-    --ignore <pattern>                    Glob pattern to ignore (comma-separated)
-    --include-pages                       Include file-based page views in audit
-    --scope-path <dir>                    Sub-directory or package scope filter
-    --exclude-dirs <dirs>                 Comma-separated directories to ignore
-
-  apis:
-    --scope-path <dir>                    Sub-directory or package scope filter
-    --exclude-dirs <dirs>                 Comma-separated directories to ignore
-
-  impact:
-    --depth <number>                      Traversal depth (default: 1, >1 triggers multi-hop trace)
-    --direction <dir>                     Direction: consumers | dependencies | both (default: both)
-    --role <role>                         Role filter: all | mutators | readers (default: all)
-
-  contract:
-    --symbol <name>                       Symbol/function to slice verbatim
-    --audit-events                        Audit template-to-script event handler integrity
-
-  search:
-    --lang <lang>                         Target language hint (default: ts)
-
-  find-component-usage:
-    --scope <scope>                       Component scope: template | script | both (default: both)
+  -p, --path <dir|file>          Target directory or file (default: .)
+  -v, --version                  Show version number
+  --json                         Output raw JSON instead of formatted text
+  -h, --help                     Show help message
 `);
+}
+
+export function printCommandHelp(command: string) {
+  switch (command) {
+    case 'init':
+      console.log(`
+Usage: strata init [target-dir] [options]
+
+Initialize strata index, local MCP configs, and agent rules.
+
+Options:
+  --harness, --agent <name>  Target harness (gemini | claude | cursor | codex | opencode | all)
+  -f, --force                Overwrite existing agent rules and configurations
+  -y, --yes                  Skip interactive prompts, auto-accept defaults
+  -p, --path <dir>           Target directory (default: .)
+`);
+      break;
+
+    case 'find':
+    case 'search':
+    case 'usage':
+    case 'rule':
+      console.log(`
+Usage: strata find <pattern> [options]
+
+AST code search across components and scripts.
+
+Options:
+  --component <name>         Search all usages of a component (alias for "usage")
+  --rule <rule-yaml>         Execute custom ast-grep YAML rule (alias for "rule")
+  --lang <lang>              Target language hint (default: ts)
+  --scope <scope>            Scope: template | script | both (default: both)
+  -p, --path <path>          Target directory or file (default: .)
+  --json                     Output raw JSON
+`);
+      break;
+
+    case 'inspect':
+    case 'contract':
+      console.log(`
+Usage: strata inspect <component-file> [options]
+
+Inspect component contract (props, emits, slots, state, dependencies).
+
+Options:
+  --symbol <name>            Extract specific symbol or function with line numbers
+  --audit-events             Audit template-to-script event handler integrity
+  --json                     Output raw JSON
+`);
+      break;
+
+    case 'tree':
+    case 'component-tree':
+      console.log(`
+Usage: strata tree [entry-file] [options]
+
+Inspect component hierarchy and import dependency trees.
+
+Options:
+  --route <route-path>       Resolve tree starting from URL route (e.g. "/catalog")
+  --depth, --max-depth <n>   Max tree depth (default: 3)
+  --direction <dir>          Traversal: downward | upward (default: downward)
+  --alias <prefix=path>      Path alias mapping (e.g. "@/=resources/js/")
+  --scope-filter <scope>     Domain or package filter (e.g. "apps/web")
+  -p, --path <dir>           Target directory (default: .)
+  --json                     Output raw JSON
+`);
+      break;
+
+    case 'trace':
+    case 'impact':
+      console.log(`
+Usage: strata trace <state-id> [options]
+
+Trace reactive state blast radius and consumers.
+
+Options:
+  --depth <n>                Traversal depth (default: 1, >1 for multi-hop)
+  --direction <dir>          Direction: consumers | dependencies | both (default: both)
+  --role <role>              Role filter: all | mutators | readers (default: all)
+  -p, --path <dir>           Target directory (default: .)
+  --json                     Output raw JSON
+`);
+      break;
+
+    case 'audit':
+    case 'routes':
+    case 'apis':
+    case 'dead-state':
+    case 'unused-state':
+    case 'archetype':
+      console.log(`
+Usage: strata audit [target-dir] [options]
+
+Audit frontend architecture for dead code, drift, and contract violations.
+
+Targets (--target <target>):
+  dead-components (default)  Find unreferenced components
+  dead-state                 Detect unused reactive state / stores
+  routes                     Extract client-side route manifest
+  similar-templates          Detect copy-pasted UI template structures
+  design-tokens              Detect raw CSS color/spacing escapes
+  bundle-health              Scan for heavy dependencies and barrel file leaks
+  api-contracts              Extract and validate API endpoint calls
+  archetype-drift            Detect structural drift from page archetype
+  all                        Run all architectural audit targets
+
+Options:
+  --threshold <n>            Similarity threshold for templates (default: 0.8)
+  --exemplar <file>          Reference page for archetype-drift comparison
+  --ignore <patterns>        Comma-separated glob patterns to ignore
+  --include-pages            Include file-based page views in dead-code audit
+  --scope-path <dir>         Sub-directory or package scope filter
+  --exclude-dirs <dirs>      Comma-separated directory names to exclude
+  -p, --path <dir>           Target directory (default: .)
+  --json                     Output raw JSON
+`);
+      break;
+
+    case 'patch':
+    case 'patch-plan':
+      console.log(`
+Usage: strata patch <component-file> [options]
+
+Generate prescriptive refactoring patch plans across callers and contracts.
+
+Options:
+  --refactor <type>          Operation: rename_prop | remove_prop | rename_event |
+                             rename_model | rename_slot (default: rename_prop)
+  --old <name>               Current/old identifier or property name
+  --new <name>               New identifier or property name (required for rename_*)
+  -p, --path <dir>           Workspace root path (default: .)
+  --json                     Output raw JSON
+`);
+      break;
+
+    case 'sync':
+      console.log(`
+Usage: strata sync [target-dir] [options]
+
+Synchronize project cache and AST index database.
+
+Options:
+  -p, --path <dir>           Target directory (default: .)
+  --json                     Output raw JSON
+`);
+      break;
+
+    case 'stats':
+    case 'telemetry':
+      console.log(`
+Usage: strata stats [target-dir] [options]
+
+Show tool latency percentiles, error rates, and telemetry statistics.
+
+Options:
+  -p, --path <dir>           Target directory (default: .)
+  --json                     Output raw JSON
+`);
+      break;
+
+    case 'serve':
+      console.log(`
+Usage: strata serve
+
+Start MCP stdio daemon server for AI agent integrations.
+`);
+      break;
+
+    default:
+      printRootHelp();
+      break;
+  }
 }
 
 function toCamelCase(str: string): string {
   return str.replace(/-([a-z0-9])/g, (_, char) => char.toUpperCase());
 }
 
+export const BOOLEAN_FLAGS = new Set([
+  'json',
+  'version',
+  'v',
+  'help',
+  'h',
+  'yes',
+  'y',
+  'force',
+  'f',
+  'audit-events',
+  'auditEvents',
+  'include-pages',
+  'includePages',
+  'infer-props',
+  'inferProps',
+  'resolve-globals',
+  'resolveGlobals',
+]);
+
+export function parseStringFlag(val: unknown): string | undefined {
+  return typeof val === 'string' && val.trim() ? val.trim() : undefined;
+}
+
 function parseArgs(args: string[]) {
   const flags: Record<string, string | boolean> = {};
   const positional: string[] = [];
+  let endOfFlags = false;
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
+
+    if (endOfFlags) {
+      positional.push(arg);
+      continue;
+    }
+
+    if (arg === '--') {
+      endOfFlags = true;
+      continue;
+    }
+
     if (arg === '--json') {
       flags.json = true;
     } else if (arg === '--version' || arg === '-v') {
       flags.version = true;
+      flags.v = true;
     } else if (arg === '--help' || arg === '-h') {
       flags.help = true;
+      flags.h = true;
+    } else if (arg === '-y' || arg === '--yes') {
+      flags.yes = true;
+      flags.y = true;
+    } else if (arg === '-f' || arg === '--force') {
+      flags.force = true;
+      flags.f = true;
+    } else if (arg === '-p') {
+      const next = args[i + 1];
+      if (next && !next.startsWith('-')) {
+        flags.path = next;
+        flags.p = next;
+        i++;
+      } else {
+        flags.path = true;
+        flags.p = true;
+      }
+    } else if (arg.startsWith('--no-')) {
+      const rawKey = arg.slice(5);
+      const camelKey = toCamelCase(rawKey);
+      flags[rawKey] = false;
+      if (camelKey !== rawKey) {
+        flags[camelKey] = false;
+      }
     } else if (arg.startsWith('--')) {
       const equalsIdx = arg.indexOf('=');
       let key = arg.slice(2);
@@ -144,9 +328,11 @@ function parseArgs(args: string[]) {
       if (equalsIdx > 2) {
         key = arg.slice(2, equalsIdx);
         val = arg.slice(equalsIdx + 1);
+      } else if (BOOLEAN_FLAGS.has(key)) {
+        val = true;
       } else {
         const next = args[i + 1];
-        if (next && !next.startsWith('-')) {
+        if (next !== undefined && !next.startsWith('-')) {
           val = next;
           i++;
         }
@@ -156,12 +342,9 @@ function parseArgs(args: string[]) {
       if (camelKey !== key) {
         flags[camelKey] = val;
       }
-    } else if (arg === '-p') {
-      const next = args[i + 1];
-      if (next && !next.startsWith('-')) {
-        flags.path = next;
-        i++;
-      }
+    } else if (arg.startsWith('-')) {
+      const flagKey = arg.replace(/^-+/, '');
+      flags[flagKey] = true;
     } else {
       positional.push(arg);
     }
@@ -187,12 +370,17 @@ export async function main(argv: string[] = process.argv.slice(2)) {
     return;
   }
 
-  if (flags.help || !command) {
-    printHelp();
+  if (flags.help || !command || command === 'help') {
+    const targetCommand = command === 'help' ? positional[1] : command;
+    if (targetCommand) {
+      printCommandHelp(targetCommand);
+    } else {
+      printRootHelp();
+    }
     return;
   }
 
-  const targetPath = (flags.path as string) || '.';
+  const targetPath = typeof flags.path === 'string' && flags.path.trim() ? flags.path.trim() : '.';
   const isJson = Boolean(flags.json);
 
   try {
@@ -203,10 +391,31 @@ export async function main(argv: string[] = process.argv.slice(2)) {
     }
 
     if (command === 'init') {
-      const initPath = positional[1] || targetPath;
+      if ('path' in flags && (flags.path === true || typeof flags.path !== 'string' || !flags.path.trim())) {
+        console.error("Error: Flag '--path' requires a non-empty path argument.");
+        process.exit(1);
+      }
+      if ('p' in flags && (flags.p === true || typeof flags.p !== 'string' || !flags.p.trim())) {
+        console.error("Error: Flag '-p' requires a non-empty path argument.");
+        process.exit(1);
+      }
+      if ('harness' in flags && (flags.harness === true || typeof flags.harness !== 'string' || !flags.harness.trim())) {
+        console.error("Error: Flag '--harness' requires a valid harness value.");
+        process.exit(1);
+      }
+      if ('agent' in flags && (flags.agent === true || typeof flags.agent !== 'string' || !flags.agent.trim())) {
+        console.error("Error: Flag '--agent' requires a valid harness value.");
+        process.exit(1);
+      }
+      const candidatePath = positional[1];
+      if (candidatePath !== undefined && (!candidatePath || !candidatePath.trim())) {
+        console.error("Error: Target workspace path cannot be empty.");
+        process.exit(1);
+      }
+      const initPath = (candidatePath && !candidatePath.startsWith('-')) ? candidatePath : targetPath;
       await handleStrataInit({
         cwd: initPath,
-        force: Boolean(flags.force),
+        force: Boolean(flags.force || flags.f),
         harness: flags.harness ? String(flags.harness) : (flags.agent ? String(flags.agent) : undefined),
         yes: Boolean(flags.yes || flags.y),
       });
@@ -214,16 +423,56 @@ export async function main(argv: string[] = process.argv.slice(2)) {
     }
 
     if (command === 'search' || command === 'find') {
-      const pattern = positional[1];
+      const componentName = parseStringFlag(flags.component ?? flags.componentName);
+      if (componentName) {
+        const usageTarget = (positional[1] && !positional[1].startsWith('-')) ? positional[1] : targetPath;
+        const scope =
+          flags.scope === 'template' || flags.scope === 'script' || flags.scope === 'both'
+            ? flags.scope
+            : 'both';
+        const matches = await findComponentUsage({
+          componentName,
+          targetPath: usageTarget,
+          scope,
+        });
+        if (isJson) {
+          console.log(JSON.stringify(matches, null, 2));
+        } else {
+          console.log(formatMatchesAsText(matches));
+        }
+        return;
+      }
+
+      const ruleInput = parseStringFlag(flags.rule);
+      if (ruleInput) {
+        const ruleTarget = (positional[1] && !positional[1].startsWith('-')) ? positional[1] : targetPath;
+        let ruleYaml = ruleInput;
+        if (existsSync(ruleInput)) {
+          ruleYaml = await readSourceFile(ruleInput);
+        }
+        const matches = await findCodeByRule({
+          rule: ruleYaml,
+          targetPath: ruleTarget,
+        });
+        if (isJson) {
+          console.log(JSON.stringify(matches, null, 2));
+        } else {
+          console.log(formatMatchesAsText(matches));
+        }
+        return;
+      }
+
+      const pattern = positional[1] && !positional[1].startsWith('-') ? positional[1] : undefined;
       if (!pattern) {
-        console.error('Error: Pattern is required for search command.');
+        console.error('Error: Pattern is required for search command (e.g. strata find "<Button $PROPS />" or strata find --component Button).');
         process.exit(1);
       }
 
+      const searchTarget = (positional[2] && !positional[2].startsWith('-')) ? positional[2] : targetPath;
       const matches = await findCode({
         pattern,
-        targetPath,
-        language: (flags.lang as string) || 'ts',
+        targetPath: searchTarget,
+        language: parseStringFlag(flags.lang) || 'ts',
       });
 
       if (isJson) {
@@ -235,12 +484,13 @@ export async function main(argv: string[] = process.argv.slice(2)) {
     }
 
     if (command === 'find-component-usage' || command === 'usage') {
-      const componentName = positional[1];
+      const componentName = positional[1] && !positional[1].startsWith('-') ? positional[1] : undefined;
       if (!componentName) {
         console.error('Error: Component name is required.');
         process.exit(1);
       }
 
+      const usageTarget = (positional[2] && !positional[2].startsWith('-')) ? positional[2] : targetPath;
       const scope =
         flags.scope === 'template' || flags.scope === 'script' || flags.scope === 'both'
           ? flags.scope
@@ -248,7 +498,7 @@ export async function main(argv: string[] = process.argv.slice(2)) {
 
       const matches = await findComponentUsage({
         componentName,
-        targetPath,
+        targetPath: usageTarget,
         scope,
       });
 
@@ -261,12 +511,13 @@ export async function main(argv: string[] = process.argv.slice(2)) {
     }
 
     if (command === 'rule') {
-      const ruleInput = positional[1];
+      const ruleInput = positional[1] && !positional[1].startsWith('-') ? positional[1] : undefined;
       if (!ruleInput) {
         console.error('Error: Rule file or inline YAML is required.');
         process.exit(1);
       }
 
+      const ruleTarget = (positional[2] && !positional[2].startsWith('-')) ? positional[2] : targetPath;
       let ruleYaml = ruleInput;
       if (existsSync(ruleInput)) {
         ruleYaml = await readSourceFile(ruleInput);
@@ -274,7 +525,7 @@ export async function main(argv: string[] = process.argv.slice(2)) {
 
       const matches = await findCodeByRule({
         rule: ruleYaml,
-        targetPath,
+        targetPath: ruleTarget,
       });
 
       if (isJson) {
@@ -285,14 +536,18 @@ export async function main(argv: string[] = process.argv.slice(2)) {
       return;
     }
 
-    if (command === 'contract' || command === 'extract-contract') {
-      const filePath = positional[1];
+    if (command === 'inspect' || command === 'contract' || command === 'extract-contract') {
+      const filePath = positional[1] && !positional[1].startsWith('-') ? positional[1] : undefined;
       if (!filePath) {
         console.error('Error: Component file path is required.');
         process.exit(1);
       }
+      if (!existsSync(filePath)) {
+        console.error(`Error: File not found: "${filePath}".`);
+        process.exit(1);
+      }
 
-      const symbol = (flags.symbol || flags['symbol-name']) as string | undefined;
+      const symbol = parseStringFlag(flags.symbol ?? flags['symbol-name']);
       if (symbol) {
         const sliced = await sliceSymbol({ path: filePath, symbolName: symbol });
         if (!sliced) {
@@ -333,11 +588,15 @@ export async function main(argv: string[] = process.argv.slice(2)) {
     }
 
     if (command === 'tree' || command === 'component-tree') {
-      const entryFile = positional[1];
-      const routePath = flags.route ? String(flags.route) : undefined;
+      const entryFile = positional[1] && !positional[1].startsWith('-') ? positional[1] : undefined;
+      const routePath = parseStringFlag(flags.route);
 
       if (!entryFile && !routePath) {
         console.error('Error: Either an entry file path or --route <path> is required.');
+        process.exit(1);
+      }
+      if (entryFile && !existsSync(entryFile)) {
+        console.error(`Error: Entry component file not found: "${entryFile}".`);
         process.exit(1);
       }
 
@@ -345,14 +604,14 @@ export async function main(argv: string[] = process.argv.slice(2)) {
       const rawDir = String(flags.direction || '').toLowerCase();
       const direction = rawDir === 'upward' || rawDir === 'up' ? 'upward' : 'downward';
       const aliasMap = parseAliasMap(flags.alias || flags['alias-map'] || flags.aliasMap || flags.alias_map);
-      const scopeFilter = (
+      const scopeFilter = parseStringFlag(
         flags['scope-filter'] ||
         flags.scopeFilter ||
         flags['scope-path'] ||
         flags.scopePath ||
         flags.scope_filter ||
         flags.scope_path
-      ) as string | undefined;
+      );
       const result = await getComponentTree({
         entryPath: entryFile,
         routePath,
@@ -372,12 +631,14 @@ export async function main(argv: string[] = process.argv.slice(2)) {
     }
 
     if (command === 'routes' || command === 'scan-routes') {
-      const scanPath = positional[1] || targetPath;
+      const scanPath = (positional[1] && !positional[1].startsWith('-')) ? positional[1] : targetPath;
+      const rawView = parseStringFlag(flags.view);
+      const view = rawView === 'summary' || rawView === 'full' || rawView === 'tree' ? rawView : undefined;
       const result = await scanRoutes({
         targetPath: scanPath,
-        frameworkHint: flags.framework as RouteFramework | undefined,
-        prefix: (flags.prefix as string) || undefined,
-        view: (flags.view as 'summary' | 'full' | 'tree') || undefined,
+        frameworkHint: parseStringFlag(flags.framework) as RouteFramework | undefined,
+        prefix: parseStringFlag(flags.prefix),
+        view,
       });
 
       if (isJson) {
@@ -592,7 +853,7 @@ export async function main(argv: string[] = process.argv.slice(2)) {
     }
 
     if (command === 'unused-state' || command === 'find-unused-state' || command === 'dead-state') {
-      const auditPath = positional[1] || targetPath;
+      const auditPath = (positional[1] && !positional[1].startsWith('-')) ? positional[1] : targetPath;
       const result = await findUnusedState(auditPath);
 
       if (isJson) {
@@ -603,19 +864,20 @@ export async function main(argv: string[] = process.argv.slice(2)) {
       return;
     }
 
-    if (command === 'impact' || command === 'state-impact') {
-      const identifier = positional[1];
+    if (command === 'trace' || command === 'impact' || command === 'state-impact') {
+      const identifier = positional[1] && !positional[1].startsWith('-') ? positional[1] : undefined;
       if (!identifier) {
         console.error('Error: State identifier (store, context, composable) is required.');
         process.exit(1);
       }
 
+      const impactTarget = (positional[2] && !positional[2].startsWith('-')) ? positional[2] : targetPath;
       const depth = parseSafePositiveInt(flags.depth ?? flags['max-depth'] ?? flags.maxDepth, 1) ?? 1;
-      const rawDirection = flags.direction ? String(flags.direction).toLowerCase() : undefined;
+      const rawDirection = parseStringFlag(flags.direction)?.toLowerCase();
       const direction = (rawDirection as 'consumers' | 'dependencies' | 'both') || 'both';
 
       if (depth > 1 || rawDirection === 'dependencies' || rawDirection === 'both') {
-        const result = await traceStateChain(targetPath, {
+        const result = await traceStateChain(impactTarget, {
           identifier,
           direction,
           maxDepth: depth,
@@ -629,7 +891,7 @@ export async function main(argv: string[] = process.argv.slice(2)) {
       }
 
       const role = (flags.role as 'all' | 'mutators' | 'readers') || 'all';
-      const result = await queryStateImpact(targetPath, identifier, role);
+      const result = await queryStateImpact(impactTarget, identifier, role);
       if (isJson) {
         console.log(JSON.stringify(result, null, 2));
       } else {
@@ -639,7 +901,7 @@ export async function main(argv: string[] = process.argv.slice(2)) {
     }
 
     if (command === 'sync') {
-      const syncPath = positional[1] || targetPath;
+      const syncPath = (positional[1] && !positional[1].startsWith('-')) ? positional[1] : targetPath;
       const stats = await syncWorkspace(syncPath);
       if (isJson) {
         console.log(JSON.stringify(stats, null, 2));
@@ -651,16 +913,20 @@ export async function main(argv: string[] = process.argv.slice(2)) {
       return;
     }
 
-    if (command === 'patch-plan' || command === 'patch') {
-      const componentPath = positional[1];
+    if (command === 'patch' || command === 'patch-plan') {
+      const componentPath = positional[1] && !positional[1].startsWith('-') ? positional[1] : undefined;
       if (!componentPath) {
         console.error('Error: Component file path is required for patch-plan (e.g. strata patch-plan src/Button.vue --refactor rename_prop --old type --new variant).');
         process.exit(1);
       }
+      if (!existsSync(componentPath)) {
+        console.error(`Error: Component file not found: "${componentPath}".`);
+        process.exit(1);
+      }
 
       const refactorType = (flags.refactor ?? flags['refactor-type'] ?? 'rename_prop') as PatchRefactorType;
-      const oldName = String(flags.old ?? flags['old-name'] ?? '');
-      const newName = flags.new ? String(flags.new) : (flags['new-name'] ? String(flags['new-name']) : undefined);
+      const oldName = parseStringFlag(flags.old ?? flags['old-name']);
+      const newName = parseStringFlag(flags.new ?? flags['new-name']);
 
       if (!oldName) {
         console.error('Error: --old <name> is required.');
@@ -695,13 +961,9 @@ export async function main(argv: string[] = process.argv.slice(2)) {
     }
 
     if (command === 'apis' || command === 'api-contracts') {
-      const scanPath = positional[1] || targetPath;
-      const scopePath = (flags['scope-path'] || flags.scopePath) as string | undefined;
-      const excludeDirs = flags['exclude-dirs']
-        ? String(flags['exclude-dirs']).split(',').map((s) => s.trim()).filter(Boolean)
-        : flags.excludeDirs
-          ? String(flags.excludeDirs).split(',').map((s) => s.trim()).filter(Boolean)
-          : undefined;
+      const scanPath = (positional[1] && !positional[1].startsWith('-')) ? positional[1] : targetPath;
+      const scopePath = parseStringFlag(flags['scope-path'] || flags.scopePath);
+      const excludeDirs = parseStringList(flags['exclude-dirs'] ?? flags.excludeDirs);
 
       const result = await extractWorkspaceApiContracts({
         targetPath: scanPath,
@@ -718,23 +980,29 @@ export async function main(argv: string[] = process.argv.slice(2)) {
     }
 
     if (command === 'archetype') {
-      const pageFile = positional[1] || (flags.path as string);
-      if (!pageFile || pageFile === '.') {
+      const candidatePage = positional[1] && !positional[1].startsWith('-') ? positional[1] : undefined;
+      const pageFile = candidatePage || (typeof flags.path === 'string' && flags.path !== '.' ? flags.path : undefined);
+      if (!pageFile) {
         console.error(
           'Error: Target page file is required for archetype audit (e.g. strata archetype pages/orders/index.vue --exemplar pages/products/index.vue).'
         );
         process.exit(1);
       }
+      if (!existsSync(pageFile)) {
+        console.error(`Error: Target page file not found: "${pageFile}".`);
+        process.exit(1);
+      }
 
-      const exemplarFile = flags.exemplar
-        ? String(flags.exemplar)
-        : flags.exemplarPath
-          ? String(flags.exemplarPath)
-          : undefined;
+      const exemplarFile = parseStringFlag(flags.exemplar ?? flags.exemplarPath ?? flags['exemplar-path']);
+      if (exemplarFile && !existsSync(exemplarFile)) {
+        console.error(`Error: Exemplar file not found: "${exemplarFile}".`);
+        process.exit(1);
+      }
 
       const result = await auditPageArchetypeDrift({
         targetPath: pageFile,
         exemplarPath: exemplarFile,
+        workspaceRoot: resolveProjectRoot(pageFile),
       });
 
       if (isJson) {
@@ -749,7 +1017,7 @@ export async function main(argv: string[] = process.argv.slice(2)) {
     }
 
     if (command === 'stats' || command === 'telemetry') {
-      const scanPath = positional[1] || targetPath;
+      const scanPath = (positional[1] && !positional[1].startsWith('-')) ? positional[1] : targetPath;
       const summary = StrataTelemetry.getSummary(scanPath);
 
       if (isJson) {

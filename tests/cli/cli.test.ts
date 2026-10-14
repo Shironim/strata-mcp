@@ -1,4 +1,5 @@
 import { beforeAll, afterAll, describe, expect, it } from 'bun:test';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { main } from '../../src/cli';
 import { closeAllDatabases, getWorkspaceDatabase } from '../../src/engine/database';
@@ -120,4 +121,95 @@ describe('CLI Companion (Task 6 DoD)', () => {
     const parsedApis = JSON.parse(logs[3]);
     expect(parsedApis.workspaceRoot).toBeDefined();
   });
+
+  it('executes init command from CLI with short flags -y and -f without hanging', async () => {
+    const tmp = mkdtempSync('/tmp/strata-cli-init-');
+    try {
+      await main(['init', tmp, '-y', '-f']);
+      expect(existsSync(join(tmp, '.strata', 'graph.db'))).toBe(true);
+      expect(existsSync(join(tmp, '.agents', 'rules', 'strata-frontend.md'))).toBe(true);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('correctly parses boolean flags without consuming following positional argument', async () => {
+    const logs: string[] = [];
+    const originalLog = console.log;
+    console.log = (...args) => logs.push(args.join(' '));
+
+    try {
+      // --audit-events must not eat the file path argument!
+      await main(['contract', '--audit-events', join(FIXTURES_DIR, 'OldButton.vue')]);
+    } finally {
+      console.log = originalLog;
+    }
+
+    expect(logs.length).toBeGreaterThan(0);
+    expect(logs[0]).toContain('Event Handler Audit');
+  });
+
+  it('supports unified and symmetrical command aliases: find --component, inspect, and trace', async () => {
+    const logs: string[] = [];
+    const originalLog = console.log;
+    console.log = (...args) => logs.push(args.join(' '));
+
+    try {
+      await main(['find', '--component', 'OldButton', '-p', FIXTURES_DIR, '--json']);
+      await main(['inspect', join(FIXTURES_DIR, 'OldButton.vue')]);
+      await main(['trace', 'useRouter', '-p', FIXTURES_DIR]);
+    } finally {
+      console.log = originalLog;
+    }
+
+    expect(logs.length).toBeGreaterThanOrEqual(3);
+    const parsedUsage = JSON.parse(logs[0]);
+    expect(Array.isArray(parsedUsage)).toBe(true);
+    expect(logs[1]).toContain('OldButton');
+    expect(logs[2]).toContain('State Impact Analysis');
+  });
+
+  it('prints concise root help and command-specific contextual help without slop', async () => {
+    const logs: string[] = [];
+    const originalLog = console.log;
+    console.log = (...args) => logs.push(args.join(' '));
+
+    try {
+      // 1. Root help with --help
+      await main(['--help']);
+      // 2. Command-specific help with <cmd> --help
+      await main(['audit', '--help']);
+      // 3. Command-specific help with help <cmd>
+      await main(['help', 'patch']);
+    } finally {
+      console.log = originalLog;
+    }
+
+    expect(logs.length).toBe(3);
+
+    // Root help assertions
+    const rootHelp = logs[0];
+    expect(rootHelp).toContain('strata — Frontend Structural Code Search & Intelligence CLI');
+    expect(rootHelp).toContain('Core Analytical Commands');
+    expect(rootHelp).toContain('Direct Shortcuts');
+    // Ensure root help is concise (< 40 lines) and has no lines exceeding 100 columns
+    const rootLines = rootHelp.trim().split('\n');
+    expect(rootLines.length).toBeLessThanOrEqual(40);
+    for (const line of rootLines) {
+      expect(line.length).toBeLessThanOrEqual(100);
+    }
+
+    // Command-specific audit help assertions
+    const auditHelp = logs[1];
+    expect(auditHelp).toContain('Usage: strata audit [target-dir] [options]');
+    expect(auditHelp).toContain('archetype-drift');
+    expect(auditHelp).toContain('--exemplar <file>');
+
+    // Command-specific patch help assertions
+    const patchHelp = logs[2];
+    expect(patchHelp).toContain('Usage: strata patch <component-file> [options]');
+    expect(patchHelp).toContain('rename_prop');
+    expect(patchHelp).toContain('--old <name>');
+  });
 });
+
