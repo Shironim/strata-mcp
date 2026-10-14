@@ -784,6 +784,7 @@ export interface ContextDependencyGraph {
 }
 
 export interface EdgePayload {
+  alias?: string;
   passedProps?: PassedPropInfo[];
   listenedEvents?: string[];
   slots?: string[];

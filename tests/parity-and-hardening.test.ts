@@ -28,7 +28,7 @@ describe('Strata-MCP Parity, Coercion, & Hardening Suite', () => {
 
   describe('Universal MCP Coercion (coerceToolArguments)', () => {
     test('normalizes framework_hint and frameworkHint to framework', () => {
-      const a1 = coerceToolArguments('get_routes', { framework_hint: 'nuxt' });
+      const a1 = coerceToolArguments('audit_frontend', { framework_hint: 'nuxt' });
       expect(a1.framework).toBe('nuxt');
 
       const a2 = coerceToolArguments('audit_frontend', { frameworkHint: 'next-app' });
@@ -124,7 +124,7 @@ describe('Strata-MCP Parity, Coercion, & Hardening Suite', () => {
       expect(typeof StrataIndex.auditBundleHealth).toBe('function');
       expect(typeof StrataIndex.scanDynamicImportsAndGlobals).toBe('function');
       expect(Array.isArray(StrataIndex.TOOLS)).toBe(true);
-      expect(StrataIndex.TOOLS.length).toBe(8);
+      expect(StrataIndex.TOOLS.length).toBe(6);
     });
 
     test('strata init templates and instructions include archetype-drift, rename_model, and rename_slot', async () => {

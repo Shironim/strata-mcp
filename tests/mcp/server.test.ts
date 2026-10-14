@@ -5,7 +5,7 @@ import { join } from 'node:path';
 const FIXTURES_DIR = join(import.meta.dir, '../fixtures');
 
 describe('MCP Server & Core Tools', () => {
-  it('registers all 8 Core MCP tools in tool definitions', async () => {
+  it('registers exactly 6 Core MCP tools in tool definitions', async () => {
     const server = createMcpServer();
     expect(server).toBeDefined();
 
@@ -13,7 +13,7 @@ describe('MCP Server & Core Tools', () => {
     expect(listHandler).toBeDefined();
 
     const toolsResult = await listHandler({ method: 'tools/list', params: {} });
-    expect(toolsResult.tools.length).toBe(8);
+    expect(toolsResult.tools.length).toBe(6);
 
     const toolNames = toolsResult.tools.map((t: any) => t.name);
     expect(toolNames).toEqual([
@@ -23,8 +23,6 @@ describe('MCP Server & Core Tools', () => {
       'trace_state',
       'audit_frontend',
       'generate_patch_plan',
-      'get_routes',
-      'get_api_contracts',
     ]);
   });
 
@@ -90,7 +88,7 @@ describe('MCP Server & Core Tools', () => {
       expect(response.content[0].text).toContain('Debug CST');
     });
 
-    it('tests in-memory pattern/rule against code snippet', async () => {
+    it('returns JSON matches for an explicitly requested snippet JSON response', async () => {
       const server = createMcpServer();
       const callHandler = (server as any)._requestHandlers?.get('tools/call');
 
@@ -101,6 +99,7 @@ describe('MCP Server & Core Tools', () => {
           arguments: {
             code: 'const count = ref(0);',
             pattern: 'const $NAME = ref($VAL)',
+            format: 'json',
           },
         },
       });

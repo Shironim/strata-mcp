@@ -1,13 +1,13 @@
 import { describe, it, expect } from 'bun:test';
-import { getRoutesTool } from '../../src/tools/get-routes';
-import { getApiContractsTool } from '../../src/tools/get-api-contracts';
+import { auditFrontendTool } from '../../src/tools';
 import { resolve } from 'node:path';
 
-describe('strata MCP tools parity (get_routes & get_api_contracts)', () => {
+describe('strata MCP tools parity (audit_frontend routes & api-contracts)', () => {
   const fixtureDir = resolve(import.meta.dir, '../fixtures');
 
-  it('executes get_routes tool and returns structured text manifest', async () => {
-    const response = await getRoutesTool.handler({
+  it('executes routes target and returns structured text manifest', async () => {
+    const response = await auditFrontendTool.handler({
+      target: 'routes',
       targetPath: fixtureDir,
       view: 'summary',
     });
@@ -18,8 +18,9 @@ describe('strata MCP tools parity (get_routes & get_api_contracts)', () => {
     expect(typeof response.content[0].text).toBe('string');
   });
 
-  it('executes get_api_contracts tool and returns extracted endpoint contracts', async () => {
-    const response = await getApiContractsTool.handler({
+  it('executes api-contracts target and returns extracted endpoint contracts', async () => {
+    const response = await auditFrontendTool.handler({
+      target: 'api-contracts',
       targetPath: fixtureDir,
     });
 

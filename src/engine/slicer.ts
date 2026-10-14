@@ -1,3 +1,4 @@
+import { readSourceFile } from './source-file';
 import { promises as fs } from 'node:fs';
 import { dirname, extname, resolve } from 'node:path';
 import { executeAstGrep } from './astgrep';
@@ -166,7 +167,7 @@ export async function sliceSymbol(options: SliceSymbolOptions): Promise<SymbolSl
   const targetFile = resolve(options.path);
   let fileContent: string;
   try {
-    fileContent = await fs.readFile(targetFile, 'utf8');
+    fileContent = await readSourceFile(targetFile);
   } catch {
     throw new Error(`Failed to read file: ${targetFile}`);
   }

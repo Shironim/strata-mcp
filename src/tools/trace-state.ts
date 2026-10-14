@@ -1,3 +1,4 @@
+import { TOOL_CATALOG } from './catalog';
 import fs from 'node:fs';
 import {
   queryStateImpact,
@@ -13,42 +14,7 @@ import {
 import type { McpToolDefinition } from './types';
 
 export const traceStateTool: McpToolDefinition = {
-  name: 'trace_state',
-  description:
-    'Traces state store (Pinia/Zustand/Redux), Context, or composable impact across frontend components. Identifies where state is modified, read, or called. Supports shallow impact (depth: 1) as well as multi-hop cascading dependency chains (depth: 2+).',
-  inputSchema: {
-    type: 'object',
-    properties: {
-      identifier: {
-        type: 'string',
-        description: 'State identifier to trace (e.g. "useCartStore", "useRouter", alias: state, store, composable)',
-      },
-      path: {
-        type: 'string',
-        description: 'Project root directory or component file path (default: ".", alias: target_path, file_path)',
-      },
-      depth: {
-        type: 'number',
-        description: 'Traversal depth: 1 for direct consumers impact, or >1 for multi-hop call chain (default: 1, alias: max_depth)',
-      },
-      role: {
-        type: 'string',
-        enum: ['all', 'mutators', 'readers'],
-        description:
-          'Consumer role filter: "all" (grouped into mutators and readers), "mutators" (only triggers/action callers), or "readers" (only state/render consumers). Default: "all"',
-      },
-      direction: {
-        type: 'string',
-        enum: ['consumers', 'dependencies', 'both'],
-        description: 'Direction for multi-hop tracing (default: "both")',
-      },
-      format: {
-        type: 'string',
-        enum: ['text', 'json'],
-        description: 'Output format: text or json (default: "text", alias: output_format)',
-      },
-    },
-  },
+  ...TOOL_CATALOG[3],
   handler: async (args: Record<string, any>) => {
     let identifier = (args.identifier || args.state || args.state_name || args.store || args.store_name || args.composable || args.name || args.symbol)
       ? String(args.identifier || args.state || args.state_name || args.store || args.store_name || args.composable || args.name || args.symbol).trim()
@@ -98,8 +64,27 @@ export const traceStateTool: McpToolDefinition = {
 
     try {
       const targetPath = resolveProjectRoot(rawTargetPath);
-      const depth = parseSafePositiveInt(args.depth ?? args.max_depth ?? args.maxDepth, 1) ?? 1;
       const isJson = args.output_format === 'json' || args.format === 'json';
+
+      const { isWorkspaceIndexed } = await import('../engine/storage/schema');
+      if (!isWorkspaceIndexed(targetPath)) {
+        const notIndexedPayload = {
+          status: 'NOT_INDEXED',
+          message: "Workspace belum diindeks oleh Strata. Jalankan 'strata init' terlebih dahulu di terminal atau panggil tool inisialisasi yang disetujui.",
+        };
+        return {
+          content: [
+            {
+              type: 'text',
+              text: isJson
+                ? JSON.stringify(notIndexedPayload, null, 2)
+                : `[strata] ${notIndexedPayload.message}`,
+            },
+          ],
+        };
+      }
+
+      const depth = parseSafePositiveInt(args.depth ?? args.max_depth ?? args.maxDepth, 1) ?? 1;
 
       const shouldMultiHop = depth > 1 || args.direction === 'dependencies' || args.direction === 'both';
       if (shouldMultiHop) {

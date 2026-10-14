@@ -1,3 +1,4 @@
+import { readSourceFile } from './source-file';
 import { promises as fs } from 'node:fs';
 import { resolve } from 'node:path';
 import {
@@ -8,7 +9,8 @@ import {
   type ElementNode,
   type DirectiveNode,
 } from '@vue/compiler-dom';
-import { parse as parseSfcRaw, compileScript } from '@vue/compiler-sfc';
+import { compileScript } from '@vue/compiler-sfc';
+import { parseVueSource as parseSfcRaw } from './vue-parser';
 import { parseSfc } from './splitter';
 import { remapPosition } from './remapper';
 import { executeAstGrep } from './astgrep';
@@ -107,7 +109,7 @@ export async function auditEventHandlers(
     fileContent = options.code;
   } else {
     try {
-      fileContent = await fs.readFile(targetFile, 'utf8');
+      fileContent = await readSourceFile(targetFile);
     } catch {
       throw new Error(`Failed to read component file: ${targetFile}`);
     }
@@ -410,7 +412,7 @@ export async function detectReactivitySmells(
 
   if (!code) {
     try {
-      code = await fs.readFile(filePath, 'utf8');
+      code = await readSourceFile(filePath);
     } catch {
       return smells;
     }

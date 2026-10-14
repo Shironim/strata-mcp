@@ -1,3 +1,4 @@
+import { readSourceFile } from '../source-file';
 import { promises as fs } from 'node:fs';
 import { basename, extname, normalize, resolve } from 'node:path';
 import { collectFiles } from '../collector';
@@ -242,7 +243,7 @@ export async function findUnusedState(
     const norm = normalize(f);
     const base = basename(f, extname(f));
     try {
-      const content = await fs.readFile(norm, 'utf8');
+      const content = await readSourceFile(norm);
       const exportFuncMatches = content.matchAll(
         /export\s+(?:async\s+)?(?:function|const)\s+([A-Za-z0-9_$]+)/g
       );

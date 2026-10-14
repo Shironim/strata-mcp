@@ -1,3 +1,4 @@
+import { readSourceFile } from './source-file';
 import { promises as fs } from 'node:fs';
 import { extname, relative, resolve } from 'node:path';
 import { collectFiles } from './collector';
@@ -52,7 +53,7 @@ export async function auditDesignTokens(
 
     let content = '';
     try {
-      content = await fs.readFile(file, 'utf8');
+      content = await readSourceFile(file);
     } catch {
       continue;
     }

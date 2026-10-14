@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { formatStateChainAsText, traceStateChain } from '../../src/engine/database';
+import { closeWorkspaceDatabase, getWorkspaceDatabase, formatStateChainAsText, traceStateChain } from '../../src/engine/database';
 
 describe('State Dependency Chain Tracing Engine', () => {
   it('traces multi-hop composable consumers and dependencies', async () => {
@@ -45,6 +45,7 @@ describe('State Dependency Chain Tracing Engine', () => {
       'utf8'
     );
 
+    getWorkspaceDatabase(tempDir, { create: true });
     const result = await traceStateChain(tempDir, {
       identifier: 'useCartStore',
       direction: 'both',
@@ -69,8 +70,7 @@ describe('State Dependency Chain Tracing Engine', () => {
 
     // Clean up with Windows file lock safety
     try {
-      const db = getWorkspaceDatabase(tempDir);
-      db.close();
+      closeWorkspaceDatabase(tempDir);
       await fs.rm(tempDir, { recursive: true, force: true });
     } catch {
       // Ignore file lock on Windows

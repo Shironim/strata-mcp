@@ -1,4 +1,7 @@
+import { TOOL_CATALOG } from './catalog';
 import fs from 'node:fs';
+import { basename, extname, relative, isAbsolute, resolve } from 'node:path';
+import { collectFiles } from '../engine/collector';
 import { sliceSymbol, formatSymbolSliceAsText } from '../engine/slicer';
 import {
   auditEventHandlers,
@@ -8,57 +11,11 @@ import {
 } from '../engine/reactivity';
 import { extractComponentContract, formatContractAsText } from '../engine/contract';
 import { extractComponentOutline, formatOutlineAsText } from '../engine/outline';
-import { resolveWorkspacePath } from '../engine/path-resolver';
+import { resolveWorkspacePath, findProjectRoot, PROJECT_ROOT_MARKERS } from '../engine/path-resolver';
 import type { McpToolDefinition } from './types';
 
 export const inspectComponentTool: McpToolDefinition = {
-  name: 'inspect_component',
-  description:
-    'Deep component inspection (.vue, .tsx, .jsx, .astro). Extracts interface contracts (props/emits/slots), layout structure & dynamic classes (:class, Tailwind layout tokens, v-show/v-if), data fetching boundaries (Inertia, TanStack Query, Axios endpoints & backend target hints), form schemas, and reactivity smells.',
-  inputSchema: {
-    type: 'object',
-    properties: {
-      path: {
-        type: 'string',
-        description: 'Target component or file path (e.g. "src/components/MyButton.vue", alias: file_path, target_path)',
-      },
-      symbol: {
-        type: 'string',
-        description:
-          'Symbol/function name to slice verbatim with exact line numbers, callers, and covering test detection (e.g. "calculateTotal", "handleSubmit", alias: symbol_name)',
-      },
-      audit_events: {
-        type: 'boolean',
-        description:
-          'When true on Vue components, audits template-to-script reactivity integrity for broken and dead event handlers',
-      },
-      infer_props: {
-        type: 'boolean',
-        description:
-          'When true (default), deeply infers object prop sub-properties (.data, .links, etc.) and data shapes from template and script AST',
-      },
-      resolve_globals: {
-        type: 'boolean',
-        description:
-          'When true (default), identifies un-imported global symbols, Ziggy route() helpers, and auto-imported composables',
-      },
-      outline: {
-        type: 'boolean',
-        description:
-          'When true, extracts full symbol outline of all functions, methods, and computed properties with exact line ranges, cross-file callee targets, and complexity smells (alias: include_outline)',
-      },
-      max_function_lines: {
-        type: 'number',
-        description:
-          'Line count threshold for high-complexity warning (default: 300)',
-      },
-      format: {
-        type: 'string',
-        enum: ['text', 'json'],
-        description: 'Output format: text or json (default: "text", alias: output_format)',
-      },
-    },
-  },
+  ...TOOL_CATALOG[1],
   handler: async (args: Record<string, any>) => {
     const targetPathHint = (args.target_path || args.targetPath || args.project_root || args.root)
       ? String(args.target_path || args.targetPath || args.project_root || args.root)
@@ -77,14 +34,27 @@ export const inspectComponentTool: McpToolDefinition = {
     const filePath = resolveWorkspacePath(rawPath, targetPathHint);
 
     if (!fs.existsSync(filePath)) {
+      const root = targetPathHint ? resolveWorkspacePath(targetPathHint) : findProjectRoot(filePath);
+      const rel = relative(root, filePath);
+      let suggestions: string[] = [];
+      if (!isAbsolute(rel) && rel !== '..' && !rel.startsWith('../') && !rel.startsWith('..\\') &&
+          (targetPathHint || PROJECT_ROOT_MARKERS.some(marker => fs.existsSync(resolve(root, marker))))) {
+        try {
+          const stem = basename(filePath, extname(filePath));
+          suggestions = (await collectFiles(root))
+            .filter(candidate => basename(candidate, extname(candidate)) === stem)
+            .sort().slice(0, 5);
+        } catch {
+          // Suggestions are optional; retain the original not-found diagnostic.
+        }
+      }
+      const error = `Component file not found: ${filePath}`;
+      const isJson = args.output_format === 'json' || args.format === 'json';
       return {
         isError: true,
-        content: [
-          {
-            type: 'text',
-            text: `Component file not found: ${filePath}`,
-          },
-        ],
+        content: [{ type: 'text', text: isJson
+          ? JSON.stringify({ error, requestedPath: filePath, suggestions }, null, 2)
+          : error + (suggestions.length ? '\nCandidate paths (retry with the intended path):\n' + suggestions.join('\n') : '') }],
       };
     }
 

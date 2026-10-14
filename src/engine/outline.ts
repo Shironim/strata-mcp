@@ -1,3 +1,4 @@
+import { readSourceFile } from './source-file';
 import { existsSync, promises as fs, readFileSync } from 'node:fs';
 import { dirname, extname, isAbsolute, join, resolve } from 'node:path';
 import ts from 'typescript';
@@ -22,22 +23,18 @@ interface TsConfigPaths {
   paths?: Record<string, string[]>;
 }
 
-const tsConfigCache = new Map<string, TsConfigPaths | null>();
 
 /**
  * Clears the cached tsconfig paths mapping.
  */
 export function clearTsConfigCache(): void {
-  tsConfigCache.clear();
+  // Kept for callers; compiler configuration is read fresh for each operation.
 }
 
 /**
  * Loads and caches compilerOptions.paths from tsconfig.json or jsconfig.json.
  */
 function loadTsConfigPaths(workspaceRoot: string): TsConfigPaths | null {
-  if (tsConfigCache.has(workspaceRoot)) {
-    return tsConfigCache.get(workspaceRoot)!;
-  }
 
   const candidateFiles = ['tsconfig.json', 'jsconfig.json'];
   for (const configFile of candidateFiles) {
@@ -53,7 +50,6 @@ function loadTsConfigPaths(workspaceRoot: string): TsConfigPaths | null {
             baseUrl: compilerOptions.baseUrl ? resolve(workspaceRoot, compilerOptions.baseUrl) : workspaceRoot,
             paths: compilerOptions.paths,
           };
-          tsConfigCache.set(workspaceRoot, config);
           return config;
         }
       } catch {
@@ -159,7 +155,7 @@ async function locateTargetSymbolLines(
   visited.add(targetFilePath);
 
   try {
-    const content = await fs.readFile(targetFilePath, 'utf8');
+    const content = await readSourceFile(targetFilePath);
     const adapter = createDocumentAdapter(targetFilePath, content);
     const scriptBlocks = adapter.getScriptBlocks();
     const isJsx = targetFilePath.endsWith('.tsx') || targetFilePath.endsWith('.jsx');
@@ -259,7 +255,7 @@ export async function extractComponentOutline(
   options: ExtractOutlineOptions = { path: filePath }
 ): Promise<ComponentSymbolOutline> {
   const targetFile = resolve(filePath);
-  const fileContent = await fs.readFile(targetFile, 'utf8');
+  const fileContent = await readSourceFile(targetFile);
   const workspaceRoot = options.workspaceRoot || findProjectRoot(targetFile) || dirname(targetFile);
   const threshold = options.maxFunctionLines ?? 300;
   const shouldResolveCalls = options.resolveCalls !== false;
@@ -366,8 +362,8 @@ export async function extractComponentOutline(
     }
 
     function isNodeExported(node: ts.Node): boolean {
-      if (node.modifiers) {
-        for (const mod of node.modifiers) {
+      if (ts.canHaveModifiers(node)) {
+        for (const mod of ts.getModifiers(node) ?? []) {
           if (mod.kind === ts.SyntaxKind.ExportKeyword) return true;
         }
       }

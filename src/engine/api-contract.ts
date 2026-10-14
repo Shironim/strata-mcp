@@ -1,3 +1,4 @@
+import { readSourceFile } from './source-file';
 import { promises as fs } from 'node:fs';
 import { resolve, relative, basename } from 'node:path';
 import { collectFiles } from './collector';
@@ -341,7 +342,7 @@ export async function extractWorkspaceApiContracts(
 
   for (const file of files) {
     try {
-      const code = await fs.readFile(file, 'utf-8');
+      const code = await readSourceFile(file);
       const items = extractApiContractsFromCode(code, file);
 
       for (const item of items) {

@@ -1,3 +1,4 @@
+import { readSourceFile } from './source-file';
 import { promises as fs } from 'node:fs';
 import { basename, extname, normalize, relative, resolve } from 'node:path';
 import { collectFiles } from './collector';
@@ -140,7 +141,7 @@ export async function findUnusedComponents(
   for (const file of allFiles) {
     const norm = normalize(file);
     try {
-      const content = await fs.readFile(norm, 'utf8');
+      const content = await readSourceFile(norm);
       fileContents.push({ file: norm, content });
     } catch {
       // ignore

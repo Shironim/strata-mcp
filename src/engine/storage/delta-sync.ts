@@ -1,3 +1,5 @@
+import { readSourceFile } from '../source-file';
+import { parseVueSource } from '../vue-parser';
 import { Database } from 'bun:sqlite';
 import { promises as fs } from 'node:fs';
 import { basename, extname, normalize, resolve, sep } from 'node:path';
@@ -151,13 +153,18 @@ export async function hashChecker(
 export async function batchParser(
   toProcess: string[],
   absRoot: string,
-  _diskMap: Map<string, { fullPath: string; mtime: number; size: number }>
+  _diskMap: Map<string, { fullPath: string; mtime: number; size: number }>,
+  includeRoutes = true
 ): Promise<ParsedWorkspaceBatch> {
   const parsedFiles = new Map<string, ParsedFilePayload>();
 
   for (const path of toProcess) {
     try {
-      const content = await fs.readFile(path, 'utf8');
+      const content = await readSourceFile(path);
+      if (extname(path) === '.vue') {
+        const { errors } = parseVueSource(content, { filename: path, sourceMap: false });
+        if (errors.length) throw new Error(`PARSE_FAILED: ${path}: ${errors.map(error => typeof error === 'string' ? error : error.message).join('; ')}`);
+      }
       const framework = detectFramework(path, content);
       const boundary = extractRenderBoundary(path, content, framework);
       const stateDeps = extractStateDependencies(content, framework);
@@ -183,6 +190,7 @@ export async function batchParser(
             targetPath: matchedPath,
             isDynamic: imp.isDynamic ?? false,
             payload: {
+              alias: imp.alias,
               passedProps: passedProps.length > 0 ? passedProps : undefined,
               contexts: (providers.length > 0 || consumers.length > 0) ? {
                 provided: providers.length > 0 ? providers : undefined,
@@ -202,19 +210,15 @@ export async function batchParser(
         contract,
         edges,
       });
-    } catch {
-      // ignore parse failures
+    } catch (err) {
+      throw new Error(`PARSE_FAILED: ${path}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
   let routeManifest: Awaited<ReturnType<typeof scanRoutes>> | null = null;
-  try {
+  if (includeRoutes) {
     const manifest = await scanRoutes({ targetPath: absRoot });
-    if (manifest.routes.length > 0) {
-      routeManifest = manifest;
-    }
-  } catch {
-    // ignore route scan failures
+    routeManifest = manifest;
   }
 
   return {
@@ -441,29 +445,22 @@ export async function syncWorkspace(
   scopePath?: string,
   database?: Database
 ): Promise<SyncStats> {
-  const startTime = performance.now();
   const absRoot = canonicalizePath(workspaceRoot);
   const db = database ?? getWorkspaceDatabase(absRoot);
-
-  // 1. Gather files and detect delta
-  const delta = await hashChecker(absRoot, db, scopePath);
-
-  // Fast exit if nothing changed
-  if (delta.added.length === 0 && delta.modified.length === 0 && delta.deleted.length === 0) {
-    return {
-      added: 0,
-      modified: 0,
-      deleted: 0,
-      unchanged: delta.unchanged,
-      total: delta.diskMap.size,
-      durationMs: Math.round(performance.now() - startTime),
-    };
-  }
-
-  // 2. Batch parse modified/added files
-  const toProcess = [...delta.added, ...delta.modified];
-  const parsedBatch = await batchParser(toProcess, absRoot, delta.diskMap);
-
-  // 3. Commit all changes inside SQLite transaction
-  return transactionCommitter(db, delta, parsedBatch, startTime);
+  const previous = syncQueues.get(db) ?? Promise.resolve();
+  const operation = previous.catch(() => {}).then(async () => {
+    const { stagedSync } = await import('./staged-sync');
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try { return await stagedSync(absRoot, scopePath, db); }
+      catch (err) {
+        if (attempt || !(err instanceof Error && err.message.startsWith('WORKSPACE_CHANGED'))) throw err;
+      }
+    }
+    throw new Error('WORKSPACE_CHANGED: retries exhausted');
+  });
+  syncQueues.set(db, operation);
+  try { return await operation; }
+  finally { if (syncQueues.get(db) === operation) syncQueues.delete(db); }
 }
+
+const syncQueues = new WeakMap<Database, Promise<unknown>>();

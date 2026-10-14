@@ -1,3 +1,4 @@
+import { readSourceFile } from '../source-file';
 import { existsSync, promises as fs, statSync, readFileSync } from "node:fs";
 import { basename, dirname, extname, join, normalize, resolve } from "node:path";
 import { collectFiles } from "../collector";
@@ -78,7 +79,7 @@ export async function getUpwardComponentTree(
   }
 
   const maxDepth = options.maxDepth !== undefined ? options.maxDepth : 3;
-  const projectRoot = findProjectRoot(entryPath);
+  const projectRoot = options.targetPath ? normalize(resolve(options.targetPath)) : findProjectRoot(entryPath);
   const allFiles = await collectFiles(projectRoot);
 
   const autoDetectedAliases = await loadAliasConfig(entryPath);
@@ -100,7 +101,7 @@ export async function getUpwardComponentTree(
       ext === '.js'
     ) {
       try {
-        const content = await fs.readFile(file, 'utf8');
+        const content = await readSourceFile(file);
         fileContents.set(normalize(file), content);
       } catch {
         // ignore

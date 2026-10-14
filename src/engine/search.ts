@@ -1,3 +1,4 @@
+import { readSourceFile } from './source-file';
 import { promises as fs } from 'node:fs';
 import { resolve } from 'node:path';
 import { executeAstGrep, isBinaryExecutionError } from './astgrep';
@@ -26,6 +27,31 @@ export interface SearchOptions {
   maxResults?: number;
   concurrency?: number;
   excludeDirs?: string[];
+}
+
+/** Exact, case-sensitive substrings; regex syntax and escapes have no special meaning. */
+export function matchLiteralLines(content: string, pattern: string): RawMatch[] {
+  if (!pattern || /[\r\n]/.test(pattern)) throw new Error('Literal pattern must be a non-empty single line');
+  return content.split(/\r?\n/).flatMap((text, index) => {
+    const column = text.indexOf(pattern);
+    return column < 0 ? [] : [{ line: index + 1, column: column + 1, text }];
+  });
+}
+
+export async function findLiteralCode(options: SearchOptions): Promise<ResolvedMatch[]> {
+  const files = await collectFiles(resolve(options.targetPath), { excludeDirs: options.excludeDirs });
+  const matches: ResolvedMatch[] = [];
+  const limit = options.maxResults || 200;
+  // Validate even when no files are found.
+  matchLiteralLines('', options.pattern || '');
+  for (const file of files) {
+    const content = await readSourceFile(file);
+    for (const match of matchLiteralLines(content, options.pattern!)) {
+      matches.push({ file, line: match.line, column: match.column, snippet: match.text });
+      if (matches.length >= limit) return matches;
+    }
+  }
+  return matches;
 }
 
 export interface ComponentSearchOptions {
@@ -193,7 +219,7 @@ export async function findCode(options: SearchOptions): Promise<ResolvedMatch[]>
   const fileResults = await runConcurrent(
     files,
     async (file) => {
-      const content = await fs.readFile(file, 'utf8');
+      const content = await readSourceFile(file);
 
       // Fast-Path Candidate Pruning (Engine B): skip file if required literal keywords are missing
       if (keywords.length > 0) {
@@ -284,7 +310,7 @@ export async function findCodeByRule(options: SearchOptions): Promise<ResolvedMa
   const fileResults = await runConcurrent(
     files,
     async (file) => {
-      const content = await fs.readFile(file, 'utf8');
+      const content = await readSourceFile(file);
 
       // Fast-Path Candidate Pruning (Engine B): skip file if candidate keywords are absent
       if (keywords.length > 0 && !keywords.some((kw) => content.includes(kw))) {
@@ -362,7 +388,7 @@ export async function findComponentUsage(options: ComponentSearchOptions): Promi
   const fileResults = await runConcurrent(
     files,
     async (file) => {
-      const content = await fs.readFile(file, 'utf8');
+      const content = await readSourceFile(file);
 
       // Fast-Path Candidate Pruning (Engine B): skip file if none of the component name candidates appear
       if (!candidates.some((cand) => content.includes(cand))) {

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import { detectPropsDrilling } from '../../src/engine/graph/props-drilling';
 import { scanRoutes } from '../../src/engine/routes';
 import { componentTreeTool } from '../../src/tools/component-tree';
-import { getRoutesTool } from '../../src/tools/get-routes';
+import { auditFrontendTool } from '../../src/tools';
 import { patchPlanTool } from '../../src/tools/patch-plan';
 import type { ComponentTreeNode } from '../../src/types';
 import { join } from 'node:path';
@@ -143,11 +143,12 @@ describe('strata-mcp Bugfix Verification (ST-1 to ST-6)', () => {
   });
 
   describe('ST-4, ST-5, ST-6: MCP Parameter Adaptor Normalization', () => {
-    it('get_routes accepts path and target_path aliases', async () => {
+    it('audit_frontend routes accepts path and target_path aliases', async () => {
       const tempDir = join('/tmp', `strata-test-param-${Date.now()}`);
       fs.mkdirSync(tempDir, { recursive: true });
 
-      const res = await getRoutesTool.handler({
+      const res = await auditFrontendTool.handler({
+        target: 'routes',
         path: tempDir,
       });
 

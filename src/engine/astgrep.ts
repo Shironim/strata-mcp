@@ -261,6 +261,12 @@ export function isBinaryExecutionError(err: unknown): boolean {
   );
 }
 
+export function isPatternParseError(err: unknown): boolean {
+  if (isBinaryExecutionError(err)) return false;
+  const message = err instanceof Error ? err.message : String(err);
+  return message.includes('Cannot parse query as a valid pattern') || message.includes('Multiple AST nodes are detected');
+}
+
 /**
  * Executes an ast-grep query either on an in-memory string (via stdin) or against file paths on disk.
  */
@@ -302,15 +308,31 @@ export async function executeAstGrep(options: AstGrepQueryOptions): Promise<RawM
     args.push(options.targetPath);
   }
 
+  let inputDir: string | undefined;
+  let inputFile: Awaited<ReturnType<typeof fs.open>> | undefined;
   try {
+    // Regular-file stdin avoids Bun's socket writes being denied in restricted sandboxes.
+    if (useStdin) {
+      inputDir = await fs.mkdtemp(join(tmpdir(), 'strata-ast-input-'));
+      inputFile = await fs.open(join(inputDir, 'input'), 'wx', 0o600);
+      await inputFile.writeFile(options.code!, 'utf8');
+      await inputFile.close();
+      inputFile = await fs.open(join(inputDir, 'input'), 'r');
+    }
     return await new Promise<RawMatch[]>((resolve, reject) => {
       let stdout = '';
       let stderr = '';
+      let lineBuffer = '';
+      const matches: RawMatch[] = [];
+      let earlyStopped = false;
+      const maxResults = options.maxResults && options.maxResults > 0 ? options.maxResults : Infinity;
+      const MAX_STDOUT_BYTES = 16 * 1024 * 1024;
+      const MAX_STDERR_BYTES = 64 * 1024;
 
-      let proc;
+      let proc: ReturnType<typeof spawn>;
       try {
         proc = spawn(bin, args, {
-          stdio: [useStdin ? 'pipe' : 'ignore', 'pipe', 'pipe'],
+          stdio: [inputFile ? inputFile.fd : 'ignore', 'pipe', 'pipe'],
           shell: isCmd,
         });
       } catch (err) {
@@ -322,18 +344,58 @@ export async function executeAstGrep(options: AstGrepQueryOptions): Promise<RawM
         return;
       }
 
-      if (useStdin && proc.stdin) {
-        proc.stdin.on('error', () => {});
-        proc.stdin.write(options.code);
-        proc.stdin.end();
-      }
-
       proc.stdout?.on('data', (chunk) => {
-        stdout += chunk.toString();
+        if (earlyStopped) return;
+        const str = chunk.toString();
+        if (stdout.length < MAX_STDOUT_BYTES) {
+          stdout += str.slice(0, MAX_STDOUT_BYTES - stdout.length);
+        }
+        lineBuffer += str;
+        let newlineIdx: number;
+        while ((newlineIdx = lineBuffer.indexOf('\n')) !== -1) {
+          const line = lineBuffer.slice(0, newlineIdx).trim();
+          lineBuffer = lineBuffer.slice(newlineIdx + 1);
+          if (line.length === 0) continue;
+          try {
+            const parsed = JSON.parse(line) as AstGrepItemOutput;
+            if (parsed.range) {
+              matches.push({
+                line: parsed.range.start.line + 1,
+                column: parsed.range.start.column + 1,
+                endLine: parsed.range.end.line + 1,
+                endColumn: parsed.range.end.column + 1,
+                text: parsed.text || parsed.lines || '',
+              });
+              if (matches.length >= maxResults) {
+                earlyStopped = true;
+                lineBuffer = '';
+                try {
+                  proc.kill('SIGTERM');
+                } catch {
+                  // ignore
+                }
+                break;
+              }
+            }
+          } catch {
+            // Not a complete ndjson line or different format
+          }
+        }
+        if (lineBuffer.length > MAX_STDOUT_BYTES) {
+          earlyStopped = true;
+          try {
+            proc.kill('SIGKILL');
+          } catch {
+            // ignore
+          }
+        }
       });
 
       proc.stderr?.on('data', (chunk) => {
-        stderr += chunk.toString();
+        const str = chunk.toString();
+        if (stderr.length < MAX_STDERR_BYTES) {
+          stderr += str.slice(0, MAX_STDERR_BYTES - stderr.length);
+        }
       });
 
       proc.on('error', (err) => {
@@ -345,6 +407,11 @@ export async function executeAstGrep(options: AstGrepQueryOptions): Promise<RawM
       });
 
       proc.on('close', (code) => {
+        if (earlyStopped && matches.length >= maxResults) {
+          resolve(matches.slice(0, maxResults));
+          return;
+        }
+
         if (code !== 0) {
           const detail = stderr.trim();
           // Compat: ast-grep >= 0.4x uses grep-like exit codes for `run` —
@@ -367,39 +434,23 @@ export async function executeAstGrep(options: AstGrepQueryOptions): Promise<RawM
           return;
         }
 
-        const matches: RawMatch[] = [];
-        const lines = stdout.split('\n').filter((l) => l.trim().length > 0);
-
-        for (const line of lines) {
+        if (matches.length === 0 && stdout.trim().length > 0) {
           try {
-            const parsed = JSON.parse(line) as AstGrepItemOutput;
-            if (parsed.range) {
-              matches.push({
-                line: parsed.range.start.line + 1,
-                column: parsed.range.start.column + 1,
-                endLine: parsed.range.end.line + 1,
-                endColumn: parsed.range.end.column + 1,
-                text: parsed.text || parsed.lines || '',
-              });
+            const arr = JSON.parse(stdout) as AstGrepItemOutput[];
+            for (const item of arr) {
+              if (item.range) {
+                matches.push({
+                  line: item.range.start.line + 1,
+                  column: item.range.start.column + 1,
+                  endLine: item.range.end.line + 1,
+                  endColumn: item.range.end.column + 1,
+                  text: item.text || item.lines || '',
+                });
+                if (matches.length >= maxResults) break;
+              }
             }
           } catch {
-            try {
-              const arr = JSON.parse(stdout) as AstGrepItemOutput[];
-              for (const item of arr) {
-                if (item.range) {
-                  matches.push({
-                    line: item.range.start.line + 1,
-                    column: item.range.start.column + 1,
-                    endLine: item.range.end.line + 1,
-                    endColumn: item.range.end.column + 1,
-                    text: item.text || item.lines || '',
-                  });
-                }
-              }
-              break;
-            } catch {
-              // Ignore non-json
-            }
+            // Ignore non-json
           }
         }
 
@@ -411,6 +462,8 @@ export async function executeAstGrep(options: AstGrepQueryOptions): Promise<RawM
       });
     });
   } finally {
+    await inputFile?.close();
+    if (inputDir) await fs.rm(inputDir, { recursive: true, force: true });
     if (tempRuleFile) {
       await fs.unlink(tempRuleFile).catch(() => {});
     }

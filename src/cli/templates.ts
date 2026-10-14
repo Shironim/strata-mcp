@@ -19,8 +19,8 @@ Prioritaskan penggunaan tool MCP \`strata-mcp\` daripada melakukan pencarian tek
 | Memetakan hierarki pohon komponen atau relasi parent-child | \`get_component_tree\` | Menampilkan topologi komponen (\`downward\`/\`down\` atau \`upward\`/\`up\`), props drilling, dan import dependencies secara instan. |
 | Mencari struktur template, binding variabel, atau ekspresi | \`find_code\` | AST structural pattern matching yang kebal terhadap perbedaan spasi, pemformatan baris, dan penamaan lokal. |
 | Melacak alur perubahan state global/lokal (Pinia, Context, Zustand) | \`trace_state\` | Menemukan read/write blast radius (\`consumers\`, \`dependencies\`, \`both\`) state di seluruh aplikasi. |
-| Menemukan seluruh URL routes, parameter rute, dan layout hierarchy | \`get_routes\` | Memetakan sitemap halaman Next.js, Nuxt, Astro, dan Inertia tanpa membaca puluhan file pages. |
-| Mengekstrak panggilan API backend (Inertia, TanStack, Axios, fetch) | \`get_api_contracts\` | Mengetahui endpoint URL, HTTP method, field payload form, serta \`backendTargetHint\` ke controller backend. |
+| Menemukan seluruh URL routes, parameter rute, dan layout hierarchy | \`audit_frontend(target: "routes")\` | Memetakan sitemap halaman Next.js, Nuxt, Astro, dan Inertia tanpa membaca puluhan file pages. |
+| Mengekstrak panggilan API backend (Inertia, TanStack, Axios, fetch) | \`audit_frontend(target: "api-contracts")\` | Mengetahui endpoint URL, HTTP method, field payload form, serta \`backendTargetHint\` ke controller backend. |
 | Audit kode mati, dead state, archetype drift, design token, atau bundle | \`audit_frontend\` | Verifikasi kepatuhan dan kebersihan frontend (\`dead-components\`, \`dead-state\`, \`routes\`, \`similar-templates\`, \`design-tokens\`, \`bundle-health\`, \`api-contracts\`, \`archetype-drift\`, \`all\`). |
 | Perencanaan refactoring prop/event/model/slot pada seluruh consumer | \`generate_patch_plan\` | Rekomendasi patch AST presisi (\`rename_prop\`, \`remove_prop\`, \`rename_event\`, \`rename_model\`, \`rename_slot\`) tanpa resiko regresi manual. |
 
@@ -56,11 +56,11 @@ description: Deep frontend AST component inspection, component trees, reactivity
 
 3. **Pemetaan URL Routes & Layouts:**
    - Pindai topologi file-based routes (Next.js, Nuxt, Astro, Inertia):
-     \`get_routes(path: ".", framework: "next-app")\`
+     \`audit_frontend(path: ".", target: "routes", framework: "next-app", view: "summary")\`
 
 4. **Ekstraksi Kontrak API Backend:**
    - Petakan seluruh panggilan network frontend (TanStack, Inertia, Axios, fetch):
-     \`get_api_contracts(path: ".")\`
+     \`audit_frontend(path: ".", target: "api-contracts")\`
 
 5. **Pelacakan Aliran State & Composables:**
    - Petakan consumer stores (Pinia, Zustand, Context):

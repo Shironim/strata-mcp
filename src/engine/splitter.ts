@@ -1,4 +1,4 @@
-import { parse } from '@vue/compiler-sfc';
+import { parseVueSource as parse } from './vue-parser';
 import type { SfcDescriptor, SfcBlock, SourceLocation } from '../types';
 
 function createLocation(loc: {

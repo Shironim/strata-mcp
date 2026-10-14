@@ -1,3 +1,4 @@
+import { readSourceFile } from '../source-file';
 import { existsSync, promises as fs } from 'node:fs';
 import { basename, dirname, extname, resolve } from 'node:path';
 import { parse as parseDom, NodeTypes, type RootNode, type TemplateChildNode } from '@vue/compiler-dom';
@@ -559,7 +560,7 @@ export async function extractVueContract(filePath: string, content: string): Pro
                     for (const ext of candidateExtensions) {
                       const fullImportPath = resolvedBase + ext;
                       if (existsSync(fullImportPath)) {
-                        const externalCode = await fs.readFile(fullImportPath, 'utf8');
+                        const externalCode = await readSourceFile(fullImportPath);
                         let extIface = await executeAstGrep({
                           code: externalCode,
                           pattern: `interface ${typeName} { $$$ }`,

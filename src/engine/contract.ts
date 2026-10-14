@@ -1,3 +1,4 @@
+import { readSourceFile } from './source-file';
 import { existsSync, promises as fs, readFileSync } from 'node:fs';
 import { basename, extname, join, resolve } from 'node:path';
 import { findProjectRoot } from './path-resolver';
@@ -53,15 +54,11 @@ interface ProjectEcosystem {
   hasAstro: boolean;
 }
 
-const projectEcosystemCache = new Map<string, ProjectEcosystem>();
 
 /**
  * Discovers frontend ecosystem dependencies present in the project root.
  */
 export function getProjectEcosystem(rootDir: string): ProjectEcosystem {
-  if (projectEcosystemCache.has(rootDir)) {
-    return projectEcosystemCache.get(rootDir)!;
-  }
 
   let hasVue = false;
   let hasReact = false;
@@ -98,7 +95,6 @@ export function getProjectEcosystem(rootDir: string): ProjectEcosystem {
   }
 
   const result: ProjectEcosystem = { hasVue, hasReact, hasAstro };
-  projectEcosystemCache.set(rootDir, result);
   return result;
 }
 
@@ -1162,7 +1158,7 @@ export async function extractComponentContract(
   const content =
     explicitContent !== undefined
       ? explicitContent
-      : await fs.readFile(resolvedPath, 'utf8');
+      : await readSourceFile(resolvedPath);
   const framework = detectFramework(resolvedPath, content);
 
   let baseContract: ComponentContract;

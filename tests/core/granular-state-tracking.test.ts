@@ -104,6 +104,7 @@ function onCheckout() {
     );
 
     // Sync into SQLite SSOT
+    getWorkspaceDatabase(tempDir, { create: true });
     await syncWorkspace(tempDir);
     const db = getWorkspaceDatabase(tempDir);
 

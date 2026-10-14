@@ -1,3 +1,4 @@
+import { TOOL_CATALOG } from './catalog';
 import { scanRoutes, formatRoutesAsText } from '../engine/routes';
 import { findUnusedComponents, formatUnusedAsText } from '../engine/audit';
 import { findUnusedState, formatUnusedStateAsText } from '../engine/database';
@@ -27,80 +28,7 @@ import type { RouteFramework } from '../types';
 import type { McpToolDefinition } from './types';
 
 export const auditFrontendTool: McpToolDefinition = {
-  name: 'audit_frontend',
-  description:
-    'Architectural frontend health audit: file-based routes, dead components, unused state composables, structural template similarity, design tokens & a11y, bundle health / island hydration, and page archetype structural drift. Supports targeted or full audits (target: "all").',
-  inputSchema: {
-    type: 'object',
-    properties: {
-      path: {
-        type: 'string',
-        description: 'Project root directory or target page file for archetype-drift (alias: target_path, default: ".")',
-      },
-      target_path: {
-        type: 'string',
-        description: 'Alias for path',
-      },
-      exemplar_path: {
-        type: 'string',
-        description:
-          'Optional exemplar/reference page file path for target: "archetype-drift" (auto-discovers richest sibling page when omitted)',
-      },
-      scope_path: {
-        type: 'string',
-        description:
-          'Sub-directory or workspace scope filter within target_path (e.g. "apps/web") to avoid scanning entire monorepos and prevent cold-start timeouts',
-      },
-      target: {
-        type: 'string',
-        enum: [
-          'routes',
-          'dead-components',
-          'dead-state',
-          'similar-templates',
-          'design-tokens',
-          'bundle-health',
-          'api-contracts',
-          'archetype-drift',
-          'all',
-        ],
-        description:
-          'Audit target: "routes" (URL topology), "dead-components" (orphan components), "dead-state" (unused composables/stores), "similar-templates" (redundant template structure & DRY opportunities), "design-tokens" (arbitrary Tailwind colors/spacing, radius consistency & a11y violations), "bundle-health" (heavy eager imports & eager island hydration), "api-contracts" (outbound API endpoints & caller mapping), "archetype-drift" (page semantic section & component drift vs exemplar), or "all" for a full architectural diagnostic (default: "all")',
-      },
-      threshold: {
-        type: 'number',
-        description: 'Similarity threshold for template redundancy audit between 0.0 and 1.0 (default: 0.8)',
-      },
-      prefix: {
-        type: 'string',
-        description: 'Optional URL prefix filter for route scanner (e.g. "/api", "/auth")',
-      },
-      framework: {
-        type: 'string',
-        enum: ['next-app', 'next-pages', 'nuxt', 'astro', 'inertia', 'vue-router', 'unknown'],
-        description: 'Optional framework hint for route scanner',
-      },
-      ignore_patterns: {
-        type: 'array',
-        items: { type: 'string' },
-        description: 'Glob patterns to exclude from dead component audit',
-      },
-      include_pages: {
-        type: 'boolean',
-        description: 'Include page/view files in dead-components audit (default: false)',
-      },
-      exclude_dirs: {
-        type: 'array',
-        items: { type: 'string' },
-        description: 'List of directory names or paths to ignore during traversal',
-      },
-      format: {
-        type: 'string',
-        enum: ['text', 'json'],
-        description: 'Output format: text or json (default: "text", alias: output_format)',
-      },
-    },
-  },
+  ...TOOL_CATALOG[4],
   handler: async (args: Record<string, any>) => {
     try {
       const rawTargetPath = (args.target_path || args.path || args.targetPath)
@@ -129,12 +57,14 @@ export const auditFrontendTool: McpToolDefinition = {
       const includePages = Boolean(args.include_pages ?? args.includePages);
       const frameworkHint = (args.framework || args.framework_hint || args.frameworkHint) as RouteFramework | undefined;
       const threshold = parseSafeFloat(args.threshold);
+      const routeView = args.view === 'full' || args.view === 'tree' ? args.view : 'summary';
 
       if (target === 'routes') {
         const manifest = await scanRoutes({
           targetPath,
           frameworkHint,
           prefix: args.prefix ? String(args.prefix) : undefined,
+          view: routeView,
         });
         return {
           content: [
@@ -271,6 +201,7 @@ export const auditFrontendTool: McpToolDefinition = {
           targetPath,
           frameworkHint,
           prefix: args.prefix ? String(args.prefix) : undefined,
+          view: args.view ? routeView : undefined,
         }),
         findUnusedComponents({
           targetPath,

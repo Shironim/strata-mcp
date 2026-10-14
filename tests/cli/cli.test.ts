@@ -1,10 +1,13 @@
-import { describe, expect, it } from 'bun:test';
+import { beforeAll, afterAll, describe, expect, it } from 'bun:test';
 import { join } from 'node:path';
 import { main } from '../../src/cli';
+import { closeAllDatabases, getWorkspaceDatabase } from '../../src/engine/database';
 
 const FIXTURES_DIR = join(import.meta.dir, '../fixtures');
 
 describe('CLI Companion (Task 6 DoD)', () => {
+  beforeAll(() => { getWorkspaceDatabase(FIXTURES_DIR, { create: true }); });
+  afterAll(() => { closeAllDatabases(); });
   it('executes find-component-usage from CLI and outputs valid JSON', async () => {
     const logs: string[] = [];
     const originalLog = console.log;

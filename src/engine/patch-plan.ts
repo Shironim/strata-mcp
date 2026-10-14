@@ -1,3 +1,4 @@
+import { readSourceFile } from './source-file';
 import { promises as fs, existsSync } from 'node:fs';
 import { basename, extname, resolve } from 'node:path';
 import { parse as parseDom, NodeTypes, type ElementNode, type RootNode, type TemplateChildNode } from '@vue/compiler-dom';
@@ -443,9 +444,22 @@ function scanJsxProps(
  */
 export async function generatePatchPlan(options: PatchPlanOptions): Promise<PatchPlanResult> {
   const { componentPath, refactorType, oldName, newName, targetPath } = options;
-  const cleanOld = cleanIdentifier(oldName);
-  const cleanNew = newName ? cleanIdentifier(newName) : undefined;
-  const projectRoot = findProjectRoot(componentPath) ?? targetPath ?? process.cwd();
+  const validRefactorTypes: PatchRefactorType[] = [
+    'rename_prop', 'remove_prop', 'rename_event', 'remove_event',
+    'rename_model', 'remove_model', 'rename_slot', 'remove_slot',
+  ];
+  if (!validRefactorTypes.includes(refactorType)) {
+    throw new Error(`Invalid refactor_type. Supported operations: ${validRefactorTypes.join(', ')}.`);
+  }
+  const cleanOld = typeof oldName === 'string' ? cleanIdentifier(oldName.trim()) : '';
+  const cleanNew = typeof newName === 'string' ? cleanIdentifier(newName.trim()) : undefined;
+  if (!cleanOld) {
+    throw new Error('"old_name" is required and must not be empty.');
+  }
+  if (refactorType.startsWith('rename_') && !cleanNew) {
+    throw new Error(`"new_name" is required when refactor_type is "${refactorType}".`);
+  }
+  const projectRoot = targetPath ? resolve(targetPath) : findProjectRoot(componentPath);
   const absComponentPath = resolve(componentPath);
 
   const compName = basename(absComponentPath, extname(absComponentPath));
@@ -479,7 +493,7 @@ export async function generatePatchPlan(options: PatchPlanOptions): Promise<Patc
     }
 
     try {
-      const content = await fs.readFile(consumerPath, 'utf-8');
+      const content = await readSourceFile(consumerPath);
       const ext = extname(consumerPath).toLowerCase();
       const aliasConfig = await loadAliasConfig(consumerPath);
       const consumerTags = new Set(ext === '.tsx' || ext === '.jsx' ? [] : targetTags);

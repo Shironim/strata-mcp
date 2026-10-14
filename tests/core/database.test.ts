@@ -31,7 +31,7 @@ describe('Persistent SQLite Codebase Graph Cache Engine (bun:sqlite)', () => {
   });
 
   it('initializes SQLite database in .strata with WAL mode and gitignore', () => {
-    const db = getWorkspaceDatabase(FIXTURES_DIR);
+    const db = getWorkspaceDatabase(FIXTURES_DIR, { create: true });
     expect(db).toBeDefined();
 
     const gitignorePath = join(FIXTURES_DIR, '.strata', '.gitignore');

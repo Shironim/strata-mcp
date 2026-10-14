@@ -1,3 +1,4 @@
+import { readSourceFile } from './source-file';
 import { existsSync, promises as fs } from 'node:fs';
 import { basename, dirname, extname, relative, resolve } from 'node:path';
 import { parse as parseDom, NodeTypes } from '@vue/compiler-dom';
@@ -962,7 +963,7 @@ export async function discoverBestSiblingExemplar(
 
   for (const candidate of candidates) {
     try {
-      const content = await fs.readFile(candidate, 'utf8');
+      const content = await readSourceFile(candidate);
       const archetype = extractPageArchetypeFromSource(candidate, content);
       const customCount = archetype.sections.reduce(
         (acc, s) => acc + s.components.filter((c) => c.isCustomComponent).length,
@@ -1015,8 +1016,8 @@ export async function auditPageArchetypeDrift(
   }
 
   const [targetContent, exemplarContent] = await Promise.all([
-    fs.readFile(absTarget, 'utf8'),
-    fs.readFile(absExemplar, 'utf8'),
+    readSourceFile(absTarget),
+    readSourceFile(absExemplar),
   ]);
 
   const rootDir = options.workspaceRoot ? resolve(options.workspaceRoot) : dirname(dirname(absTarget));

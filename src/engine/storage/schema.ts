@@ -27,13 +27,26 @@ export function isLayoutFile(filePath: string): boolean {
 
 export interface WorkspaceDatabaseOptions {
   enableWatcher?: boolean;
+  create?: boolean;
 }
 
 export const dbRegistry = new Map<string, Database>();
 
 /**
+ * Checks whether the workspace has an existing, initialized .strata database directory.
+ */
+export function isWorkspaceIndexed(workspaceRoot: string): boolean {
+  const absRoot = canonicalizePath(workspaceRoot);
+  const dbDir = join(absRoot, '.strata');
+  return existsSync(dbDir);
+}
+
+/**
  * Opens or initializes a SQLite database for the workspace with WAL mode.
  * Reuses existing open database instances for the same workspace.
+ *
+ * NOTE: If .strata directory does not exist and options.create !== true,
+ * this function throws NOT_INDEXED to prevent polluting uninitialized directories.
  */
 export function getWorkspaceDatabase(
   workspaceRoot: string,
@@ -48,6 +61,9 @@ export function getWorkspaceDatabase(
   const dbDir = join(absRoot, '.strata');
 
   if (!existsSync(dbDir)) {
+    if (!options.create) {
+      throw new Error(`NOT_INDEXED: Workspace "${absRoot}" is not initialized. Run "strata init" first.`);
+    }
     mkdirSync(dbDir, { recursive: true });
     // Write a .gitignore inside .strata so cache DB is never checked into Git
     try {
@@ -65,12 +81,14 @@ export function getWorkspaceDatabase(
   db.run('PRAGMA synchronous = NORMAL;');
   db.run('PRAGMA foreign_keys = ON;');
   db.run('PRAGMA busy_timeout = 5000;');
+  db.run('PRAGMA cache_size = -8192;');
+  db.run('PRAGMA temp_store = FILE;');
 
   initSchema(db);
   dbRegistry.set(absRoot, db);
 
   // Start reactive background watcher for instant cache updates if enabled (default: true)
-  if (options.enableWatcher !== false) {
+  if (options.enableWatcher === true) {
     startWorkspaceWatcher(absRoot, db);
   }
 
@@ -181,6 +199,7 @@ export function initSchema(db: Database): void {
 
   addColumnIfNotExists('files', 'render_boundary TEXT');
   addColumnIfNotExists('files', 'boundary_directive TEXT');
+  addColumnIfNotExists('files', 'content_hash TEXT');
   addColumnIfNotExists('edges', 'payload_json TEXT');
   addColumnIfNotExists('state_deps', "access_mode TEXT DEFAULT 'read' CHECK(access_mode IN ('read', 'write', 'watch'))");
   addColumnIfNotExists('state_deps', 'line_number INTEGER DEFAULT 0');

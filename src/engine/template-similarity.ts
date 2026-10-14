@@ -1,3 +1,4 @@
+import { readSourceFile } from './source-file';
 import { promises as fs } from 'node:fs';
 import { basename, dirname, extname, relative, resolve } from 'node:path';
 import { collectFiles } from './collector';
@@ -124,7 +125,7 @@ export async function findSimilarTemplates(
   const fingerprints: TemplateFingerprint[] = [];
   for (const f of candidates) {
     try {
-      const content = await fs.readFile(f, 'utf8');
+      const content = await readSourceFile(f);
       const fp = extractFingerprint(f, content, rootDir);
       if (fp && fp.tags.length >= 2) {
         fingerprints.push(fp);

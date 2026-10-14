@@ -1,3 +1,4 @@
+import { readSourceFile } from './source-file';
 import { existsSync, promises as fs } from 'node:fs';
 import { basename, dirname, extname, join, normalize, relative, resolve } from 'node:path';
 import { collectFiles } from './collector';
@@ -47,7 +48,7 @@ export function extractRouteParams(routePath: string): RouteParam[] {
  */
 export async function extractApiHandlers(filePath: string): Promise<string[]> {
   try {
-    const content = await fs.readFile(filePath, 'utf8');
+    const content = await readSourceFile(filePath);
     const handlers: string[] = [];
     const httpMethods = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS'];
     for (const method of httpMethods) {
@@ -300,7 +301,7 @@ async function scanNuxtPages(baseDir: string, projectRoot: string): Promise<Rout
     let pageLayouts: string[] | undefined;
     let explicitlyDisabledLayout = false;
     try {
-      const content = await fs.readFile(file, 'utf8');
+      const content = await readSourceFile(file);
       if (/layout:\s*false\b/.test(content)) {
         explicitlyDisabledLayout = true;
       } else {
@@ -423,7 +424,7 @@ async function scanInertiaPages(baseDir: string): Promise<RouteInfo[]> {
     // Extract layout imported inside the Inertia page
     let layouts: string[] | undefined;
     try {
-      const content = await fs.readFile(file, 'utf8');
+      const content = await readSourceFile(file);
       const layoutImportMatch = content.match(/import\s+([A-Za-z0-9_$]+)\s+from\s+['"]([^'"]*Layout[^'"]*)['"]/);
       if (layoutImportMatch) {
         layouts = [layoutImportMatch[2]];

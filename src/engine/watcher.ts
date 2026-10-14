@@ -21,6 +21,7 @@ export interface WatcherOptions {
   batchThreshold?: number;
   onSyncComplete?: (changedFiles: string[]) => void;
   onError?: (err: Error) => void;
+  scopeSubdirs?: string[];
 }
 
 /**
@@ -82,6 +83,7 @@ export class WorkspaceWatcher {
       debounceMs: options?.debounceMs ?? 100,
       batchThreshold: options?.batchThreshold ?? 50,
       onSyncComplete: options?.onSyncComplete ?? (() => {}),
+      scopeSubdirs: options?.scopeSubdirs ?? [],
       onError:
         options?.onError ??
         ((err) => {
@@ -134,7 +136,15 @@ export class WorkspaceWatcher {
    * Handles incoming raw FS event, filters unwanted paths, and debounces batch processing.
    */
   private handleFsEvent(relPath: string): void {
+    if (this.isClosed) return;
     const normalizedRel = normalizePath(relPath);
+
+    if (this.options.scopeSubdirs.length > 0) {
+      const inScope = this.options.scopeSubdirs.some(
+        (dir) => normalizedRel === dir || normalizedRel.startsWith(`${dir}/`)
+      );
+      if (!inScope) return;
+    }
 
     if (isPathIgnored(normalizedRel)) {
       return;
@@ -196,6 +206,8 @@ export class WorkspaceWatcher {
       return;
     }
     this.isClosed = true;
+    this.pendingDirtyPaths.clear();
+    if (activeWatchers.get(this.absRoot) === this) activeWatchers.delete(this.absRoot);
 
     if (this.debounceTimer) {
       clearTimeout(this.debounceTimer);
@@ -258,7 +270,7 @@ export function stopWorkspaceWatcher(absRoot: string): void {
  * Stops all active workspace watchers (for graceful server shutdown).
  */
 export function stopAllWorkspaceWatchers(): void {
-  for (const [root, watcher] of activeWatchers.entries()) {
+  for (const watcher of activeWatchers.values()) {
     watcher.close();
   }
   activeWatchers.clear();

@@ -57,6 +57,7 @@ export const IGNORED_DIRS = new Set([
 
   // AI & Indexer Caches
   '.codegraph',
+  '.codex-evidence',
   '.strata',
   '.vue-ast',
   '.gemini',
@@ -69,6 +70,8 @@ export interface CollectOptions {
   respectIgnoreFiles?: boolean;
   /** Workspace boundary for scoped scans, including nested packages. */
   ignoreRoot?: string;
+  /** Include configuration fingerprints while streaming an index scan. */
+  includeConfigFiles?: boolean;
 }
 
 /**
@@ -93,14 +96,13 @@ export async function loadIgnorePatterns(dirPath: string): Promise<Set<string>> 
 /**
  * Recursively collects all supported source files (.vue, .astro, .ts, .tsx, .js, .jsx) within a directory.
  */
-export async function collectFiles(
+export async function* iterateFiles(
   dirPath: string,
   options?: CollectOptions
-): Promise<string[]> {
+): AsyncGenerator<string> {
   dirPath = resolve(dirPath);
   const stat = await fs.stat(dirPath);
 
-  const results: string[] = [];
   const customExcludeSet = new Set(
     (options?.excludeDirs ?? [])
       .map((d) => d.trim().replace(/^\/+|\/+$/g, '').replace(/\\/g, '/'))
@@ -138,14 +140,14 @@ export async function collectFiles(
       parent = dirname(parent);
     }
     for (const base of ancestors) {
-      if (inherited.length && isIgnored(base, true, inherited)) return [];
+      if (inherited.length && isIgnored(base, true, inherited)) return;
       inherited.push({ base, matcher: ignore().add(await loadIgnoreRules(base)) });
     }
-    if (inherited.length && isIgnored(dirPath, stat.isDirectory(), inherited)) return [];
+    if (inherited.length && isIgnored(dirPath, stat.isDirectory(), inherited)) return;
   }
-  if (!stat.isDirectory()) return [dirPath];
+  if (!stat.isDirectory()) { yield dirPath; return; }
 
-  async function walk(currentDir: string, inherited: IgnoreContext[] = []) {
+  async function* walk(currentDir: string, inherited: IgnoreContext[] = []): AsyncGenerator<string> {
     const contexts = [...inherited];
     if (options?.respectIgnoreFiles !== false) {
       contexts.push({ base: currentDir, matcher: ignore().add(await loadIgnoreRules(currentDir)) });
@@ -156,19 +158,28 @@ export async function collectFiles(
       const relPath = relative(dirPath, fullPath).replace(/\\/g, '/');
 
       if (isExcluded(entry.name, relPath)) continue;
+      if (entry.isFile() && options?.includeConfigFiles && ['package.json', 'tsconfig.json', 'jsconfig.json', '.gitignore', '.strataignore'].includes(entry.name)) {
+        yield fullPath;
+        continue;
+      }
       if (isIgnored(fullPath, entry.isDirectory(), contexts)) continue;
 
       if (entry.isDirectory()) {
-        await walk(fullPath, contexts);
+        yield* walk(fullPath, contexts);
       } else if (entry.isFile()) {
         const ext = extname(entry.name).toLowerCase();
         if (ext === '.vue' || ext === '.astro' || SUPPORTED_SCRIPT_EXTENSIONS.has(ext)) {
-          results.push(fullPath);
+          yield fullPath;
         }
       }
     }
   }
 
-  await walk(dirPath, inherited);
-  return results;
+  yield* walk(dirPath, inherited);
+}
+
+export async function collectFiles(dirPath: string, options?: CollectOptions): Promise<string[]> {
+  const files: string[] = [];
+  for await (const file of iterateFiles(dirPath, options)) files.push(file);
+  return files;
 }

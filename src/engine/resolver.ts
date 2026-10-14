@@ -1,3 +1,4 @@
+import { readSourceFile } from './source-file';
 import { promises as fs } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 
@@ -155,7 +156,7 @@ export async function loadAliasConfig(fromPath: string): Promise<AliasConfig | n
       const candidate = join(dir, name);
 
       try {
-        const raw = await fs.readFile(candidate, 'utf8');
+        const raw = await readSourceFile(candidate);
         const config = JSON.parse(stripJsonComments(raw)) as {
           compilerOptions?: { baseUrl?: string; paths?: Record<string, string[]> };
         };

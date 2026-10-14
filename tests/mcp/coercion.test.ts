@@ -82,22 +82,22 @@ describe('MCP Input Coercion & Contract Standardization', () => {
     expect(parsedErr.found).toBe(false);
   });
 
-  it('coerces bare string for get_routes and get_api_contracts to path', () => {
-    expect(coerceToolArguments('get_routes', '.')).toEqual({
+  it('coerces bare string for audit_frontend to path', () => {
+    expect(coerceToolArguments('audit_frontend', '.')).toEqual({
       path: '.',
     });
-    expect(coerceToolArguments('get_api_contracts', './src')).toEqual({
+    expect(coerceToolArguments('audit_frontend', './src')).toEqual({
       path: './src',
     });
   });
 
   it('preserves and synchronizes aliases bidirectionally in object mode', () => {
     // Legacy alias to canonical path
-    const routesRes = coerceToolArguments('get_routes', { targetPath: '.' });
+    const routesRes = coerceToolArguments('audit_frontend', { targetPath: '.' });
     expect(routesRes.path).toBe('.');
     expect(routesRes.targetPath).toBe('.');
 
-    const apiRes = coerceToolArguments('get_api_contracts', { target_path: '.' });
+    const apiRes = coerceToolArguments('audit_frontend', { target_path: '.' });
     expect(apiRes.path).toBe('.');
     expect(apiRes.target_path).toBe('.');
 
@@ -105,10 +105,11 @@ describe('MCP Input Coercion & Contract Standardization', () => {
     expect(treeRes.path).toBe('src/App.vue');
     expect(treeRes.entry_path).toBe('src/App.vue');
 
-    // Canonical path populates legacy aliases
+    // A component path populates file aliases, without synthesizing a scan root.
     const canonicalTree = coerceToolArguments('get_component_tree', { path: 'src/App.vue' });
     expect(canonicalTree.entry_path).toBe('src/App.vue');
-    expect(canonicalTree.targetPath).toBe('src/App.vue');
+    expect(canonicalTree.targetPath).toBeUndefined();
+    expect(canonicalTree.target_path).toBeUndefined();
   });
 
   it('normalizes generate_patch_plan and trace_state aliases', () => {

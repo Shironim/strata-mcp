@@ -1,3 +1,4 @@
+import { readSourceFile } from '../source-file';
 import { existsSync, promises as fs, statSync, readFileSync } from "node:fs";
 import { basename, dirname, extname, join, normalize, resolve } from "node:path";
 import { parse as parseDom, NodeTypes } from "@vue/compiler-dom";
@@ -436,6 +437,7 @@ async function getDownwardComponentTree(
           const childNode: ComponentTreeNode = {
             component: basename(row.child_path),
             filePath: row.child_path,
+            alias: payload?.alias,
             depth: row.depth,
             isPage: Boolean(row.is_page),
             isDynamic: row.import_type === 'dynamic' ? true : undefined,
@@ -517,7 +519,7 @@ async function getDownwardComponentTree(
 
     let content = '';
     try {
-      content = await fs.readFile(normPath, 'utf8');
+      content = await readSourceFile(normPath);
     } catch {
       return node;
     }

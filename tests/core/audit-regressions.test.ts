@@ -9,6 +9,7 @@ import { WorkspaceWatcher } from '../../src/engine/watcher';
 import { generatePatchPlan } from '../../src/engine/patch-plan';
 import { collectFiles } from '../../src/engine/collector';
 import { extractApiContractsFromCode } from '../../src/engine/api-contract';
+import { getComponentTree } from '../../src/engine/tree';
 
 const roots: string[] = [];
 const watchers: WorkspaceWatcher[] = [];
@@ -29,6 +30,21 @@ afterEach(() => {
 });
 
 describe('Audit regression cases', () => {
+  it('refreshes old graph payloads and preserves named component aliases', async () => {
+    const root = workspace();
+    put(root, 'Button.tsx', 'export function Button() { return <button/>; }');
+    put(root, 'App.tsx', 'import { Button as ActionButton } from "./Button";\nexport default function App() { return <ActionButton/>; }');
+    const db = getWorkspaceDatabase(root, { create: true });
+    await syncWorkspace(root);
+    db.run("UPDATE edges SET payload_json = json_remove(payload_json, '$.alias')");
+    db.run("UPDATE meta SET value = 'memory-v2:0.7.10' WHERE key = 'cache_version'");
+    const refreshed = await syncWorkspace(root);
+    expect(refreshed.modified).toBeGreaterThan(0);
+    const tree = await getComponentTree({ entryPath: join(root, 'App.tsx'), targetPath: root });
+    expect(tree.root.children.find(child => child.component === 'Button.tsx')?.alias).toBe('ActionButton');
+    const warm = await syncWorkspace(root);
+    expect(warm.modified).toBe(0);
+  });
   it('watcher updates the database supplied by its caller', async () => {
     const root = workspace();
     put(root, 'App.tsx', 'export default () => <div />;');
@@ -49,7 +65,7 @@ describe('Audit regression cases', () => {
   it('watcher updates and deletes the same canonical file rows as full sync', async () => {
     const root = workspace();
     put(root, 'App.tsx', 'export default () => <div />;');
-    const db = getWorkspaceDatabase(root, { enableWatcher: false });
+    const db = getWorkspaceDatabase(root, { enableWatcher: false, create: true });
     await syncWorkspace(root);
     const watcher = new WorkspaceWatcher(root, db, { debounceMs: 60_000 });
     watchers.push(watcher);
@@ -67,7 +83,7 @@ describe('Audit regression cases', () => {
     const root = workspace();
     put(root, 'src/a.ts', 'export const a = 1;');
     put(root, 'src-extra/b.ts', 'export const b = 1;');
-    const db = getWorkspaceDatabase(root, { enableWatcher: false });
+    const db = getWorkspaceDatabase(root, { enableWatcher: false, create: true });
     await syncWorkspace(root);
     await syncWorkspace(root, 'src');
     expect(db.query('SELECT path FROM files ORDER BY path').all()).toHaveLength(2);
@@ -78,7 +94,7 @@ describe('Audit regression cases', () => {
     put(root, 'tsconfig.json', '{"compilerOptions":{"paths":{"@/*":["src/*"]}}}');
     put(root, 'src/Button.tsx', 'export default () => <button />;');
     put(root, 'src/App.tsx', 'import Button from "@/Button.tsx";\nexport default () => <Button />;');
-    const db = getWorkspaceDatabase(root, { enableWatcher: false });
+    const db = getWorkspaceDatabase(root, { enableWatcher: false, create: true });
     await syncWorkspace(root);
     expect(db.query('SELECT COUNT(*) AS n FROM edges').get()).toEqual({ n: 1 });
   });
@@ -124,7 +140,7 @@ describe('Audit regression cases', () => {
     put(root, '.gitignore', 'src/Hidden.ts\n');
     put(root, 'src/Hidden.ts', 'export const hidden = 1;');
     put(root, 'src/Visible.ts', 'export const visible = 1;');
-    const db = getWorkspaceDatabase(root, { enableWatcher: false });
+    const db = getWorkspaceDatabase(root, { enableWatcher: false, create: true });
     await syncWorkspace(root);
     await syncWorkspace(root, 'src');
     expect(db.query('SELECT path FROM files').all()).toEqual([{ path: join(root, 'src/Visible.ts') }]);
@@ -136,7 +152,7 @@ describe('Audit regression cases', () => {
     put(root, 'packages/app/package.json', '{}');
     put(root, 'packages/app/src/Hidden.ts', 'export const hidden = 1;');
     put(root, 'packages/app/src/Visible.ts', 'export const visible = 1;');
-    const db = getWorkspaceDatabase(root, { enableWatcher: false });
+    const db = getWorkspaceDatabase(root, { enableWatcher: false, create: true });
     await syncWorkspace(root);
     await syncWorkspace(root, 'packages/app/src');
     expect(db.query('SELECT path FROM files').all()).toEqual([{ path: join(root, 'packages/app/src/Visible.ts') }]);
@@ -146,7 +162,7 @@ describe('Audit regression cases', () => {
     const root = workspace();
     put(root, 'Button.tsx', 'export default () => <button />;');
     put(root, 'App.tsx', 'import Button from "./Button";\nexport default () => <Button />;');
-    const db = getWorkspaceDatabase(root, { enableWatcher: false });
+    const db = getWorkspaceDatabase(root, { enableWatcher: false, create: true });
     await syncWorkspace(root);
     put(root, '.gitignore', 'Button.tsx\n');
     put(root, 'App.tsx', 'import Button from "./Button";\nexport default () => <Button title="x" />;');
@@ -171,7 +187,7 @@ describe('Audit regression cases', () => {
   it('watcher does not index files excluded by ignore globs', async () => {
     const root = workspace();
     put(root, '.gitignore', 'ignored/**\n');
-    const db = getWorkspaceDatabase(root, { enableWatcher: false });
+    const db = getWorkspaceDatabase(root, { enableWatcher: false, create: true });
     const watcher = new WorkspaceWatcher(root, db, { debounceMs: 60_000 });
     watchers.push(watcher);
     put(root, 'ignored/Secret.ts', 'export const secret = 1;');

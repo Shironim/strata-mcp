@@ -1,38 +1,30 @@
-import { findCodeTool } from './find-code';
-import { inspectComponentTool } from './inspect-component';
-import { componentTreeTool } from './component-tree';
-import { traceStateTool } from './trace-state';
-import { auditFrontendTool } from './audit-frontend';
-import { patchPlanTool } from './patch-plan';
-import { getRoutesTool } from './get-routes';
-import { getApiContractsTool } from './get-api-contracts';
+import { TOOL_CATALOG } from './catalog';
 import type { McpToolDefinition } from './types';
-
 export * from './types';
-export { findCodeTool } from './find-code';
-export { inspectComponentTool } from './inspect-component';
-export { componentTreeTool } from './component-tree';
-export { traceStateTool } from './trace-state';
-export { auditFrontendTool } from './audit-frontend';
-export { patchPlanTool } from './patch-plan';
-export { getRoutesTool } from './get-routes';
-export { getApiContractsTool } from './get-api-contracts';
 
-export const TOOLS: McpToolDefinition[] = [
-  findCodeTool,
-  inspectComponentTool,
-  componentTreeTool,
-  traceStateTool,
-  auditFrontendTool,
-  patchPlanTool,
-  getRoutesTool,
-  getApiContractsTool,
-];
+async function loadTool(index: number): Promise<McpToolDefinition> {
+  switch (index) {
+    case 0: return (await import('./find-code')).findCodeTool;
+    case 1: return (await import('./inspect-component')).inspectComponentTool;
+    case 2: return (await import('./component-tree')).componentTreeTool;
+    case 3: return (await import('./trace-state')).traceStateTool;
+    case 4: return (await import('./audit-frontend')).auditFrontendTool;
+    case 5: return (await import('./patch-plan')).patchPlanTool;
+    default: throw new Error('Unknown tool index');
+  }
+}
 
-const toolsMap = new Map<string, McpToolDefinition>(
-  TOOLS.map((tool) => [tool.name, tool])
-);
+export const TOOLS: McpToolDefinition[] = TOOL_CATALOG.map((tool, index) => ({
+  ...tool, handler: async args => (await loadTool(index)).handler(args),
+}));
+
+export const findCodeTool = TOOLS[0];
+export const inspectComponentTool = TOOLS[1];
+export const componentTreeTool = TOOLS[2];
+export const traceStateTool = TOOLS[3];
+export const auditFrontendTool = TOOLS[4];
+export const patchPlanTool = TOOLS[5];
 
 export function findTool(name: string): McpToolDefinition | undefined {
-  return toolsMap.get(name);
+  return TOOLS.find(tool => tool.name === name);
 }

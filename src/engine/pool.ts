@@ -1,6 +1,4 @@
-import { cpus } from 'node:os';
-
-export const DEFAULT_CONCURRENCY = Math.max(2, Math.min(cpus().length || 4, 8));
+export const DEFAULT_CONCURRENCY = 1;
 
 /**
  * Executes an asynchronous worker over an array of items with bounded concurrency.

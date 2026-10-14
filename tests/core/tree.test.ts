@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'bun:test';
+import { beforeAll, afterAll, describe, expect, it } from 'bun:test';
 import { join } from 'node:path';
 import {
   getComponentTree,
@@ -9,12 +9,20 @@ import {
   isRenderedInContent,
 } from '../../src/engine/tree';
 import { createMcpServer } from '../../src/mcp';
+import { closeAllDatabases, getWorkspaceDatabase, syncWorkspace } from '../../src/engine/database';
 
 const VUE_APP_DIR = join(import.meta.dir, '../mock-projects/vue-app');
 const REACT_APP_DIR = join(import.meta.dir, '../mock-projects/react-app');
 const ASTRO_APP_DIR = join(import.meta.dir, '../mock-projects/astro-app');
 
 describe('Component Hierarchy Tree & Graph Engine (Phase 3 RFC)', () => {
+  beforeAll(async () => {
+    for (const root of [VUE_APP_DIR, REACT_APP_DIR, ASTRO_APP_DIR]) {
+      getWorkspaceDatabase(root, { create: true });
+      await syncWorkspace(root);
+    }
+  });
+  afterAll(() => { closeAllDatabases(); });
   it('resolves relative import paths across extensions and barrel indexes', () => {
     const catalogView = join(VUE_APP_DIR, 'src/views/CatalogView.vue');
     const resolvedDirect = resolveImportPath(catalogView, '../components/ProductCard.vue');

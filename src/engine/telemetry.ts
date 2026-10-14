@@ -71,12 +71,25 @@ export class StrataTelemetry {
     event: StrataToolCallEvent,
     workspaceRoot: string = process.cwd()
   ): void {
+    const input: Record<string, any> = {};
+    for (const key of Object.keys(event.input).slice(0, 16)) {
+      const value = event.input[key];
+      input[key.slice(0, 32)] = typeof value === 'string' ? { bytes: Buffer.byteLength(value) } : { type: typeof value };
+    }
     const payload: StrataToolCallEvent = {
-      timestamp: event.timestamp || new Date().toISOString(),
-      ...event,
+      timestamp: (event.timestamp || new Date().toISOString()).slice(0, 64),
+      event: event.event, tool: event.tool.slice(0, 64), duration_ms: event.duration_ms,
+      trace_id: event.trace_id?.slice(0, 64), session_id: event.session_id?.slice(0, 64),
+      status: event.status, input, metrics: event.metrics,
+      error: event.error ? {code: event.error.code?.slice(0, 64), message: event.error.message.slice(0, 384)} : undefined,
     };
 
-    const jsonLine = JSON.stringify(payload);
+    let jsonLine = JSON.stringify(payload);
+    if (Buffer.byteLength(jsonLine) > 4095) {
+      payload.input = {}; payload.metrics = undefined;
+      if (payload.error) payload.error.message = payload.error.message.slice(0, 128);
+      jsonLine = JSON.stringify(payload);
+    }
 
     // Sink 1: Live stderr stream for operator monitoring (slow queries & failures)
     if (payload.status === 'error') {
@@ -85,13 +98,14 @@ export class StrataTelemetry {
       process.stderr.write(`[strata-telemetry SLOW_WARN] ${jsonLine}\n`);
     }
 
-    // Sink 2: Append-only persistent file recorder in .strata/strata.log
+    // Sink 2: Append-only persistent file recorder in .strata/strata.log (only if .strata already exists)
     try {
       const logPath = this.getLogPath(workspaceRoot);
       const logDir = dirname(logPath);
 
+      // Do NOT create .strata directory if it does not already exist
       if (!existsSync(logDir)) {
-        mkdirSync(logDir, { recursive: true });
+        return;
       }
 
       // Check for rotation if file exceeds 2MB

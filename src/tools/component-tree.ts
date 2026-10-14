@@ -1,6 +1,9 @@
+import { TOOL_CATALOG } from './catalog';
 import fs from 'node:fs';
+import { resolve } from 'node:path';
 import { getComponentTree, formatTreeAsText } from '../engine/tree';
 import {
+  findProjectRoot,
   parseAliasMapInput,
   parseSafePositiveInt,
   resolveProjectRoot,
@@ -10,56 +13,7 @@ import type { ComponentTreeNode, ComponentTreeOptions } from '../types';
 import type { McpToolDefinition } from './types';
 
 export const componentTreeTool: McpToolDefinition = {
-  name: 'get_component_tree',
-  description:
-    'Resolves component hierarchy trees from a root file or URL route (e.g. "/dashboard"). Supports downward trees with props drilling (>2 levels) and dangling context alerts (provide/inject & useContext), or upward traversal for blast radius.',
-  inputSchema: {
-    type: 'object',
-    properties: {
-      path: {
-        type: 'string',
-        description: 'Root component file path to inspect (e.g. "src/App.vue", alias: entry_path, file_path)',
-      },
-      route: {
-        type: 'string',
-        description: 'URL route path to resolve directly to page entrypoint and tree (e.g. "/dashboard", "/catalog/[id]", alias: route_path)',
-      },
-      target_path: {
-        type: 'string',
-        description: 'Project root directory (default: ".", alias: root, workspace_root)',
-      },
-      max_depth: {
-        type: 'number',
-        description: 'Maximum traversal depth (default: 3, alias: depth)',
-      },
-      direction: {
-        type: 'string',
-        enum: ['downward', 'upward', 'down', 'up'],
-        description:
-          'Traversal direction: "downward" / "down" (root -> children) or "upward" / "up" (leaf -> consumers/pages blast radius). Default: "downward".',
-      },
-      alias_map: {
-        type: 'object',
-        additionalProperties: { type: 'string' },
-        description:
-          'Optional alias map overriding auto-detected jsconfig/tsconfig paths (e.g. { "@/": "resources/js/" })',
-      },
-      scope_filter: {
-        type: 'string',
-        description: 'Optional package/domain scope filter (e.g. "apps/web", "features/auth", alias: scope_path)',
-      },
-      include_props: {
-        type: 'boolean',
-        description:
-          'When true (default), displays props and data bindings passed down to child components [props: childProp <- parentExpr]',
-      },
-      format: {
-        type: 'string',
-        enum: ['text', 'json'],
-        description: 'Output format: text (indented tree) or json (default: "text", alias: output_format)',
-      },
-    },
-  },
+  ...TOOL_CATALOG[2],
   handler: async (args: Record<string, any>) => {
     const routePath = (args.route || args.route_path) ? String(args.route || args.route_path) : undefined;
 
@@ -69,8 +23,13 @@ export const componentTreeTool: McpToolDefinition = {
 
     let rawTargetPath = (args.target_path || args.targetPath) ? String(args.target_path || args.targetPath) : undefined;
 
+    if (rawTargetPath && /\.(vue|tsx|jsx|svelte|astro|ts|js)$/i.test(rawTargetPath)) {
+      if (!rawEntryPath) rawEntryPath = rawTargetPath;
+      rawTargetPath = undefined;
+    }
+
     // Disambiguate generic `path`: is it an entry component file or project root?
-    if (args.path && !rawEntryPath) {
+    if (args.path) {
       const candidate = String(args.path);
       const isFileLike = /\.(vue|tsx|jsx|svelte|astro|ts|js)$/i.test(candidate);
       let isActualFile = false;
@@ -82,15 +41,15 @@ export const componentTreeTool: McpToolDefinition = {
       } catch {}
 
       if (isFileLike || isActualFile) {
-        rawEntryPath = candidate;
+        if (!rawEntryPath) rawEntryPath = candidate;
       } else if (!rawTargetPath) {
         rawTargetPath = candidate;
       }
-    } else if (args.path && !rawTargetPath) {
-      rawTargetPath = String(args.path);
     }
 
-    const resolvedTargetPath = resolveProjectRoot(rawTargetPath);
+    const resolvedTargetPath = rawTargetPath
+      ? resolve(rawTargetPath)
+      : rawEntryPath ? findProjectRoot(resolveWorkspacePath(rawEntryPath)) : resolveProjectRoot();
     const entryPath = rawEntryPath ? resolveWorkspacePath(rawEntryPath, resolvedTargetPath) : undefined;
     const targetPath = resolvedTargetPath;
 
@@ -120,6 +79,29 @@ export const componentTreeTool: McpToolDefinition = {
       const rawScopeFilter = args.scope_filter ?? args.scope_path ?? args.scopeFilter ?? args.scopePath;
       const scopeFilter = rawScopeFilter ? String(rawScopeFilter) : undefined;
       const aliasMap = parseAliasMapInput(args.alias_map ?? args.aliasMap ?? args.alias);
+
+      const { isWorkspaceIndexed } = await import('../engine/storage/schema');
+      if (!isWorkspaceIndexed(targetPath)) {
+        const isJson = args.output_format === 'json' || args.format === 'json';
+        const notIndexedPayload = {
+          status: 'NOT_INDEXED',
+          message: "Workspace belum diindeks oleh Strata. Jalankan 'strata init' terlebih dahulu di terminal atau panggil tool inisialisasi yang disetujui.",
+        };
+        return {
+          content: [
+            {
+              type: 'text',
+              text: isJson
+                ? JSON.stringify(notIndexedPayload, null, 2)
+                : `[strata NOT_INDEXED] ${notIndexedPayload.message}`,
+            },
+          ],
+        };
+      }
+
+      // Freshness preflight: ensure cached SQLite graph matches current disk state
+      const { syncWorkspace } = await import('../engine/storage/delta-sync');
+      await syncWorkspace(targetPath);
 
       const tree = await getComponentTree({
         entryPath,

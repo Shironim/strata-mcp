@@ -5,14 +5,12 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
-import { verifyAstGrepBinary } from './engine/astgrep';
 import { TOOLS, findTool } from './tools';
-import { main as runCli } from './cli';
+import { AnalysisSupervisor } from './analysis-supervisor';
 import { STRATA_INSTRUCTIONS } from './instructions';
 import { STRATA_VERSION } from './version';
-import { closeAllDatabases, getDatabase } from './engine/database';
 import { StrataTelemetry } from './engine/telemetry';
-import { setLastKnownProjectRoot } from './engine/path-resolver';
+import { getLastKnownProjectRoot, setLastKnownProjectRoot } from './engine/path-resolver';
 
 export { TOOLS, findTool } from './tools';
 
@@ -32,8 +30,6 @@ export function coerceToolArguments(toolName: string, rawArgs: any): Record<stri
       case 'inspect_component':
       case 'get_component_tree':
       case 'audit_frontend':
-      case 'get_routes':
-      case 'get_api_contracts':
       case 'generate_patch_plan':
         return { path: trimmed };
       case 'find_code':
@@ -57,29 +53,43 @@ export function coerceToolArguments(toolName: string, rawArgs: any): Record<stri
   }
 
   const args: Record<string, any> = { ...rawArgs };
+  const hasSeparateScanRoot = toolName === 'get_component_tree' || toolName === 'generate_patch_plan';
+  const targetAlias = args.target_path || args.targetPath;
+  const legacyTargetFile = hasSeparateScanRoot && /\.(vue|tsx|jsx|svelte|astro|ts|js)$/i.test(String(targetAlias || ''));
 
   // 1. Canonical Entity Aliasing: path
   if (!args.path) {
     const pathAlias =
       args.file_path ||
       args.filePath ||
-      args.target_path ||
-      args.targetPath ||
+      (!hasSeparateScanRoot && targetAlias) ||
       args.file ||
       args.entry_path ||
       args.entryPath ||
       args.component_path ||
-      args.componentPath;
+      args.componentPath ||
+      (legacyTargetFile && targetAlias);
     if (pathAlias) {
       args.path = String(pathAlias);
     }
   }
 
   // Bi-directional alias sync: populate legacy targetPath/target_path/entry_path/component_path from canonical path
+  if (hasSeparateScanRoot) {
+    if (legacyTargetFile) {
+      delete args.target_path;
+      delete args.targetPath;
+    } else if (targetAlias) {
+      args.target_path = targetAlias;
+      args.targetPath = targetAlias;
+    }
+  }
   if (args.path) {
-    if (!args.targetPath) args.targetPath = args.path;
-    if (!args.target_path) args.target_path = args.path;
-    if (!args.entry_path && toolName === 'get_component_tree') args.entry_path = args.path;
+    if (!hasSeparateScanRoot) {
+      if (!args.targetPath) args.targetPath = args.path;
+      if (!args.target_path) args.target_path = args.path;
+    }
+    if (!args.entry_path && toolName === 'get_component_tree' && /\.(vue|tsx|jsx|svelte|astro|ts|js)$/i.test(String(args.path))) args.entry_path = args.path;
     if (!args.component_path && toolName === 'generate_patch_plan') args.component_path = args.path;
     if (!args.filePath && toolName === 'trace_state') args.filePath = args.path;
   }
@@ -106,7 +116,7 @@ export function coerceToolArguments(toolName: string, rawArgs: any): Record<stri
   // 4. Canonical Entity Aliasing: symbol
   if (!args.symbol) {
     const symbolAlias = args.symbol_name || args.symbolName || args.name;
-    if (symbolAlias && toolName !== 'get_routes' && toolName !== 'audit_frontend') {
+    if (symbolAlias && toolName !== 'audit_frontend') {
       args.symbol = String(symbolAlias);
     }
   }
@@ -261,6 +271,7 @@ import {
 } from './engine/path-resolver';
 
 export function createMcpServer(): Server {
+  const runner = new AnalysisSupervisor();
   const server = new Server(
     {
       name: 'strata-mcp',
@@ -284,7 +295,7 @@ export function createMcpServer(): Server {
     };
   });
 
-  server.setRequestHandler(CallToolRequestSchema, async (request): Promise<any> => {
+  server.setRequestHandler(CallToolRequestSchema, async (request, extra): Promise<any> => {
     const name = request.params.name;
     const rawArgs = request.params.arguments;
     const args = coerceToolArguments(name, rawArgs);
@@ -324,7 +335,7 @@ export function createMcpServer(): Server {
     }
 
     try {
-      const response = await tool.handler(args);
+      const response = await runner.run(name, args, getLastKnownProjectRoot(), extra?.signal);
       const durationMs = Math.round(performance.now() - startTime);
 
       let bytesOut = 0;
@@ -337,39 +348,7 @@ export function createMcpServer(): Server {
             bytesOut += Buffer.byteLength(item.text, 'utf8');
             linesOut += item.text.split('\n').length;
 
-            // Attempt to parse JSON response for precise domain items count
-            try {
-              const parsed = JSON.parse(item.text);
-              if (Array.isArray(parsed)) {
-                itemsFound += parsed.length;
-              } else if (typeof parsed === 'object' && parsed !== null) {
-                if (typeof parsed.totalEndpointsFound === 'number') {
-                  itemsFound += parsed.totalEndpointsFound;
-                } else if (typeof parsed.totalRoutesFound === 'number') {
-                  itemsFound += parsed.totalRoutesFound;
-                } else if (typeof parsed.totalFilesAudited === 'number') {
-                  itemsFound += parsed.totalFilesAudited;
-                } else if (typeof parsed.totalPatches === 'number') {
-                  itemsFound += parsed.totalPatches;
-                } else if (Array.isArray(parsed.matches)) {
-                  itemsFound += parsed.matches.length;
-                } else if (Array.isArray(parsed.props)) {
-                  itemsFound += parsed.props.length;
-                } else if (Array.isArray(parsed.endpoints)) {
-                  itemsFound += parsed.endpoints.length;
-                } else if (Array.isArray(parsed.routes)) {
-                  itemsFound += parsed.routes.length;
-                } else if (Array.isArray(parsed.children)) {
-                  itemsFound += parsed.children.length;
-                }
-              }
-            } catch {
-              // Text output heuristic: count markdown bullet points
-              const bulletMatches = item.text.match(/^\s*[-*•]\s+/gm);
-              if (bulletMatches) {
-                itemsFound += bulletMatches.length;
-              }
-            }
+
           }
         }
       }
@@ -416,25 +395,23 @@ export function createMcpServer(): Server {
     }
   });
 
+  const originalClose = server.close.bind(server);
+  server.close = async () => {
+    await runner.close();
+    try {
+      const { closeAllDatabases } = await import('./engine/storage/schema');
+      closeAllDatabases();
+    } catch {
+      // ignore
+    }
+    await originalClose();
+  };
   return server;
 }
 
 export async function runServer(): Promise<void> {
-  const binaryCheck = await verifyAstGrepBinary();
-  if (!binaryCheck.ok) {
-    console.error(`[strata-mcp WARNING]: ${binaryCheck.error}`);
-  }
-
   const server = createMcpServer();
   const transport = new StdioServerTransport();
-
-  // Initialize workspace database (getDatabase starts transparent background delta-sync watcher)
-  try {
-    getDatabase(process.cwd());
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    process.stderr.write(`[strata-watcher] Failed to initialize database: ${msg}\n`);
-  }
 
   let isShuttingDown = false;
   const gracefulShutdown = async (signal: string) => {
@@ -447,21 +424,16 @@ export async function runServer(): Promise<void> {
       // Ignore server close errors during shutdown
     }
 
-    try {
-      closeAllDatabases();
-    } catch {
-      // Ignore database close errors during shutdown
-    }
-
     process.exit(0);
   };
 
   process.on('SIGINT', () => void gracefulShutdown('SIGINT'));
   process.on('SIGTERM', () => void gracefulShutdown('SIGTERM'));
   process.stdin.on('close', () => void gracefulShutdown('stdin:close'));
-  process.on('exit', () => {
-    closeAllDatabases();
-  });
+
+  transport.onclose = () => void gracefulShutdown('transport:close');
+  transport.onerror = () => void gracefulShutdown('transport:error');
+  server.onclose = () => void gracefulShutdown('server:close');
 
   if (process.stdin.isTTY) {
     process.stderr.write(`[strata] MCP server daemon running on stdio (PID: ${process.pid}).\n`);
@@ -479,12 +451,12 @@ export async function runServer(): Promise<void> {
 if (import.meta.main) {
   const argv = process.argv.slice(2);
   if (argv.length > 0) {
-    runCli(argv).catch((err) => {
+    import('./cli').then(({ main }) => main(argv)).catch((err) => {
       console.error('Fatal CLI error:', err);
       process.exit(1);
     });
   } else if (process.stdin.isTTY) {
-    runCli([]).catch((err) => {
+    import('./cli').then(({ main }) => main([])).catch((err) => {
       console.error('Fatal CLI error:', err);
       process.exit(1);
     });

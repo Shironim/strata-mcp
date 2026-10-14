@@ -77,18 +77,22 @@ Add Strata to your MCP client (`mcp.json` or `claude_desktop_config.json`):
 
 ## Core Capabilities & MCP Tools
 
-All 8 tools expose typed schemas automatically via the Model Context Protocol:
+All 6 tools expose typed schemas automatically via the Model Context Protocol:
 
 - **Structural Code Search (`find_code`):** Multi-framework AST search across `.vue`, `.astro`, and `.tsx` with exact line remapping.
 - **Component Contract Master (`inspect_component`):** Deep inspection of props, emits, slots, dynamic layout styling tokens (Tailwind flex/grid/:class), and **Bidirectional Data Transport Contract** (detects casing mismatches, FormData nested object hazards, pagination traps, unguarded nullability, Zod validation schemas, 422 error audits, and cache invalidation graphs).
 - **Hierarchy & Blast Radius (`get_component_tree`):** Resolves downward trees (with props drilling & dangling context alerts) or upward blast radius (`downward`/`down` or `upward`/`up`).
-- **Route Discovery (`get_routes`):** Maps route topology, layouts, and dynamic parameters across Next.js, Nuxt, Astro, and Inertia.
-- **Fullstack Vertical Slice Target Hinting (`get_api_contracts`):** Extracts outbound HTTP endpoints and synthesizes `backendTargetHint` (REST normalization, Controller/Action symbol candidates, and route intent) to bridge frontend UI calls with backend domain services across any AI agent harness, language server, or vertical-slice tracer.
 - **Prescriptive Refactoring (`generate_patch_plan`):** Generates exact AST-level replacement diffs across all upward callers (`rename_prop`, `remove_prop`, `rename_event`, `rename_model`, `rename_slot`).
 - **State Impact Tracer (`trace_state`):** Maps state stores (Pinia, Zustand, Redux), composables, and Context cascading chains (`consumers`, `dependencies`, `both`).
-- **Full Frontend Audit (`audit_frontend`):** Comprehensive health check for dead components, unused state, template clones, design tokens, bundle health, API contracts, and page archetype drift.
+- **Full Frontend Audit (`audit_frontend`):** Route topology (`target: "routes"`, `view: "summary" | "full" | "tree"`), outbound API calls and inferred backend candidates (`target: "api-contracts"`), plus health checks for dead components, unused state, template clones, design tokens, bundle health, API contracts, and page archetype drift.
 
 ---
+
+### Migration to six MCP tools
+
+Use `audit_frontend(path: "/absolute/project", target: "routes", view: "summary")` instead of `get_routes`, and `audit_frontend(path: "/absolute/project", target: "api-contracts", scope_path: "src")` instead of `get_api_contracts`. The two old tool names and tool-definition exports have been removed; no hidden compatibility tools are registered. Route/API engines and library exports remain available, as do CLI commands `strata routes` and `strata apis`.
+
+Rebuild and restart your MCP client to load the six-tool catalog. Generated agent rules and skills should be reviewed and updated with the routing above; `strata init --force` replaces existing generated artifacts, so preserve custom instructions before using it.
 
 ## Development & Contributing
 
@@ -108,3 +112,19 @@ bun run build
 ## License
 
 [MIT](LICENSE) © shironim
+
+### Exact text search and missing component paths
+
+`find_code` defaults to structural AST search. For exact text such as an asset reference, use:
+
+```json
+{"path":"/absolute/project","pattern":"transformer.webp","mode":"literal"}
+```
+
+`literal` returns one match per matching source line, uses case-sensitive substrings, and does not interpret regex escapes. Directory scans keep the collector's source-file extensions and ignore rules; this is not an asset-filename or all-file search. `mode: "auto"` tries AST matching and falls back only for invalid AST patterns, never for missing binaries or general execution failures. Specify `language` when the pattern needs a particular parser, such as `tsx`.
+
+Snippet pattern searches default to the TypeScript parser; specify `language: "tsx"`, `"jsx"`, or `"html"` for those syntaxes. Explicit `language: "auto"` uses a tag heuristic and can interpret TypeScript angle-bracket assertions as HTML. YAML rules define their own language. Searches default to 200 returned matches; `max_results` also applies to YAML snippets.
+
+`format: "text"` is the default for disk and snippet searches. Text fallback output includes a notice, and snippet results use `<snippet>:line:column` coordinates. With `format: "json"`, disk searches return an array and snippets return `{ matchCount, matches }`; `matchCount` counts returned matches after limiting. Pattern responses include MCP `structuredContent` with `modeRequested`, `modeUsed`, and `fallbackReason` when applicable. YAML rules, component adoption, and CST dumps do not use pattern-mode metadata; `auto`/`literal` modes cannot be used for those operations.
+
+For a missing `inspect_component` path, Strata suggests up to five paths with the same case-sensitive name **without the extension** within the inferred project or explicit `project_root`. Explicit roots need no project marker; inferred roots do. Requests outside that root receive no suggestions. The not-found error remains, and no candidate is inspected automatically. Retry with the intended path; multiple candidates remain ambiguous.

@@ -11,15 +11,17 @@
   },
   "files": [
     "dist",
-    "src/types.ts"
+    "src/types.ts",
+    "scripts/postinstall.mjs"
   ],
   "publishConfig": {
     "access": "public"
   },
   "scripts": {
     "test": "bun test",
-    "build": "bun build ./src/cli.ts ./src/mcp.ts ./src/index.ts --outdir ./dist --target bun --external @vue/compiler-sfc --external @vue/compiler-dom --external @modelcontextprotocol/sdk",
+    "build": "bun build ./src/cli.ts ./src/mcp.ts ./src/index.ts ./src/analysis-worker.ts --outdir ./dist --target bun --external @vue/compiler-sfc --external @vue/compiler-dom --external @modelcontextprotocol/sdk",
     "prepublishOnly": "bun run build && bun test",
+    "postinstall": "node scripts/postinstall.mjs || true",
     "typecheck": "tsc --noEmit"
   },
   "repository": {

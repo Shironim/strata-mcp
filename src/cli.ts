@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { readSourceFile } from './engine/source-file';
 import { existsSync, promises as fs } from 'node:fs';
 import { findCode, findCodeByRule, findComponentUsage, formatMatchesAsText } from './engine/search';
 import { extractComponentContract, formatContractAsText } from './engine/contract';
@@ -46,7 +47,8 @@ Usage:
 
 Commands:
   serve                                   Start MCP stdio daemon server
-  init [target-dir]                       Initialize strata configuration and agent rules
+  init [target-dir]                       Initialize strata index, local MCP configs, and agent rules
+                                          (Options: --harness <name>, --force, --yes)
   search, find <pattern>                  AST structural code search across codebase
   find-component-usage, usage <component> Find all usages and callers of a component
   contract, extract-contract <file>       Extract public component contract (props, emits, slots)
@@ -202,7 +204,12 @@ export async function main(argv: string[] = process.argv.slice(2)) {
 
     if (command === 'init') {
       const initPath = positional[1] || targetPath;
-      await handleStrataInit({ cwd: initPath, force: Boolean(flags.force) });
+      await handleStrataInit({
+        cwd: initPath,
+        force: Boolean(flags.force),
+        harness: flags.harness ? String(flags.harness) : (flags.agent ? String(flags.agent) : undefined),
+        yes: Boolean(flags.yes || flags.y),
+      });
       return;
     }
 
@@ -262,7 +269,7 @@ export async function main(argv: string[] = process.argv.slice(2)) {
 
       let ruleYaml = ruleInput;
       if (existsSync(ruleInput)) {
-        ruleYaml = await fs.readFile(ruleInput, 'utf8');
+        ruleYaml = await readSourceFile(ruleInput);
       }
 
       const matches = await findCodeByRule({
@@ -349,7 +356,7 @@ export async function main(argv: string[] = process.argv.slice(2)) {
       const result = await getComponentTree({
         entryPath: entryFile,
         routePath,
-        targetPath,
+        targetPath: flags.path ? String(flags.path) : routePath ? targetPath : undefined,
         scopeFilter,
         maxDepth,
         direction,
@@ -408,6 +415,7 @@ export async function main(argv: string[] = process.argv.slice(2)) {
           targetPath: auditPath,
           frameworkHint: flags.framework as RouteFramework | undefined,
           prefix: (flags.prefix as string) || undefined,
+          view: (flags.view as 'summary' | 'full' | 'tree') || 'summary',
         });
         if (isJson) {
           console.log(JSON.stringify(result, null, 2));
@@ -502,6 +510,7 @@ export async function main(argv: string[] = process.argv.slice(2)) {
               targetPath: auditPath,
               frameworkHint: flags.framework as RouteFramework | undefined,
               prefix: (flags.prefix as string) || undefined,
+              view: (flags.view as 'summary' | 'full' | 'tree') || undefined,
             }),
             findUnusedComponents({
               targetPath: auditPath,
@@ -668,7 +677,7 @@ export async function main(argv: string[] = process.argv.slice(2)) {
         refactorType,
         oldName,
         newName,
-        targetPath,
+        targetPath: flags.path ? String(flags.path) : undefined,
       });
 
       if (isJson) {
