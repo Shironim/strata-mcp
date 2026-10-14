@@ -35,7 +35,7 @@ test('setupHarnessConfigs generates Claude Code .mcp.json correctly', async () =
 test('all harness configurations use the shared server entrypoint without tool allowlists', async () => {
   const root = tempDir();
   const results = await setupHarnessConfigs(root, ['all']);
-  expect(results).toHaveLength(7);
+  expect(results).toHaveLength(8);
   for (const file of ['.mcp.json', '.cursor/mcp.json', '.vscode/mcp.json', '.goose/mcp.json', '.pi/mcp.json']) {
     const data = JSON.parse(readFileSync(join(root, file), 'utf8'));
     const server = (data.mcpServers ?? data.servers).strata;
@@ -43,6 +43,8 @@ test('all harness configurations use the shared server entrypoint without tool a
   }
   const opencode = JSON.parse(readFileSync(join(root, 'opencode.json'), 'utf8'));
   expect(opencode.mcp.strata.command).toEqual(['strata', 'serve']);
+  const codex = readFileSync(join(root, '.codex', 'config.toml'), 'utf8');
+  expect(codex).toContain('[mcp_servers.strata]');
 });
 
 test('setupHarnessConfigs non-destructively merges existing configs', async () => {
@@ -96,3 +98,41 @@ test('handleStrataInit initializes project, agent artifacts, and harness config'
   const gitignore = readFileSync(join(root, '.gitignore'), 'utf8');
   expect(gitignore).toContain('.strata/');
 });
+
+test('setupHarnessConfigs defensively preserves malformed JSON without data loss', async () => {
+  const root = tempDir();
+  const mcpFile = join(root, '.mcp.json');
+  const malformedContent = '{\n  "corrupt": true,,\n}';
+  writeFileSync(mcpFile, malformedContent);
+
+  const results = await setupHarnessConfigs(root, ['claude']);
+  expect(results[0]?.action).toBe('failed');
+
+  // Content must be preserved identically
+  const contentAfter = readFileSync(mcpFile, 'utf8');
+  expect(contentAfter).toBe(malformedContent);
+});
+
+test('setupHarnessConfigs configures Claude and Cursor lifecycle hooks', async () => {
+  const root = tempDir();
+  await setupHarnessConfigs(root, ['claude', 'cursor']);
+
+  const claudeSettings = JSON.parse(readFileSync(join(root, '.claude', 'settings.json'), 'utf8'));
+  expect(claudeSettings.hooks?.PostToolUse?.[0]?.hooks?.[0]?.command).toContain('strata-post-write.sh');
+
+  const cursorHooks = JSON.parse(readFileSync(join(root, '.cursor', 'hooks.json'), 'utf8'));
+  expect(cursorHooks.hooks?.postToolUse?.[0]?.command).toContain('strata-post-write.sh');
+});
+
+test('setupHarnessConfigs configures Codex CLI config.toml', async () => {
+  const root = tempDir();
+  await setupHarnessConfigs(root, ['codex']);
+
+  const tomlPath = join(root, '.codex', 'config.toml');
+  expect(existsSync(tomlPath)).toBe(true);
+
+  const tomlContent = readFileSync(tomlPath, 'utf8');
+  expect(tomlContent).toContain('[mcp_servers.strata]');
+  expect(tomlContent).toContain('command = "strata"');
+});
+

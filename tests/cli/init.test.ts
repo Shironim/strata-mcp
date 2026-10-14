@@ -18,7 +18,7 @@ describe('strata init command', () => {
   });
 
   it('provisions .agents rules, skills, and hooks into target directory', async () => {
-    await handleStrataInit({ cwd: testDir });
+    await handleStrataInit({ cwd: testDir, yes: true });
 
     const ruleFile = join(testDir, '.agents/rules/strata-frontend.md');
     const skillFile = join(testDir, '.agents/skills/strata-inspect/SKILL.md');
@@ -39,8 +39,8 @@ describe('strata init command', () => {
   });
 
   it('runs idempotently without failing or corrupting configuration', async () => {
-    await handleStrataInit({ cwd: testDir });
+    await handleStrataInit({ cwd: testDir, yes: true });
     // Run second time
-    await expect(handleStrataInit({ cwd: testDir })).resolves.toBeUndefined();
+    await expect(handleStrataInit({ cwd: testDir, yes: true })).resolves.toBeUndefined();
   });
 });

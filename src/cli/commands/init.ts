@@ -1,11 +1,10 @@
 import { readSourceFile } from '../../engine/source-file';
 import { existsSync, promises as fs } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import * as readline from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 import { STRATA_FRONTEND_RULE, STRATA_INSPECT_SKILL, STRATA_POST_WRITE_HOOK } from '../templates';
 import { syncWorkspace } from '../../engine/database';
-import { resolveProjectRoot } from '../../engine/path-resolver';
 import { setupHarnessConfigs, type AgentHarness } from '../mcp-configs';
 import { STRATA_VERSION } from '../../version';
 
@@ -14,6 +13,40 @@ export interface StrataInitOptions {
   force?: boolean;
   harness?: string;
   yes?: boolean;
+}
+
+/**
+ * Checks whether .gitignore already has an active, non-negated rule for .strata.
+ */
+function hasActiveStrataIgnore(content: string): boolean {
+  const lines = content.split('\n');
+  let hasIgnore = false;
+  let hasNegation = false;
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    if (
+      line === '!.strata' ||
+      line === '!.strata/' ||
+      line === '!/.strata' ||
+      line === '!/.strata/' ||
+      line === '!**/.strata' ||
+      line === '!**/.strata/'
+    ) {
+      hasNegation = true;
+    } else if (
+      line === '.strata' ||
+      line === '.strata/' ||
+      line === '/.strata' ||
+      line === '/.strata/' ||
+      line === '**/.strata' ||
+      line === '**/.strata/'
+    ) {
+      hasIgnore = true;
+      hasNegation = false;
+    }
+  }
+  return hasIgnore && !hasNegation;
 }
 
 /**
@@ -40,10 +73,13 @@ async function detectProjectFramework(projectRoot: string): Promise<string> {
 
 /**
  * Parses user input or CLI flags into recognized AgentHarness entries.
+ * Throws actionable error for unrecognized harness values (INIT-09).
+ * Returns both vscode and codex for choice '3' (INIT-10).
  */
-function parseHarnessArg(arg?: string): AgentHarness[] {
+export function parseHarnessArg(arg?: string): AgentHarness[] {
   if (!arg) return ['all'];
   const normalized = arg.toLowerCase().trim();
+  if (!normalized) return ['all'];
   switch (normalized) {
     case '1':
     case 'claude':
@@ -53,10 +89,12 @@ function parseHarnessArg(arg?: string): AgentHarness[] {
     case 'cursor':
       return ['cursor'];
     case '3':
+      return ['vscode', 'codex'];
     case 'vscode':
     case 'vs-code':
-    case 'codex':
       return ['vscode'];
+    case 'codex':
+      return ['codex'];
     case '4':
     case 'opencode':
       return ['opencode'];
@@ -80,7 +118,9 @@ function parseHarnessArg(arg?: string): AgentHarness[] {
     case 'none':
       return ['skip'];
     default:
-      return ['all'];
+      throw new Error(
+        `Unknown agent harness: '${arg}'. Valid options: claude, cursor, vscode, codex, opencode, antigravity, goose, pi, all, skip (or 1-9)`
+      );
   }
 }
 
@@ -89,9 +129,9 @@ function parseHarnessArg(arg?: string): AgentHarness[] {
  */
 async function promptHarnessChoice(): Promise<AgentHarness[]> {
   console.log(`?  Select AI Agent Harness to configure for this project:`);
-  console.log(`   [1] Claude Code        (.mcp.json)`);
-  console.log(`   [2] Cursor / Codex     (.cursor/mcp.json)`);
-  console.log(`   [3] VS Code            (.vscode/mcp.json)`);
+  console.log(`   [1] Claude Code        (.mcp.json & .claude/settings.json)`);
+  console.log(`   [2] Cursor             (.cursor/mcp.json & .cursor/hooks.json)`);
+  console.log(`   [3] VS Code / Codex    (.vscode/mcp.json & .codex/config.toml)`);
   console.log(`   [4] OpenCode           (opencode.json)`);
   console.log(`   [5] Google Antigravity (.agents/skills + rules)`);
   console.log(`   [6] Goose              (.goose/mcp.json)`);
@@ -106,11 +146,18 @@ async function promptHarnessChoice(): Promise<AgentHarness[]> {
     return parseHarnessArg(choice);
   } finally {
     rl.close();
+    if (typeof input.pause === 'function') {
+      input.pause();
+    }
   }
 }
 
 export async function handleStrataInit(options: StrataInitOptions = {}): Promise<void> {
-  const cwd = options.cwd ? resolveProjectRoot(options.cwd) : process.cwd();
+  const rawTarget = options.cwd ?? '.';
+  if (typeof rawTarget !== 'string' || !rawTarget.trim()) {
+    throw new Error('Target workspace path cannot be empty.');
+  }
+  const cwd = resolve(process.cwd(), rawTarget);
   const force = Boolean(options.force);
   const framework = await detectProjectFramework(cwd);
 
@@ -127,10 +174,12 @@ export async function handleStrataInit(options: StrataInitOptions = {}): Promise
   console.log(`${cyan}│${reset}  • Detected: ${green}${framework}${reset}\n`);
 
   // Determine harnesses to configure
+  const isTest = process.env.NODE_ENV === 'test' || Boolean(process.env.BUN_TEST);
+  const isCI = Boolean(process.env.CI || process.env.CONTINUOUS_INTEGRATION);
   let selectedHarnesses: AgentHarness[];
   if (options.harness) {
     selectedHarnesses = parseHarnessArg(options.harness);
-  } else if (options.yes || !process.stdin.isTTY) {
+  } else if (options.yes || !process.stdin.isTTY || isTest || isCI) {
     selectedHarnesses = ['all'];
   } else {
     selectedHarnesses = await promptHarnessChoice();
@@ -164,15 +213,23 @@ export async function handleStrataInit(options: StrataInitOptions = {}): Promise
       console.log(`${cyan}│${reset}  ${dim}• Skipped existing: ${t.label} (use --force to overwrite)${reset}`);
     } else {
       await fs.writeFile(t.path, t.content, t.mode ? { encoding: 'utf8', mode: t.mode } : 'utf8');
+      if (t.mode) {
+        await fs.chmod(t.path, t.mode);
+      }
       console.log(`${cyan}│${reset}  ${green}✔${reset} ${t.label}`);
     }
   }
 
-  // 3. Update or create .gitignore
+  // 3. Update or create .gitignore (INIT-11)
+  const strataGitignore = join(strataDir, '.gitignore');
+  if (!existsSync(strataGitignore)) {
+    await fs.writeFile(strataGitignore, '*\n', 'utf8');
+  }
+
   const gitignorePath = join(cwd, '.gitignore');
   if (existsSync(gitignorePath)) {
     const content = await readSourceFile(gitignorePath);
-    if (!content.includes('.strata')) {
+    if (!hasActiveStrataIgnore(content)) {
       await fs.appendFile(gitignorePath, '\n# Strata AST cache\n.strata/\n', 'utf8');
       console.log(`${cyan}│${reset}  ${green}✔${reset} .gitignore                 ${dim}(Added .strata/ entry)${reset}`);
     }
@@ -181,22 +238,70 @@ export async function handleStrataInit(options: StrataInitOptions = {}): Promise
     console.log(`${cyan}│${reset}  ${green}✔${reset} .gitignore                 ${dim}(Created with .strata/ entry)${reset}`);
   }
 
-  // 4. Generate local project MCP configurations
-  const configResults = await setupHarnessConfigs(cwd, selectedHarnesses);
+  // 4. Generate local project MCP configurations (INIT-02, INIT-06, INIT-08)
+  const configResults = await setupHarnessConfigs(cwd, selectedHarnesses, force);
   if (configResults.length > 0) {
     console.log(`${cyan}│${reset}`);
     console.log(`${cyan}◇${reset}  Configuring local Agent Harness & MCP settings:`);
     for (const res of configResults) {
-      const actionText = res.action === 'updated' ? 'merged/updated' : 'configured';
-      console.log(`${cyan}│${reset}  ${green}✔${reset} ${res.file.padEnd(25)} ${dim}(${res.harness} ${actionText})${reset}`);
+      if (res.action === 'failed') {
+        console.error(`${cyan}│${reset}  \x1b[31m✕\x1b[0m ${res.file.padEnd(25)} ${dim}(${res.harness} failed: ${res.error || 'configuration error'})${reset}`);
+      } else if (res.action === 'skipped') {
+        console.log(`${cyan}│${reset}  ${dim}• ${res.file.padEnd(25)} (${res.harness} skipped - already configured)${reset}`);
+      } else {
+        const actionText = res.action === 'updated' ? 'merged/updated' : 'configured';
+        console.log(`${cyan}│${reset}  ${green}✔${reset} ${res.file.padEnd(25)} ${dim}(${res.harness} ${actionText})${reset}`);
+      }
+    }
+
+    const failedConfigs = configResults.filter(r => r.action === 'failed');
+    if (failedConfigs.length > 0) {
+      console.error(`${cyan}│${reset}`);
+      console.error(`${cyan}│${reset}  \x1b[1;31m✕ Configuration failed for ${failedConfigs.length} harness config(s)\x1b[0m`);
+      console.error(`${cyan}│${reset}  \x1b[1mPartial Initialization State:\x1b[0m`);
+      console.error(`${cyan}│${reset}    ✓ Agent harness rules, skills & hooks: Scaffolding complete`);
+      console.error(`${cyan}│${reset}    ✕ Local MCP configurations: Incomplete / corrupt files`);
+      console.error(`${cyan}│${reset}    - Frontend component graph: Not yet indexed`);
+      console.error(`${cyan}│${reset}`);
+      throw new Error(`Configuration failed for harness: ${failedConfigs.map(f => `${f.file} (${f.error || 'malformed'})`).join(', ')}`);
     }
   }
 
   // 5. Initial Workspace Sync
   console.log(`${cyan}│${reset}`);
   console.log(`${cyan}◇${reset}  Indexing frontend components:`);
-  const stats = await syncWorkspace(cwd);
-  console.log(`${cyan}│${reset}  ${green}✔${reset} Indexed ${stats.total} components into .strata/graph.db in ${stats.durationMs}ms`);
+  try {
+    const stats = await syncWorkspace(cwd);
+    console.log(`${cyan}│${reset}  ${green}✔${reset} Indexed ${stats.total} components into .strata/graph.db in ${stats.durationMs}ms`);
+  } catch (err: unknown) {
+    const rawMessage = err instanceof Error ? err.message : String(err);
+    let failurePhase = 'AST Component Indexing';
+    let recoveryInstruction = "Inspect error trace, verify component syntax, then run 'strata sync' to rebuild graph cache.";
+
+    if (rawMessage.includes('database') || rawMessage.includes('SQLite') || rawMessage.includes('locked') || rawMessage.includes('busy')) {
+      failurePhase = 'Database Access';
+      recoveryInstruction = "Ensure no other process is locking '.strata/graph.db', then run 'strata sync'.";
+    } else if (rawMessage.includes('parse') || rawMessage.includes('SyntaxError')) {
+      failurePhase = 'Component Parser';
+      recoveryInstruction = "Check invalid syntax in frontend templates, then run 'strata sync'.";
+    } else if (rawMessage.includes('EACCES') || rawMessage.includes('permission')) {
+      failurePhase = 'Filesystem Permissions';
+      recoveryInstruction = "Check read/write permissions for '.strata/' and project root, then re-run 'strata init'.";
+    }
+
+    console.error(`${cyan}│${reset}`);
+    console.error(`${cyan}│${reset}  \x1b[1;31m✕ Initial component indexing failed (${failurePhase})\x1b[0m`);
+    console.error(`${cyan}│${reset}  \x1b[1mPartial Initialization State:\x1b[0m`);
+    console.error(`${cyan}│${reset}    ✓ Agent harness rules, skills & hooks: Scaffolding complete`);
+    console.error(`${cyan}│${reset}    ✓ Local MCP configurations: Configured`);
+    console.error(`${cyan}│${reset}    ✕ Frontend component graph: Incomplete`);
+    console.error(`${cyan}│${reset}`);
+    console.error(`${cyan}│${reset}  \x1b[1;31mError Details:\x1b[0m ${rawMessage}`);
+    console.error(`${cyan}│${reset}  \x1b[1;33mRecovery Instruction:\x1b[0m ${recoveryInstruction}`);
+    console.error(`${cyan}│${reset}`);
+
+    throw new Error(`Initial indexing failed (${failurePhase}): ${rawMessage}. ${recoveryInstruction}`);
+  }
 
   console.log(`${cyan}│${reset}`);
   console.log(`${cyan}└${reset}  ${bold}${green}Initialization complete!${reset} Your project is equipped with Strata AST intelligence. 🚀`);
