@@ -25,7 +25,8 @@ Desktop.ini
 .strata/
 .vue-ast/
 .codegraph/
+
 # Septum local database and cache
-.septum/*.db*
 .septum/
+.gemini/
 .verity/

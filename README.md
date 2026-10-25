@@ -1,6 +1,6 @@
 # Strata
 
-> **Multi-Framework Frontend Structural AST Search, Component Graph & Intelligence Engine.**
+> **Frontend Structural Analysis & Component Graph Engine for AI Coding Agents.**
 
 [![npm version](https://img.shields.io/npm/v/@dimassetoid/strata-mcp)](https://www.npmjs.com/package/@dimassetoid/strata-mcp)
 [![Runtime: Bun](https://img.shields.io/badge/Runtime-Bun-black?logo=bun)](https://bun.sh)
@@ -8,15 +8,30 @@
 [![Database: SQLite WAL](https://img.shields.io/badge/Database-SQLite%20(bun:sqlite)-003B57?logo=sqlite)](https://sqlite.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue)](LICENSE)
 
-Strata delivers token-efficient structural code intelligence across **Vue SFCs (`.vue`)**, **Astro (`.astro`)**, and **React/Next (`.js`, `.jsx`, `.ts`, `.tsx`)**. It indexes component hierarchies, state dependencies, and routes into an embedded SQLite graph cache (`.strata/graph.db`) with exact multi-language line remapping.
+Strata provides fast structural code search, component dependency graphs, and route mapping for modern frontend applications: **Vue**, **Nuxt**, **React**, **Next.js**, **Astro**, and **Svelte**.
+
+Instead of loading thousands of lines of raw templates and components into AI context windows, Strata extracts compact component contracts, state dependencies, routes, and API endpoints directly into an embedded SQLite cache (`.strata/graph.db`).
+
+---
+
+## Supported Frameworks
+
+| Framework | Extensions | Capabilities |
+|---|---|---|
+| **Vue.js (2 & 3)** | `.vue`, `.ts`, `.js` | Props, emits, slots, v-model, Composition & Options API, Pinia stores |
+| **Nuxt.js** | `.vue`, `.ts`, `.js` | File-system routing (`pages/`), layouts (`layouts/`), server routes (`server/api/`), composables (`$fetch`, `useAsyncData`) |
+| **React.js** | `.tsx`, `.jsx`, `.ts`, `.js` | Function & class components, JSX elements, React hooks (`useState`, `useReducer`), Context & Zustand stores |
+| **Next.js** | `.tsx`, `.jsx`, `.ts`, `.js` | App Router (`app/**`), Pages Router (`pages/**`), Server & Client components (`'use client'`), API routes |
+| **Astro** | `.astro`, `.ts`, `.js` | Islands architecture (`client:*` directives), component imports, frontmatter props & slots |
+| **Svelte (4 & 5)** | `.svelte`, `.ts`, `.js` | Svelte 5 Runes (`$state`, `$derived`, `$props`, `$bindable`), Svelte 4 reactive statements (`$:`), SvelteKit routes (`+page.svelte`, `+server.ts`) |
 
 ---
 
 ## Installation
 
-### Option 1: Standalone Binary (Zero Dependencies — Linux, macOS, Windows)
+### Standalone Binary (Zero Dependencies)
 
-Install the compiled single-file binary directly without needing Bun or Node.js:
+Download and install the compiled single binary without needing Node.js or Bun installed locally:
 
 **Linux & macOS:**
 ```bash
@@ -28,93 +43,88 @@ curl -fsSL https://raw.githubusercontent.com/Shironim/strata-mcp/master/scripts/
 irm https://raw.githubusercontent.com/Shironim/strata-mcp/master/scripts/install.ps1 | iex
 ```
 
-### Option 2: Via Bun Package Manager
+### Via Bun Package Manager
 
 ```bash
 bun add -g @dimassetoid/strata-mcp
 ```
 
-> **Note:** You can also run commands on-the-fly without global installation using `bunx @dimassetoid/strata-mcp <command>`.
+*(You can also run commands directly with `bunx @dimassetoid/strata-mcp <command>`)*
 
 ---
 
-## Quick Start
+## Quick Start & AI Agent Setup
 
-### 1. Initialize in Any Project
+Run `strata init` in your project root to set up MCP configuration and AI agent skills:
 
 ```bash
 strata init
-# or zero-install via bunx:
-bunx @dimassetoid/strata-mcp init
 ```
-*Bootstraps agent harness rules/skills (Gemini/Antigravity, Claude, Cursor, Codex, OpenCode, Goose, Pi) and initializes local SQLite graph cache (`.strata/graph.db`).*
 
-Use `--harness <name>` or `--agent <name>` to target a specific agent harness, `-f, --force` to overwrite existing configuration files, and `-y, --yes` to accept defaults automatically.
+You can target a specific AI harness directly:
 
-### 2. Connect to AI Agent (MCP Server)
-
-Add Strata to your MCP client (`mcp.json` or `claude_desktop_config.json`):
-
-```json
-{
-  "mcpServers": {
-    "strata": {
-      "command": "strata",
-      "args": ["serve"]
-    }
-  }
-}
+```bash
+strata init --harness antigravity   # Google Antigravity (.gemini/)
+strata init --harness claude         # Claude Code (.claude/)
+strata init --harness codex          # OpenAI Codex (.codex/)
+strata init --harness opencode       # OpenCode (opencode/)
+strata init --harness agents         # Universal Agent Harness (.agents/)
 ```
-*(Or use `"command": "bunx", "args": ["@dimassetoid/strata-mcp", "serve"]` if running without global installation).*
+
+### Supported AI Agent Harnesses
+
+| Harness | Configuration File | Rule File | Skill Directory |
+|---|---|---|---|
+| **Google Antigravity** | `.gemini/mcp_config.json` | `GEMINI.md` | `.gemini/skills/strata-inspect/` |
+| **Claude Code** | `.claude/.mcp.json` | `CLAUDE.md` | `.claude/skills/strata-inspect/` |
+| **OpenAI Codex** | `.codex/config.toml` | `AGENTS.md` | `.codex/skills/strata-inspect/` |
+| **OpenCode** | `opencode/opencode.json` | `AGENTS.md` | `opencode/skills/strata-inspect/` |
+| **Universal Agents** | `.agents/mcp.json` | `AGENTS.md` | `.agents/skills/strata-inspect/` |
+
+---
+
+## MCP Tools Reference
+
+Strata provides 6 tools via the Model Context Protocol (MCP):
+
+| Tool | Description |
+|---|---|
+| **`find_code`** | Search structural code patterns across templates and scripts without loading entire files into context |
+| **`inspect_component`** | Extract public component interfaces (props, emits, slots, state) and retrieve specific code slices |
+| **`get_component_tree`** | Inspect component hierarchies, parent-child trees, and find all callers of a component |
+| **`trace_state`** | Trace reactive state dependencies and locate all components reading or mutating a given state store |
+| **`audit_frontend`** | Scan application routes, outbound HTTP API calls, and detect unused reactive state |
+| **`generate_patch_plan`** | Generate safe refactoring plans when renaming props, events, or component names across consumers |
 
 ---
 
 ## CLI Reference
 
-### Operational Commands
+### Common Commands
 
 | Command | Description |
 |---|---|
-| `strata serve` | Launch stdio MCP daemon server for AI coding agents |
-| `strata init [dir] [options]` | Bootstrap agent harness rules/skills & initialize graph cache (`--harness`, `-f, --force`, `-y, --yes`) |
-| `strata sync [dir]` | Fast incremental delta synchronization for `.strata/graph.db` |
+| `strata serve` | Start the MCP server over stdio for AI coding agents |
+| `strata init [dir]` | Initialize agent rules, skills, and graph cache |
+| `strata sync [dir]` | Update the `.strata/graph.db` index with file changes |
+| `strata stats [dir]` | View MCP performance telemetry (latency, request counts, errors) |
 
-### Core Analytical Commands (Aligned with 6 MCP Tools)
+### Analysis Commands
 
-| Command | Primary Aliases | Description & Key Options |
-|---|---|---|
-| `strata find --map [dir]` | — | Bounded frontend inventory without source bodies. Options: `--limit <n>`, `--offset <n>`, `--exclude-dirs <dirs>` |
-| `strata find <pattern>` | `search`, `usage`, `rule` | AST structural code search across `.vue`, `.astro`, `.tsx`, `.jsx`, `.ts`, `.js`. Options: `--component <name>`, `--rule <yaml>`, `--lang <hint>`, `--scope <template\|script\|both>`, `--mode <ast\|auto\|literal>` |
-| `strata inspect <file> --view map` | `contract` | Exact parser/AST regions, line coordinates, hash-bound source refs, diagnostics, and coverage. `--limit <n>` bounds top-level symbols. |
-| `strata inspect <file> --view source --source-ref <json>` | `contract` | Retrieves a raw source slice from a ref returned by map; rejects stale file content. `--source-range <start:end>` supports inclusive lines and optional `--expected-hash`. |
-| `strata inspect <file>` | `contract` | Deep component inspection (props, emits, slots, state). Options: `--symbol <name>`, `--audit-events`, `--outline`, `--infer-props`, `--resolve-globals` |
-
-Recommended workflow: `strata find --map src --json`, choose a file, run `strata inspect <file> --view map --json`, then pass a returned region's `ref` to `--view source`. The map locates code; it does not certify implementation correctness. Unsupported analysis and truncated results remain explicit.
-| `strata tree [entry]` | `component-tree` | Inspect component hierarchy tree or upward blast radius. Options: `--route <path>`, `--depth <n>`, `--direction <downward\|upward>`, `--alias <map>`, `--scope-filter <scope>` |
-| `strata trace <state-id>` | `impact` | Trace reactive state blast radius and consumers. Options: `--depth <n>`, `--direction <consumers\|dependencies\|both>`, `--role <all\|mutators\|readers>` |
-| `strata audit [dir]` | `routes`, `apis`, `dead-state`, `archetype` | Audit frontend architecture. Options: `--target <target>`, `--threshold <n>`, `--exemplar <file>`, `--ignore <globs>`, `--include-pages`, `--scope-path <dir>`, `--exclude-dirs <dirs>` |
-| `strata patch <file>` | `patch-plan` | Generate prescriptive refactoring patch plans across callers. Options: `--refactor <type>`, `--old <name>`, `--new <name>` |
-| `strata stats [dir]` | `telemetry` | Display MCP tool latency percentiles (p50/p95), error rates, and items found |
-
-### Direct CLI Shortcuts
-
-- `strata routes [path]` — Extract route topology manifest (shortcut for `audit --target routes`)
-- `strata apis [path]` — Extract outbound HTTP API calls and caller mapping (shortcut for `audit --target api-contracts`)
-- `strata dead-state [path]` — Detect unused reactive state composables and stores (shortcut for `audit --target dead-state`)
-- `strata archetype <file>` — Audit page archetype and structural drift vs exemplar (shortcut for `audit --target archetype-drift`)
-- `strata usage <component>` — Search component adoption (shortcut for `find --component <name>`)
-- `strata rule <rule-yaml>` — Execute raw ast-grep YAML rule (shortcut for `find --rule <yaml>`)
-
-### Global Options
-
-- `-p, --path <path>`: Target directory or file path (default: `.`)
-- `--json`: Output raw JSON instead of human-readable formatted text
-- `-v, --version`: Display current Strata version
-- `-h, --help`: Display contextual command options and usage
+| Command | Description |
+|---|---|
+| `strata find <pattern>` | Search code patterns across `.vue`, `.svelte`, `.astro`, `.tsx`, `.jsx`, `.ts`, `.js` |
+| `strata inspect <file>` | Inspect component props, emits, slots, and state |
+| `strata tree [entry]` | View component hierarchy tree or dependent callers (`--direction upward`) |
+| `strata trace <state-name>` | Trace where a reactive state or store is used |
+| `strata routes [dir]` | List application routes and page mappings |
+| `strata apis [dir]` | List outbound HTTP API calls and their caller components |
+| `strata dead-state [dir]` | Find unused reactive state composables or stores |
+| `strata patch <file>` | Generate refactoring plans for prop or event renames |
 
 ---
 
-## Development & Contributing
+## Development
 
 ```bash
 # Clone and install dependencies
