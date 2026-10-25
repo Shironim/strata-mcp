@@ -17,20 +17,23 @@ describe('strata init command', () => {
     await fs.rm(testDir, { recursive: true, force: true });
   });
 
-  it('provisions .agents rules, skills, and hooks into target directory', async () => {
+  it('provisions harness skills, hooks, and rules into target directory', async () => {
     await handleStrataInit({ cwd: testDir, yes: true });
 
-    const ruleFile = join(testDir, '.agents/rules/strata-frontend.md');
+    const geminiRuleFile = join(testDir, '.gemini/rules/strata-frontend.md');
+    const agentsDoc = join(testDir, 'AGENTS.md');
     const skillFile = join(testDir, '.agents/skills/strata-inspect/SKILL.md');
     const hookFile = join(testDir, '.agents/hooks/strata-post-write.sh');
     const strataDb = join(testDir, '.strata/graph.db');
 
-    expect(existsSync(ruleFile)).toBe(true);
+    expect(existsSync(geminiRuleFile)).toBe(true);
+    expect(existsSync(agentsDoc)).toBe(true);
     expect(existsSync(skillFile)).toBe(true);
     expect(existsSync(hookFile)).toBe(true);
     expect(existsSync(strataDb)).toBe(true);
+    expect(existsSync(join(testDir, '.agents/rules'))).toBe(false);
 
-    const ruleContent = await fs.readFile(ruleFile, 'utf8');
+    const ruleContent = await fs.readFile(geminiRuleFile, 'utf8');
     expect(ruleContent).toContain('strata-mcp');
     expect(ruleContent).toContain('inspect_component');
 

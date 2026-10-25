@@ -84,6 +84,7 @@ test('handleStrataInit initializes project, agent artifacts, and harness config'
   expect(existsSync(join(root, '.claude', 'commands', 'strata-inspect.md'))).toBe(true);
   expect(existsSync(join(root, '.mcp.json'))).toBe(true);
   expect(existsSync(join(root, '.claude', 'settings.json'))).toBe(true);
+  expect(existsSync(join(root, '.claude', 'rules'))).toBe(false);
 
   const rule = readFileSync(join(root, 'CLAUDE.md'), 'utf8');
   expect(rule).toBe(STRATA_FRONTEND_RULE);
@@ -174,7 +175,7 @@ test('handleStrataInit initializes OpenAI Codex with AGENTS.md, config.toml, ski
   expect(existsSync(join(root, '.strata'))).toBe(true);
   expect(existsSync(join(root, 'AGENTS.md'))).toBe(true);
   expect(existsSync(join(root, '.codex', 'config.toml'))).toBe(true);
-  expect(existsSync(join(root, '.codex', 'rules', 'strata-frontend.md'))).toBe(true);
+  expect(existsSync(join(root, '.codex', 'rules'))).toBe(false);
   expect(existsSync(join(root, '.codex', 'skills', 'strata-inspect', 'SKILL.md'))).toBe(true);
   expect(existsSync(join(root, '.codex', 'hooks', 'strata-post-write.sh'))).toBe(true);
   expect(existsSync(join(root, '.codex', 'hooks.json'))).toBe(true);
@@ -196,7 +197,7 @@ test('handleStrataInit initializes OpenCode in opencode folder with skills, hook
   expect(existsSync(join(root, '.strata'))).toBe(true);
   expect(existsSync(join(root, 'AGENTS.md'))).toBe(true);
   expect(existsSync(join(root, 'opencode.json'))).toBe(true);
-  expect(existsSync(join(root, 'opencode', 'rules', 'strata-frontend.md'))).toBe(true);
+  expect(existsSync(join(root, 'opencode', 'rules'))).toBe(false);
   expect(existsSync(join(root, 'opencode', 'skills', 'strata-inspect', 'SKILL.md'))).toBe(true);
   expect(existsSync(join(root, 'opencode', 'hooks', 'strata-post-write.sh'))).toBe(true);
   expect(existsSync(join(root, 'opencode', 'hooks.json'))).toBe(true);
@@ -215,7 +216,7 @@ test('handleStrataInit initializes .agents general harness with skills, hooks, a
   expect(existsSync(join(root, '.strata'))).toBe(true);
   expect(existsSync(join(root, 'AGENTS.md'))).toBe(true);
   expect(existsSync(join(root, '.agents', 'mcp.json'))).toBe(true);
-  expect(existsSync(join(root, '.agents', 'rules', 'strata-frontend.md'))).toBe(true);
+  expect(existsSync(join(root, '.agents', 'rules'))).toBe(false);
   expect(existsSync(join(root, '.agents', 'skills', 'strata-inspect', 'SKILL.md'))).toBe(true);
   expect(existsSync(join(root, '.agents', 'hooks', 'strata-post-write.sh'))).toBe(true);
   expect(existsSync(join(root, '.agents', 'hooks.json'))).toBe(true);

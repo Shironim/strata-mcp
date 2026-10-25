@@ -73,12 +73,12 @@ strata init --harness agents         # Universal Agent Harness (.agents/)
 
 ### Supported AI Agent Harnesses
 
-| Harness | Configuration File | Rule File | Skill Directory |
+| Harness | Configuration File | Guidance / Rules | Skill Directory |
 |---|---|---|---|
-| **Google Antigravity** | `.gemini/mcp_config.json` | `GEMINI.md` | `.gemini/skills/strata-inspect/` |
-| **Claude Code** | `.claude/.mcp.json` | `CLAUDE.md` | `.claude/skills/strata-inspect/` |
+| **Google Antigravity** | `.gemini/mcp_config.json` | `GEMINI.md` & `.gemini/rules/` | `.gemini/skills/strata-inspect/` |
+| **Claude Code** | `.mcp.json` | `CLAUDE.md` | `.claude/skills/strata-inspect/` |
 | **OpenAI Codex** | `.codex/config.toml` | `AGENTS.md` | `.codex/skills/strata-inspect/` |
-| **OpenCode** | `opencode/opencode.json` | `AGENTS.md` | `opencode/skills/strata-inspect/` |
+| **OpenCode** | `opencode.json` | `AGENTS.md` | `opencode/skills/strata-inspect/` |
 | **Universal Agents** | `.agents/mcp.json` | `AGENTS.md` | `.agents/skills/strata-inspect/` |
 
 ---

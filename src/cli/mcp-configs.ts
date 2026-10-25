@@ -629,9 +629,6 @@ export async function setupHarnessArtifacts(
     const rAction = await writeMarkdownGuidance(join(projectRoot, 'CLAUDE.md'), STRATA_FRONTEND_RULE, force);
     record('Claude Code', 'CLAUDE.md', rAction);
 
-    const ruleAction = await writeDedicatedArtifact(join(projectRoot, '.claude', 'rules', 'strata-frontend.md'), STRATA_FRONTEND_RULE, force);
-    record('Claude Code', '.claude/rules/strata-frontend.md', ruleAction);
-
     const skillAction = await writeDedicatedArtifact(join(projectRoot, '.claude', 'skills', 'strata-inspect', 'SKILL.md'), STRATA_INSPECT_SKILL, force);
     record('Claude Code', '.claude/skills/strata-inspect/SKILL.md', skillAction);
 
@@ -647,9 +644,6 @@ export async function setupHarnessArtifacts(
     const agAction = await writeMarkdownGuidance(join(projectRoot, 'AGENTS.md'), STRATA_FRONTEND_RULE, force);
     record('Codex', 'AGENTS.md', agAction);
 
-    const rAction = await writeDedicatedArtifact(join(projectRoot, '.codex', 'rules', 'strata-frontend.md'), STRATA_FRONTEND_RULE, force);
-    record('Codex', '.codex/rules/strata-frontend.md', rAction);
-
     const sAction = await writeDedicatedArtifact(join(projectRoot, '.codex', 'skills', 'strata-inspect', 'SKILL.md'), STRATA_INSPECT_SKILL, force);
     record('Codex', '.codex/skills/strata-inspect/SKILL.md', sAction);
 
@@ -661,9 +655,6 @@ export async function setupHarnessArtifacts(
   if (shouldApply('opencode')) {
     const agAction = await writeMarkdownGuidance(join(projectRoot, 'AGENTS.md'), STRATA_FRONTEND_RULE, force);
     record('OpenCode', 'AGENTS.md', agAction);
-
-    const rAction = await writeDedicatedArtifact(join(projectRoot, 'opencode', 'rules', 'strata-frontend.md'), STRATA_FRONTEND_RULE, force);
-    record('OpenCode', 'opencode/rules/strata-frontend.md', rAction);
 
     const sAction = await writeDedicatedArtifact(join(projectRoot, 'opencode', 'skills', 'strata-inspect', 'SKILL.md'), STRATA_INSPECT_SKILL, force);
     record('OpenCode', 'opencode/skills/strata-inspect/SKILL.md', sAction);
@@ -677,9 +668,6 @@ export async function setupHarnessArtifacts(
     const agAction = await writeMarkdownGuidance(join(projectRoot, 'AGENTS.md'), STRATA_FRONTEND_RULE, force);
     record('.agents (general)', 'AGENTS.md', agAction);
 
-    const rAction = await writeDedicatedArtifact(join(projectRoot, '.agents', 'rules', 'strata-frontend.md'), STRATA_FRONTEND_RULE, force);
-    record('.agents (general)', '.agents/rules/strata-frontend.md', rAction);
-
     const sAction = await writeDedicatedArtifact(join(projectRoot, '.agents', 'skills', 'strata-inspect', 'SKILL.md'), STRATA_INSPECT_SKILL, force);
     record('.agents (general)', '.agents/skills/strata-inspect/SKILL.md', sAction);
 
@@ -689,14 +677,14 @@ export async function setupHarnessArtifacts(
 
   // Fallback if skipping MCP config
   if (selectedSet.has('skip')) {
-    const rAction = await writeDedicatedArtifact(join(projectRoot, '.agents', 'rules', 'strata-frontend.md'), STRATA_FRONTEND_RULE, force);
-    record('Fallback Rules', '.agents/rules/strata-frontend.md', rAction);
+    const agAction = await writeMarkdownGuidance(join(projectRoot, 'AGENTS.md'), STRATA_FRONTEND_RULE, force);
+    record('Fallback Guidance', 'AGENTS.md', agAction);
 
     const sAction = await writeDedicatedArtifact(join(projectRoot, '.agents', 'skills', 'strata-inspect', 'SKILL.md'), STRATA_INSPECT_SKILL, force);
-    record('Fallback Rules', '.agents/skills/strata-inspect/SKILL.md', sAction);
+    record('Fallback Skills', '.agents/skills/strata-inspect/SKILL.md', sAction);
 
     const hAction = await writeDedicatedArtifact(join(projectRoot, '.agents', 'hooks', 'strata-post-write.sh'), STRATA_POST_WRITE_HOOK, force, 0o755);
-    record('Fallback Rules', '.agents/hooks/strata-post-write.sh', hAction);
+    record('Fallback Hooks', '.agents/hooks/strata-post-write.sh', hAction);
   }
 
   return results;

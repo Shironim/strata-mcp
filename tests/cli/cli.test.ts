@@ -127,7 +127,9 @@ describe('CLI Companion (Task 6 DoD)', () => {
     try {
       await main(['init', tmp, '-y', '-f']);
       expect(existsSync(join(tmp, '.strata', 'graph.db'))).toBe(true);
-      expect(existsSync(join(tmp, '.agents', 'rules', 'strata-frontend.md'))).toBe(true);
+      expect(existsSync(join(tmp, '.gemini', 'rules', 'strata-frontend.md'))).toBe(true);
+      expect(existsSync(join(tmp, 'AGENTS.md'))).toBe(true);
+      expect(existsSync(join(tmp, '.agents', 'rules'))).toBe(false);
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }

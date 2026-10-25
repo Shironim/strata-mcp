@@ -119,13 +119,13 @@ export function parseHarnessArg(arg?: string): AgentHarness[] {
  */
 async function promptHarnessChoice(): Promise<AgentHarness[]> {
   console.log(`?  Select AI Agent Harness to configure for this project:`);
-  console.log(`   [1] Google Antigravity (.gemini/mcp_config.json, GEMINI.md, .gemini/skills/, .gemini/hooks/)`);
+  console.log(`   [1] Google Antigravity (.gemini/mcp_config.json, GEMINI.md, .gemini/rules/, .gemini/skills/, .gemini/hooks/)`);
   console.log(`   [2] Claude Code        (.mcp.json, .claude/settings.json, CLAUDE.md, .claude/skills/, .claude/hooks/)`);
   console.log(`   [3] OpenAI Codex       (.codex/config.toml, AGENTS.md, .codex/skills/, .codex/hooks/)`);
   console.log(`   [4] OpenCode           (opencode.json, AGENTS.md, opencode/skills/, opencode/hooks/)`);
   console.log(`   [5] .agents (General)  (.agents/mcp.json, AGENTS.md, .agents/skills/, .agents/hooks/)`);
   console.log(`   [6] All (Multi-Harness - recommended)`);
-  console.log(`   [7] Skip MCP Config    (Rules & SQLite index only)\n`);
+  console.log(`   [7] Skip MCP Config    (Guidance & SQLite index only)\n`);
 
   const rl = readline.createInterface({ input, output });
   try {
