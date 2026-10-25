@@ -67,3 +67,4 @@ for (const { target, outfile } of targetsToBuild) {
   }
 }
 console.log('Compilation completed successfully.');
+
