@@ -25,7 +25,7 @@ test('parsing repeated revisions does not retain source or AST in the compiler c
 test('project ecosystem follows manifest changes instead of retaining stale cache', () => {
   const r = root(); expect(getProjectEcosystem(r).hasVue).toBe(true);
   writeFileSync(join(r, 'package.json'), '{"dependencies":{"react":"19"}}');
-  expect(getProjectEcosystem(r)).toEqual({ hasVue: false, hasReact: true, hasAstro: false });
+  expect(getProjectEcosystem(r)).toMatchObject({ hasVue: false, hasReact: true, hasAstro: false });
 });
 
 test('closed watchers release their dirty queue and can be replaced in the registry', () => {

@@ -201,29 +201,134 @@ function mapVue(snapshot: SourceSnapshot, content: string, maxRegions: number): 
 
 function mapAstro(snapshot: SourceSnapshot, content: string, maxRegions: number): SourceMapResult {
   const parsed = parseAstro(content, snapshot.file);
-  const blocks = [parsed.frontmatter, parsed.template].filter((block): block is NonNullable<typeof block> => Boolean(block));
+  const blocks: SfcBlock[] = [
+    ...(parsed.frontmatter ? [parsed.frontmatter] : []),
+    ...(parsed.template ? [parsed.template] : []),
+    ...(parsed.scripts ?? []),
+    ...(parsed.styles ?? []),
+  ];
   const diagnostics: SourceMapDiagnostic[] = (parsed.diagnostics ?? []).map(item => ({ code: item.code, message: item.message }));
   let totalRegions = blocks.length;
   let returnedRegions = blocks.length;
   let truncated = false;
   let childRegionsTruncated = false;
   const regions = blocks.map(block => {
-    const item = region(snapshot, content, block.type === 'astroTemplate' ? 'template' : 'frontmatter', block.loc.start.offset, block.loc.end.offset);
-    if (block.type !== 'frontmatter') return item;
-    const mapped = mapScriptBlock(snapshot, content, block, maxRegions);
-    item.children = mapped.regions;
-    diagnostics.push(...mapped.diagnostics);
-    totalRegions += mapped.totalRegions;
-    returnedRegions += mapped.returnedRegions;
-    truncated ||= mapped.truncated;
-    childRegionsTruncated ||= mapped.childRegionsTruncated;
+    let blockKind = 'block';
+    if (block.type === 'frontmatter') blockKind = 'frontmatter';
+    else if (block.type === 'astroTemplate') blockKind = 'template';
+    else if (block.type === 'script') blockKind = 'script';
+    else if (block.type === 'style') blockKind = 'style';
+
+    const item = region(
+      snapshot,
+      content,
+      blockKind,
+      block.loc.start.offset,
+      block.loc.end.offset,
+      undefined,
+      attrs(block.attrs)
+    );
+
+    if (block.type === 'frontmatter' || block.type === 'script') {
+      const mapped = mapScriptBlock(snapshot, content, block, maxRegions);
+      item.children = mapped.regions;
+      diagnostics.push(...mapped.diagnostics);
+      totalRegions += mapped.totalRegions;
+      returnedRegions += mapped.returnedRegions;
+      truncated ||= mapped.truncated;
+      childRegionsTruncated ||= mapped.childRegionsTruncated;
+      return item;
+    }
+
+    if (block.type === 'astroTemplate') {
+      const templateChildren: SourceRegion[] = [];
+      const templateStart = block.loc.start.offset;
+      const templateText = block.content;
+
+      // Extract islands: <ComponentName ... client:... /> or <ComponentName ... client:...>...</ComponentName>
+      const islandRegex = /<([A-Z][A-Za-z0-9_.]*)\b([^>]*\bclient:(?:load|visible|idle|media|only)[^>]*)(\/?>)/g;
+      let match: RegExpExecArray | null;
+      while ((match = islandRegex.exec(templateText)) !== null) {
+        const compName = match[1];
+        const attrString = match[2];
+        const isSelfClosing = match[3] === '/>';
+        const startOffset = templateStart + match.index;
+        let endOffset = startOffset + match[0].length;
+
+        if (!isSelfClosing) {
+          const closeTag = `</${compName}>`;
+          const closeIndex = templateText.indexOf(closeTag, match.index + match[0].length);
+          if (closeIndex !== -1) {
+            endOffset = templateStart + closeIndex + closeTag.length;
+          }
+        }
+
+        const directiveMatch = attrString.match(/\b(client:(?:load|visible|idle|media|only))(?:=(?:"([^"]*)"|'([^']*)'|\{([^}]*)\}|([^\s>]+)))?/);
+        const directiveName = directiveMatch ? directiveMatch[1] : 'client:load';
+        const directiveVal = directiveMatch ? (directiveMatch[2] ?? directiveMatch[3] ?? directiveMatch[4] ?? directiveMatch[5]) : undefined;
+
+        const islandAttrs: Record<string, string | boolean> = {
+          directive: directiveName,
+          component: compName,
+        };
+        if (directiveVal !== undefined) {
+          islandAttrs.directiveValue = directiveVal;
+        }
+
+        templateChildren.push(
+          region(snapshot, content, 'island', startOffset, endOffset, compName, islandAttrs)
+        );
+      }
+
+      // Extract slots: <slot ... /> or <slot ...>...</slot>
+      const slotRegex = /<slot\b([^>]*)(\/?>)/g;
+      while ((match = slotRegex.exec(templateText)) !== null) {
+        const attrString = match[1];
+        const isSelfClosing = match[2] === '/>';
+        const startOffset = templateStart + match.index;
+        let endOffset = startOffset + match[0].length;
+
+        if (!isSelfClosing) {
+          const closeTag = '</slot>';
+          const closeIndex = templateText.indexOf(closeTag, match.index + match[0].length);
+          if (closeIndex !== -1) {
+            endOffset = templateStart + closeIndex + closeTag.length;
+          }
+        }
+
+        const nameMatch = attrString.match(/\bname=(?:"([^"]*)"|'([^']*)'|\{([^}]*)\}|([^\s>]+))/);
+        const slotName = nameMatch ? (nameMatch[1] ?? nameMatch[2] ?? nameMatch[3] ?? nameMatch[4]) : 'default';
+
+        templateChildren.push(
+          region(snapshot, content, 'slot', startOffset, endOffset, slotName, { name: slotName })
+        );
+      }
+
+      templateChildren.sort((a, b) => a.span.start.offset - b.span.start.offset);
+
+      totalRegions += templateChildren.length;
+      if (templateChildren.length > maxRegions) {
+        item.children = templateChildren.slice(0, maxRegions);
+        truncated = true;
+        childRegionsTruncated = true;
+      } else if (templateChildren.length > 0) {
+        item.children = templateChildren;
+      }
+      returnedRegions += item.children ? item.children.length : 0;
+    }
+
     return item;
   });
+
   return {
-    snapshot, documentType: 'astro', framework: 'astro',
-    status: diagnostics.length || truncated || childRegionsTruncated ? 'partial' : 'complete', regions, diagnostics,
-    supported: ['frontmatter', 'frontmatter-symbols', 'template', 'absolute-lines', 'source-ref'],
-    unsupported: ['embedded-script-style-regions'],
+    snapshot,
+    documentType: 'astro',
+    framework: 'astro',
+    status: diagnostics.length || truncated || childRegionsTruncated ? 'partial' : 'complete',
+    regions,
+    diagnostics,
+    supported: ['frontmatter', 'frontmatter-symbols', 'template', 'embedded-scripts', 'embedded-styles', 'islands', 'slots', 'absolute-lines', 'source-ref'],
+    unsupported: [],
     coverage: { totalRegions, returnedRegions, truncated, childRegionsTruncated },
   };
 }

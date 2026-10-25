@@ -1,6 +1,5 @@
 import { extname } from 'node:path';
-import { detectFrameworkWithEvidence } from '../engine/framework-detector';
-import { getSourcePosition } from '../engine/source-file';
+import { getSourcePosition } from '../utils/source-position';
 import type { SfcBlock } from '../types';
 import type { DocumentAdapter, DocumentType, FrontendFramework } from './types';
 
@@ -11,15 +10,14 @@ export class JsxDocumentAdapter implements DocumentAdapter {
   private readonly content: string;
   private readonly lang: string;
 
-  constructor(filePath: string, content: string) {
+  constructor(filePath: string, content: string, framework?: FrontendFramework) {
     this.filePath = filePath;
     this.content = content;
 
     const ext = extname(filePath).toLowerCase();
     this.lang = ext.includes('tsx') ? 'tsx' : 'jsx';
 
-    const detection = detectFrameworkWithEvidence(filePath, content);
-    this.framework = detection.framework;
+    this.framework = framework ?? (content.includes('solid-js') ? 'solid' : 'react');
   }
 
   getScriptBlocks(): SfcBlock[] {

@@ -1,5 +1,5 @@
 import { parse } from 'svelte/compiler';
-import { getSourcePosition } from '../engine/source-file';
+import { getSourcePosition } from '../utils/source-position';
 import type { SfcBlock } from '../types';
 import type { DocumentAdapter, DocumentType, FrontendFramework } from './types';
 

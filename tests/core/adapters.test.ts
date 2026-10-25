@@ -25,11 +25,11 @@ const x = 1;
     expect(adapter.isJsx()).toBe(false);
   });
 
-  it('creates ScriptDocumentAdapter for .tsx file', () => {
+  it('creates JsxDocumentAdapter for .tsx file', () => {
     const raw = `export function App() { return <div>App</div>; }`;
     const adapter = createDocumentAdapter('App.tsx', raw);
 
-    expect(adapter.type).toBe('script');
+    expect(adapter.type).toBe('jsx-module');
     expect(adapter.getScriptBlocks().length).toBe(1);
     expect(adapter.getTemplateBlock()).toBeNull();
     expect(adapter.isJsx()).toBe(true);

@@ -157,11 +157,21 @@ export interface SfcDescriptor {
   diagnostics?: Array<{ code: string; message: string }>;
 }
 
+export interface AstroIslandContract {
+  component: string;
+  directive: string;
+  directiveValue?: string;
+  props?: Record<string, string>;
+  loc?: SourceLocation;
+}
+
 export interface AstroDescriptor {
   filename: string;
   rawContent: string;
   frontmatter: SfcBlock | null;
   template: SfcBlock | null;
+  scripts?: SfcBlock[];
+  styles?: SfcBlock[];
   diagnostics?: Array<{ code: string; message: string }>;
 }
 
@@ -437,6 +447,7 @@ export interface ComponentContract {
   symbolOutline?: ComponentSymbolOutline;
   nuxtPageMeta?: NuxtPageMetaContract;
   nextSegmentConfig?: NextSegmentConfigContract;
+  islands?: AstroIslandContract[];
 }
 
 export interface ContractOptions {
