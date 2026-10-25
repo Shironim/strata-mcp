@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { extractStateDependencies } from '../../src/engine/contract';
 import {
   getWorkspaceDatabase,
+  formatStateImpactAsText,
   queryStateImpact,
   syncWorkspace,
 } from '../../src/engine/database';
@@ -132,6 +133,9 @@ function onCheckout() {
 
     // Test queryStateImpact
     const allImpact = await queryStateImpact(tempDir, 'useCartStore', 'all');
+    expect(allImpact._meta?.syncGeneration).toBeGreaterThan(0);
+    expect(allImpact._meta?.configFingerprint).toMatch(/^[a-f\d]{64}$/);
+    expect(formatStateImpactAsText(allImpact)).toContain(`Graph generation ${allImpact._meta?.syncGeneration}`);
     expect(allImpact.totalConsumers).toBe(2);
     expect(allImpact.mutatorsCount).toBe(1);
     expect(allImpact.readersCount).toBe(1);

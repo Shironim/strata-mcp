@@ -27,7 +27,7 @@ export async function queryStateImpact(
 ): Promise<StateImpactResult> {
   const startTime = performance.now();
   const absRoot = resolve(workspaceRoot);
-  await syncWorkspace(absRoot);
+  const sync = await syncWorkspace(absRoot);
   const db = getWorkspaceDatabase(absRoot);
 
   const rows = db
@@ -129,7 +129,9 @@ export async function queryStateImpact(
     _meta: {
       engine: 'sqlite-graph-cache',
       durationMs,
-      cached: true,
+      cached: sync.cacheHit,
+      syncGeneration: sync.syncGeneration,
+      configFingerprint: sync.configFingerprint,
     },
   };
 }
@@ -138,8 +140,11 @@ export async function queryStateImpact(
  * Formats a StateImpactResult into a token-efficient human-readable summary.
  */
 export function formatStateImpactAsText(result: StateImpactResult): string {
+  const freshness = result._meta?.syncGeneration
+    ? ` | Graph generation ${result._meta.syncGeneration} | ${result._meta.cached ? 'cache hit' : 'refreshed'}`
+    : '';
   const metaBadge = result._meta
-    ? ` [Engine: ${result._meta.engine} | ${result._meta.durationMs}ms]`
+    ? ` [Engine: ${result._meta.engine} | ${result._meta.durationMs}ms${freshness}]`
     : '';
 
   const lines: string[] = [
@@ -204,7 +209,7 @@ export async function findUnusedState(
   const startTime = performance.now();
   const absRoot = resolve(workspaceRoot);
   // Scope limits findings; refresh outside consumers before declaring scoped state unused.
-  await syncWorkspace(absRoot);
+  const sync = await syncWorkspace(absRoot);
   const db = getWorkspaceDatabase(absRoot);
 
   // 1. Identify all state candidate files in the workspace or scoped sub-path
@@ -325,7 +330,9 @@ export async function findUnusedState(
     _meta: {
       engine: 'sqlite-graph-cache',
       durationMs,
-      cached: true,
+      cached: sync.cacheHit,
+      syncGeneration: sync.syncGeneration,
+      configFingerprint: sync.configFingerprint,
     },
   };
 }
@@ -370,7 +377,7 @@ export async function traceStateChain(
 ): Promise<StateChainResult> {
   const startTime = performance.now();
   const absRoot = resolve(workspaceRoot);
-  await syncWorkspace(absRoot);
+  const sync = await syncWorkspace(absRoot);
   const db = getWorkspaceDatabase(absRoot);
 
   const identifier = options.identifier;
@@ -597,7 +604,9 @@ export async function traceStateChain(
     _meta: {
       engine: 'sqlite-graph-cache',
       durationMs,
-      cached: true,
+      cached: sync.cacheHit,
+      syncGeneration: sync.syncGeneration,
+      configFingerprint: sync.configFingerprint,
     },
   };
 }
@@ -607,7 +616,10 @@ export async function traceStateChain(
  */
 export function formatStateChainAsText(result: StateChainResult): string {
   const lines: string[] = [];
-  lines.push(`### State Dependency Chain: \`${result.identifier}\``);
+  const freshness = result._meta?.syncGeneration
+    ? ` [Graph generation ${result._meta.syncGeneration} | ${result._meta.cached ? 'cache hit' : 'refreshed'}]`
+    : '';
+  lines.push(`### State Dependency Chain: \`${result.identifier}\`${freshness}`);
   if (result.entryFile) {
     lines.push(`**Declared in:** \`${result.entryFile}\``);
   }

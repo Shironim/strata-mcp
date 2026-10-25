@@ -170,7 +170,17 @@ export async function stagedSync(root: string, scopePath: string | undefined, db
       setMeta.run('sync_generation', String(Number(generation || 0) + 1)); setMeta.run('index_invalid', '');
     });
     commit();
-    return {added: counts.added ?? 0, modified: counts.modified ?? 0, deleted, unchanged: counts.unchanged ?? 0, total: counts.total, durationMs: Math.round(performance.now() - start)};
+    return {
+      added: counts.added ?? 0,
+      modified: counts.modified ?? 0,
+      deleted,
+      unchanged: counts.unchanged ?? 0,
+      total: counts.total,
+      durationMs: Math.round(performance.now() - start),
+      syncGeneration: Number(generation || 0) + 1,
+      configFingerprint: fingerprint,
+      cacheHit: !changed,
+    };
   } catch (err) {
     // Derived data cannot be trusted after an unreadable file or an unsuccessful refresh.
     if (!(err instanceof Error && err.message.startsWith('WORKSPACE_CHANGED'))) {
