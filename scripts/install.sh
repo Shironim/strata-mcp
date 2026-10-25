@@ -194,3 +194,4 @@ esac
 printf "\n${GREEN}${BOLD}✨ Strata MCP installed successfully!${RESET}\n"
 printf "Run '${CYAN}strata --help${RESET}' to get started or configure it in your MCP client:\n\n"
 printf "  ${BOLD}Command:${RESET} %s/strata\n\n" "${INSTALL_DIR}"
+

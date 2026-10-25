@@ -2,6 +2,7 @@ import { promises as fs } from 'node:fs';
 import ignore, { type Ignore } from 'ignore';
 import { findProjectRoot } from './path-resolver';
 import { extname, join, relative, resolve, dirname, sep } from 'node:path';
+import { NON_DOMAIN_DIRS, detectCodeDomains } from './domains';
 
 export const SUPPORTED_SCRIPT_EXTENSIONS = new Set(['.ts', '.js', '.tsx', '.jsx', '.mjs', '.cjs']);
 export const SUPPORTED_SFC_EXTENSIONS = new Set(['.vue', '.astro', '.svelte']);
@@ -65,6 +66,34 @@ export const IGNORED_DIRS = new Set([
   '.gemini',
   '.cursor',
   '.continue',
+
+  // Documentation & Non-Code Folders
+  'docs',
+  'doc',
+  'documentation',
+
+  // Tooling, Scripts & Harness
+  'scripts',
+  'tools',
+
+  // Test Suites, Fixtures & Mocks (Non-domain test code)
+  'tests',
+  'test',
+  '__tests__',
+  'spec',
+  'specs',
+  'e2e',
+  'cypress',
+  'fixtures',
+  'mocks',
+
+  // Logs & Runtime Artifacts
+  'logs',
+  'tmp',
+  'temp',
+  'artifacts',
+  'benchmarks',
+  'benchmark',
 ]);
 
 export interface CollectOptions {
@@ -74,6 +103,14 @@ export interface CollectOptions {
   ignoreRoot?: string;
   /** Include configuration fingerprints while streaming an index scan. */
   includeConfigFiles?: boolean;
+  /** Include test suites and test fixture directories */
+  includeTests?: boolean;
+  /** Include build scripts and tool directories */
+  includeScripts?: boolean;
+  /** Include documentation directories */
+  includeDocs?: boolean;
+  /** Filter collection to standard code domain directories only */
+  domainOnly?: boolean;
 }
 
 /**
@@ -112,7 +149,21 @@ export async function* iterateFiles(
   );
 
   function isExcluded(entryName: string, relativePath: string): boolean {
-    if (IGNORED_DIRS.has(entryName)) return true;
+    const lower = entryName.toLowerCase();
+    if (options?.includeTests && (['tests', 'test', '__tests__', 'spec', 'specs', 'e2e', 'cypress', 'fixtures', 'mocks'].includes(lower))) {
+      // Allowed via explicit option
+    } else if (options?.includeScripts && (['scripts', 'tools'].includes(lower))) {
+      // Allowed via explicit option
+    } else if (options?.includeDocs && (['docs', 'doc', 'documentation'].includes(lower))) {
+      // Allowed via explicit option
+    } else if (IGNORED_DIRS.has(entryName) || IGNORED_DIRS.has(lower)) {
+      return true;
+    }
+
+    if (entryName.startsWith('.') && entryName !== '.' && entryName !== '..' && !options?.includeConfigFiles) {
+      return true;
+    }
+
     for (const pattern of customExcludeSet) {
       if (entryName === pattern || relativePath === pattern || relativePath.startsWith(`${pattern}/`)) return true;
     }
@@ -148,6 +199,27 @@ export async function* iterateFiles(
     if (inherited.length && isIgnored(dirPath, stat.isDirectory(), inherited)) return;
   }
   if (!stat.isDirectory()) { yield dirPath; return; }
+
+  // If domainOnly is requested and dirPath has a standard domain layout,
+  // anchor traversal to detected domain directories and root entry files.
+  if (options?.domainOnly) {
+    const domainRes = await detectCodeDomains(dirPath);
+    if (domainRes.isStandardLayout && domainRes.activeDomainRoots.length > 0) {
+      const rootEntries = await fs.readdir(dirPath, { withFileTypes: true });
+      for (const entry of rootEntries) {
+        if (entry.isFile()) {
+          const ext = extname(entry.name).toLowerCase();
+          if (SUPPORTED_FRONTEND_EXTENSIONS.has(ext)) {
+            yield join(dirPath, entry.name);
+          }
+        }
+      }
+      for (const domainRoot of domainRes.activeDomainRoots) {
+        yield* walk(domainRoot, inherited);
+      }
+      return;
+    }
+  }
 
   async function* walk(currentDir: string, inherited: IgnoreContext[] = []): AsyncGenerator<string> {
     const contexts = [...inherited];

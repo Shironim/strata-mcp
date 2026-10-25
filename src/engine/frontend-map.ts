@@ -1,6 +1,7 @@
 import { promises as fs } from 'node:fs';
 import { basename, extname, join, resolve } from 'node:path';
 import { collectFiles } from './collector';
+import { detectCodeDomains, classifyFileDomain } from './domains';
 
 const COVERED = ['.vue', '.astro', '.svelte', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'];
 
@@ -9,6 +10,7 @@ export async function mapFrontendScope(path: string, options: { limit?: number; 
   const limit = Math.min(500, Math.max(1, options.limit ?? 100));
   const offset = Math.max(0, options.offset ?? 0);
   const files = (await collectFiles(root, { excludeDirs: options.excludeDirs })).sort();
+  const domainResolution = await detectCodeDomains(root);
   const manifest = await readPackageManifest(root);
   const dependencies = { ...manifest?.dependencies, ...manifest?.devDependencies };
   const frameworks = ['vue', 'nuxt', 'react', 'next', 'astro', 'svelte', 'solid']
@@ -25,12 +27,22 @@ export async function mapFrontendScope(path: string, options: { limit?: number; 
     scope: { path: root, basis: 'requested-path' },
     status: offset + selected.length < files.length ? 'partial' : 'complete',
     coverage: { knownFiles: files.length, returnedFiles: selected.length, offset, limit, truncated: offset + selected.length < files.length, extensions },
+    domainRoots: domainResolution.activeDomainRoots,
+    domains: domainResolution.domains,
     frameworkCandidates: frameworks,
     frameworkDetection: frameworks.length ? 'package-manifest dependencies; candidate only' : 'unknown (no matching package dependency found)',
-    files: selected.map(file => ({
-      path: file,
-      ...(roleHint(root, file) ? { roleHint: roleHint(root, file), roleHintEvidence: { basis: 'heuristic' as const, resolution: 'candidate' as const, method: 'path-convention' } } : {}),
-    })),
+    files: selected.map(file => {
+      const classification = classifyFileDomain(file, root);
+      const hint = roleHint(root, file) || (classification.layer !== 'unknown' ? classification.layer : undefined);
+      return {
+        path: file,
+        ...(classification.domain ? { domain: classification.domain } : {}),
+        ...(classification.subdomain ? { subdomain: classification.subdomain } : {}),
+        ...(classification.layer !== 'unknown' ? { layer: classification.layer } : {}),
+        isMultiNested: classification.isMultiNested,
+        ...(hint ? { roleHint: hint, roleHintEvidence: { basis: 'heuristic' as const, resolution: 'candidate' as const, method: 'path-convention' } } : {}),
+      };
+    }),
     unsupportedExtensions: ['.css', '.scss', '.sass', '.less', '.mdx'],
   };
 }
