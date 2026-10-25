@@ -1,6 +1,6 @@
 import type { SourcePosition } from '../types';
 
-function lineStarts(content: string): number[] {
+export function lineStarts(content: string): number[] {
   const starts = [0];
   for (let i = 0; i < content.length; i++) {
     if (content[i] === '\r') {
@@ -13,7 +13,7 @@ function lineStarts(content: string): number[] {
   return starts;
 }
 
-function assertSafeOffset(content: string, offset: number): void {
+export function assertSafeOffset(content: string, offset: number): void {
   if (!Number.isSafeInteger(offset) || offset < 0 || offset > content.length) {
     throw new Error('INVALID_SOURCE_REF: offset is outside the source snapshot');
   }
@@ -38,3 +38,4 @@ export function getSourcePosition(content: string, offset: number): SourcePositi
   }
   return { line: low + 1, column: offset - starts[low] + 1, offset };
 }
+

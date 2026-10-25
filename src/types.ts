@@ -175,6 +175,16 @@ export interface AstroDescriptor {
   diagnostics?: Array<{ code: string; message: string }>;
 }
 
+export interface SvelteDescriptor {
+  filename: string;
+  rawContent: string;
+  instance: SfcBlock | null;
+  module: SfcBlock | null;
+  template: SfcBlock | null;
+  styles?: SfcBlock[];
+  diagnostics?: Array<{ code: string; message: string }>;
+}
+
 export interface RawMatch {
   line: number; // 1-based relative to block
   column: number; // 1-based relative to block
@@ -577,6 +587,7 @@ export type RouteFramework =
   | 'astro'
   | 'inertia'
   | 'vue-router'
+  | 'sveltekit'
   | 'unknown';
 
 export type RouteType =

@@ -14,6 +14,9 @@
 | 4 | `refactor` | Modularize Engine God Modules (Decomposing SRP Violations) | `Draft` | [modularize-engine-god-modules.md](./2026-09/refactor/modularize-engine-god-modules.md) | 2026-09-19 |
 | 5 | `feature` | Strata-MCP Observability & Analytics Telemetry Engine | `Completed` | [observability-and-telemetry-readiness.md](./2026-09/feature/observability-and-telemetry-readiness.md) | 2026-09-30 |
 | 6 | `feature` | Bidirectional Data Transport Engine & Fullstack API Stitching Bridge | `Completed` | [bidirectional-transport-and-fullstack-bridge.md](./2026-09/feature/bidirectional-transport-and-fullstack-bridge.md) | 2026-09-30 |
+| 7 | `design / plan` | Map First, Read Selectively: frontend map, source references, evidence, and CLI/MCP parity | `In Progress` | [2026-10-24-map-first-selective-read-design.md](../specs/2026-10-24-map-first-selective-read-design.md) | 2026-10-24 |
+
+Proposal nomor 7 adalah SSOT untuk rencana alur **peta → pilih area → slice presisi → analisis**. Status `Completed` pada brief lama merekam pekerjaan historis; tidak menyatakan kontrak proposal ini sudah tersedia atau seluruh klaim lama sesuai runtime saat ini.
 
 ---
 

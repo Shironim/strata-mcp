@@ -424,7 +424,12 @@ function mapSvelte(snapshot: SourceSnapshot, content: string, maxRegions: number
   let returnedRegions = 0;
 
   try {
-    const ast = parseSvelte(content, { modern: true }) as any;
+    let ast: any;
+    try {
+      ast = parseSvelte(content, { modern: true, filename: snapshot.file, loose: true }) as any;
+    } catch {
+      ast = parseSvelte(content, { modern: true, filename: snapshot.file }) as any;
+    }
 
     // 1. Module Script
     if (ast.module) {
@@ -497,11 +502,35 @@ function mapSvelte(snapshot: SourceSnapshot, content: string, maxRegions: number
       function collectElements(parentNodes: any[]): any[] {
         const result: any[] = [];
         for (const n of parentNodes) {
-          if (n.type === 'RegularElement' || n.type === 'Component' || n.type === 'SvelteComponent' || n.type === 'SnippetBlock') {
+          if (!n || typeof n !== 'object') continue;
+          if (
+            n.type === 'RegularElement' ||
+            n.type === 'Component' ||
+            n.type === 'SvelteComponent' ||
+            n.type === 'SnippetBlock' ||
+            n.type === 'IfBlock' ||
+            n.type === 'EachBlock' ||
+            n.type === 'AwaitBlock'
+          ) {
             result.push(n);
-            if (n.fragment?.nodes) {
-              result.push(...collectElements(n.fragment.nodes));
-            }
+          }
+          if (n.fragment?.nodes) {
+            result.push(...collectElements(n.fragment.nodes));
+          }
+          if (n.body?.nodes) {
+            result.push(...collectElements(n.body.nodes));
+          }
+          if (n.consequent?.nodes) {
+            result.push(...collectElements(n.consequent.nodes));
+          }
+          if (n.alternate?.nodes) {
+            result.push(...collectElements(n.alternate.nodes));
+          }
+          if (n.then?.nodes) {
+            result.push(...collectElements(n.then.nodes));
+          }
+          if (n.catch?.nodes) {
+            result.push(...collectElements(n.catch.nodes));
           }
         }
         return result;
@@ -519,6 +548,12 @@ function mapSvelte(snapshot: SourceSnapshot, content: string, maxRegions: number
           templateChildren.push(region(snapshot, content, 'template-region', node.start, node.end, node.name));
         } else if (node.type === 'SnippetBlock') {
           templateChildren.push(region(snapshot, content, 'template-region', node.start, node.end, `snippet:${node.expression?.name || 'anonymous'}`));
+        } else if (node.type === 'IfBlock') {
+          templateChildren.push(region(snapshot, content, 'template-region', node.start, node.end, 'if'));
+        } else if (node.type === 'EachBlock') {
+          templateChildren.push(region(snapshot, content, 'template-region', node.start, node.end, 'each'));
+        } else if (node.type === 'AwaitBlock') {
+          templateChildren.push(region(snapshot, content, 'template-region', node.start, node.end, 'await'));
         }
       }
       totalRegions += allElements.length;

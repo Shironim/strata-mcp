@@ -25,6 +25,19 @@ const x = 1;
     expect(adapter.isJsx()).toBe(false);
   });
 
+  it('creates SvelteDocumentAdapter for .svelte file', () => {
+    const raw = `<script lang="ts">
+let { name = 'World' } = $props();
+</script>
+<h1>Hello {name}</h1>`;
+    const adapter = createDocumentAdapter('Greeting.svelte', raw);
+
+    expect(adapter.type).toBe('svelte-sfc');
+    expect(adapter.getScriptBlocks().length).toBe(1);
+    expect(adapter.getTemplateBlock()).not.toBeNull();
+    expect(adapter.isJsx()).toBe(false);
+  });
+
   it('creates JsxDocumentAdapter for .tsx file', () => {
     const raw = `export function App() { return <div>App</div>; }`;
     const adapter = createDocumentAdapter('App.tsx', raw);

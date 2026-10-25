@@ -38,6 +38,7 @@ import {
 } from './parsers/contract-vue';
 import { extractReactContract } from './parsers/contract-react';
 import { extractAstroContract } from './parsers/contract-astro';
+import { extractSvelteContract } from './parsers/contract-svelte';
 import {
   extractStateDependencies,
   extractDataDependencies,
@@ -48,6 +49,7 @@ import {
 export * from './parsers/contract-vue';
 export * from './parsers/contract-react';
 export * from './parsers/contract-astro';
+export * from './parsers/contract-svelte';
 export * from './parsers/state-dependency';
 
 import {
@@ -1093,6 +1095,9 @@ export async function extractComponentContract(
       break;
     case 'astro':
       baseContract = await extractAstroContract(resolvedPath, content);
+      break;
+    case 'svelte':
+      baseContract = await extractSvelteContract(resolvedPath, content);
       break;
     case 'vue-composable':
       baseContract = await extractVueComposableContract(resolvedPath, content);

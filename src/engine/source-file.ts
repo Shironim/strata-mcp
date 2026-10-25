@@ -9,7 +9,8 @@ export function assertSourceSize(bytes: number, path: string): void {
   if (bytes > MAX_SOURCE_BYTES) throw new Error(`SOURCE_TOO_LARGE: ${path} exceeds 8 MiB`);
 }
 
-export { getSourcePosition } from '../utils/source-position';
+import { getSourcePosition, lineStarts, assertSafeOffset } from '../utils/source-position';
+export { getSourcePosition, lineStarts, assertSafeOffset };
 
 export async function readSourceSnapshot(path: string): Promise<{ snapshot: SourceSnapshot; content: string }> {
   const filePath = resolve(path);

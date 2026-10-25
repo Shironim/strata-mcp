@@ -69,8 +69,13 @@ Add Strata to your MCP client (`mcp.json` or `claude_desktop_config.json`):
 
 | Command | Primary Aliases | Description & Key Options |
 |---|---|---|
-| `strata find <pattern>` | `search`, `usage`, `rule` | AST structural code search across `.vue`, `.astro`, `.tsx`, `.jsx`, `.ts`. Options: `--component <name>`, `--rule <yaml>`, `--lang <hint>`, `--scope <template\|script\|both>`, `--mode <ast\|auto\|literal>` |
+| `strata find --map [dir]` | — | Bounded frontend inventory without source bodies. Options: `--limit <n>`, `--offset <n>`, `--exclude-dirs <dirs>` |
+| `strata find <pattern>` | `search`, `usage`, `rule` | AST structural code search across `.vue`, `.astro`, `.tsx`, `.jsx`, `.ts`, `.js`. Options: `--component <name>`, `--rule <yaml>`, `--lang <hint>`, `--scope <template\|script\|both>`, `--mode <ast\|auto\|literal>` |
+| `strata inspect <file> --view map` | `contract` | Exact parser/AST regions, line coordinates, hash-bound source refs, diagnostics, and coverage. `--limit <n>` bounds top-level symbols. |
+| `strata inspect <file> --view source --source-ref <json>` | `contract` | Retrieves a raw source slice from a ref returned by map; rejects stale file content. `--source-range <start:end>` supports inclusive lines and optional `--expected-hash`. |
 | `strata inspect <file>` | `contract` | Deep component inspection (props, emits, slots, state). Options: `--symbol <name>`, `--audit-events`, `--outline`, `--infer-props`, `--resolve-globals` |
+
+Recommended workflow: `strata find --map src --json`, choose a file, run `strata inspect <file> --view map --json`, then pass a returned region's `ref` to `--view source`. The map locates code; it does not certify implementation correctness. Unsupported analysis and truncated results remain explicit.
 | `strata tree [entry]` | `component-tree` | Inspect component hierarchy tree or upward blast radius. Options: `--route <path>`, `--depth <n>`, `--direction <downward\|upward>`, `--alias <map>`, `--scope-filter <scope>` |
 | `strata trace <state-id>` | `impact` | Trace reactive state blast radius and consumers. Options: `--depth <n>`, `--direction <consumers\|dependencies\|both>`, `--role <all\|mutators\|readers>` |
 | `strata audit [dir]` | `routes`, `apis`, `dead-state`, `archetype` | Audit frontend architecture. Options: `--target <target>`, `--threshold <n>`, `--exemplar <file>`, `--ignore <globs>`, `--include-pages`, `--scope-path <dir>`, `--exclude-dirs <dirs>` |

@@ -89,6 +89,25 @@ export async function detectRouteFramework(
     existsSync(join(normTarget, 'next.config.js')) ||
     existsSync(join(normTarget, 'next.config.mjs')) ||
     existsSync(join(normTarget, 'next.config.ts'));
+  const hasSvelteConfig =
+    existsSync(join(normTarget, 'svelte.config.js')) ||
+    existsSync(join(normTarget, 'svelte.config.ts'));
+
+  // SvelteKit routes
+  for (const candidate of [join(normTarget, 'src', 'routes'), join(normTarget, 'routes')]) {
+    if (existsSync(candidate)) {
+      const files = await collectFiles(candidate);
+      const hasSvelteKitFile = files.some(
+        (f) =>
+          basename(f).startsWith('+page.') ||
+          basename(f).startsWith('+layout.') ||
+          basename(f).startsWith('+server.')
+      );
+      if (hasSvelteKitFile || hasSvelteConfig) {
+        return { framework: 'sveltekit', baseDir: candidate };
+      }
+    }
+  }
 
   // 1. Nuxt 3 & 4 (if nuxt config or app.vue is present)
   if (hasNuxtConfig) {
@@ -228,6 +247,7 @@ export async function detectRouteFramework(
   if (baseName === 'app') return { framework: 'next-app', baseDir: normTarget };
   if (baseName === 'pages') return { framework: 'next-pages', baseDir: normTarget };
   if (baseName === 'views') return { framework: 'vue-router', baseDir: normTarget };
+  if (baseName === 'routes') return { framework: 'sveltekit', baseDir: normTarget };
 
   return { framework: 'unknown', baseDir: normTarget };
 }
@@ -736,6 +756,86 @@ async function scanAstroPages(baseDir: string): Promise<RouteInfo[]> {
 }
 
 /**
+ * Scans a SvelteKit routes directory (+page.svelte, +layout.svelte, +server.ts) and builds its route manifest.
+ */
+async function scanSvelteKitRoutes(baseDir: string): Promise<RouteInfo[]> {
+  const files = await collectFiles(baseDir);
+  const routes: RouteInfo[] = [];
+
+  // Index all layout files
+  const layoutFiles = files.filter((f) => {
+    const b = basename(f);
+    return b.startsWith('+layout.') && (b.endsWith('.svelte') || b.endsWith('.ts') || b.endsWith('.js'));
+  });
+
+  function getLayoutChain(fileDir: string): string[] {
+    const chain: string[] = [];
+    let cur = fileDir;
+    while (cur.startsWith(baseDir)) {
+      const match = layoutFiles.find((l) => dirname(l) === cur && basename(l).endsWith('.svelte'));
+      if (match) {
+        chain.unshift(normalize(match));
+      }
+      if (cur === baseDir) break;
+      cur = dirname(cur);
+    }
+    return chain;
+  }
+
+  for (const file of files) {
+    const b = basename(file);
+    if (!b.startsWith('+page.') && !b.startsWith('+layout.') && !b.startsWith('+server.')) {
+      continue;
+    }
+
+    const fileDir = dirname(file);
+    const relDir = relative(baseDir, fileDir).replace(/\\/g, '/');
+
+    const rawSegments = relDir ? relDir.split('/').filter(Boolean) : [];
+    const routeGroups: string[] = [];
+    const urlSegments: string[] = [];
+
+    for (const seg of rawSegments) {
+      if (seg.startsWith('(') && seg.endsWith(')')) {
+        routeGroups.push(seg);
+      } else {
+        urlSegments.push(seg);
+      }
+    }
+
+    const routePath = '/' + urlSegments.join('/');
+    const normalizedPath = routePath === '//' ? '/' : routePath || '/';
+
+    let routeType: RouteType = 'page';
+    let handlers: string[] | undefined;
+
+    if (b.startsWith('+page.')) {
+      routeType = 'page';
+    } else if (b.startsWith('+layout.')) {
+      routeType = 'layout';
+    } else if (b.startsWith('+server.')) {
+      routeType = 'api';
+      handlers = await extractApiHandlers(file);
+    }
+
+    const layouts = routeType === 'page' ? getLayoutChain(fileDir) : undefined;
+
+    routes.push({
+      path: normalizedPath,
+      filePath: normalize(file),
+      type: routeType,
+      framework: 'sveltekit',
+      params: extractRouteParams(normalizedPath),
+      ...(handlers ? { handlers } : {}),
+      ...(layouts && layouts.length > 0 ? { layouts } : {}),
+      ...(routeGroups.length > 0 ? { routeGroups } : {}),
+    });
+  }
+
+  return routes;
+}
+
+/**
  * Scans an Inertia.js Pages directory and builds its route manifest.
  */
 async function scanInertiaPages(baseDir: string): Promise<RouteInfo[]> {
@@ -912,6 +1012,7 @@ export async function scanRoutes(options: ScanRoutesOptions): Promise<RouteManif
         join(effectiveScanTarget, 'src', 'pages'),
         join(effectiveScanTarget, 'pages'),
       ],
+      'sveltekit': [join(effectiveScanTarget, 'src', 'routes'), join(effectiveScanTarget, 'routes')],
     };
     const candidates = hintCandidates[options.frameworkHint];
     if (candidates) {
@@ -942,6 +1043,9 @@ export async function scanRoutes(options: ScanRoutesOptions): Promise<RouteManif
       break;
     case 'vue-router':
       routes = await scanVueRouterPages(baseDir);
+      break;
+    case 'sveltekit':
+      routes = await scanSvelteKitRoutes(baseDir);
       break;
     case 'next-pages':
     default: {
