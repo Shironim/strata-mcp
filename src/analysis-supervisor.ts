@@ -28,7 +28,13 @@ export interface SupervisorOptions {
 /** Linux process-group accounting includes native ast-grep descendants. */
 export function analysisGroupRss(group: number): number {
   let bytes = 0;
-  for (const pid of readdirSync('/proc')) {
+  let pids: string[] = [];
+  try {
+    pids = readdirSync('/proc');
+  } catch {
+    return 0;
+  }
+  for (const pid of pids) {
     if (!/^\d+$/.test(pid)) continue;
     try {
       const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
@@ -37,7 +43,8 @@ export function analysisGroupRss(group: number): number {
       const status = readFileSync(`/proc/${pid}/status`, 'utf8');
       bytes += Number(status.match(/^VmRSS:\s+(\d+)/m)?.[1] ?? 0) * 1024;
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT' && (err as NodeJS.ErrnoException).code !== 'ESRCH') throw err;
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT' && code !== 'ESRCH' && code !== 'EACCES' && code !== 'EPERM') throw err;
     }
   }
   return bytes;
