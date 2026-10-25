@@ -1,8 +1,12 @@
 import { readSourceFile } from './source-file';
 import { existsSync, promises as fs } from 'node:fs';
 import { basename, dirname, extname, isAbsolute, join, normalize, relative, resolve } from 'node:path';
+import ts from 'typescript';
+import { parseSfc } from './splitter';
 import { collectFiles } from './collector';
 import type {
+  NextSegmentConfigContract,
+  NuxtPageMetaContract,
   ResolveRouteEntryOptions,
   ResolveRouteEntryResult,
   RouteFramework,
@@ -97,6 +101,14 @@ export async function detectRouteFramework(
       if (existsSync(candidate)) {
         return { framework: 'nuxt', baseDir: candidate };
       }
+    }
+    if (
+      existsSync(join(normTarget, 'server', 'api')) ||
+      existsSync(join(normTarget, 'server', 'routes')) ||
+      existsSync(join(normTarget, 'src', 'server', 'api')) ||
+      existsSync(join(normTarget, 'src', 'server', 'routes'))
+    ) {
+      return { framework: 'nuxt', baseDir: normTarget };
     }
   }
 
@@ -221,6 +233,118 @@ export async function detectRouteFramework(
 }
 
 /**
+ * Extracts Next.js App Router segment configuration via TypeScript AST.
+ */
+export function extractNextSegmentConfig(content: string): NextSegmentConfigContract | undefined {
+  if (
+    !content.includes('dynamic') &&
+    !content.includes('revalidate') &&
+    !content.includes('runtime') &&
+    !content.includes('preferredRegion') &&
+    !content.includes('dynamicParams') &&
+    !content.includes('fetchCache') &&
+    !content.includes('maxDuration') &&
+    !content.includes('generateMetadata') &&
+    !content.includes('generateStaticParams')
+  ) {
+    return undefined;
+  }
+
+  let sourceFile: ts.SourceFile;
+  try {
+    sourceFile = ts.createSourceFile('segment-config.ts', content, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  } catch {
+    return undefined;
+  }
+
+  let dynamic: string | undefined;
+  let dynamicParams: boolean | undefined;
+  let revalidate: number | false | undefined;
+  let fetchCache: string | undefined;
+  let runtime: string | undefined;
+  let preferredRegion: string | string[] | undefined;
+  let maxDuration: number | undefined;
+  let hasGenerateMetadata = false;
+  let hasGenerateStaticParams = false;
+
+  for (const statement of sourceFile.statements) {
+    if (ts.isFunctionDeclaration(statement)) {
+      const isExported = statement.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword);
+      if (isExported && statement.name) {
+        if (statement.name.text === 'generateMetadata') hasGenerateMetadata = true;
+        if (statement.name.text === 'generateStaticParams') hasGenerateStaticParams = true;
+      }
+    }
+
+    if (ts.isVariableStatement(statement)) {
+      const isExported = statement.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword);
+      if (!isExported) continue;
+
+      for (const decl of statement.declarationList.declarations) {
+        if (!ts.isIdentifier(decl.name) || !decl.initializer) continue;
+        const name = decl.name.text;
+        const init = decl.initializer;
+
+        if (name === 'generateMetadata') hasGenerateMetadata = true;
+        if (name === 'generateStaticParams') hasGenerateStaticParams = true;
+
+        if (name === 'dynamic' && ts.isStringLiteral(init)) {
+          dynamic = init.text;
+        } else if (name === 'dynamicParams') {
+          if (init.kind === ts.SyntaxKind.TrueKeyword) dynamicParams = true;
+          if (init.kind === ts.SyntaxKind.FalseKeyword) dynamicParams = false;
+        } else if (name === 'revalidate') {
+          if (init.kind === ts.SyntaxKind.FalseKeyword) {
+            revalidate = false;
+          } else if (ts.isNumericLiteral(init)) {
+            revalidate = Number(init.text);
+          }
+        } else if (name === 'fetchCache' && ts.isStringLiteral(init)) {
+          fetchCache = init.text;
+        } else if (name === 'runtime' && ts.isStringLiteral(init)) {
+          runtime = init.text;
+        } else if (name === 'preferredRegion') {
+          if (ts.isStringLiteral(init)) {
+            preferredRegion = init.text;
+          } else if (ts.isArrayLiteralExpression(init)) {
+            preferredRegion = init.elements
+              .filter(ts.isStringLiteral)
+              .map((el) => el.text);
+          }
+        } else if (name === 'maxDuration' && ts.isNumericLiteral(init)) {
+          maxDuration = Number(init.text);
+        }
+      }
+    }
+  }
+
+  const hasAny =
+    dynamic !== undefined ||
+    dynamicParams !== undefined ||
+    revalidate !== undefined ||
+    fetchCache !== undefined ||
+    runtime !== undefined ||
+    preferredRegion !== undefined ||
+    maxDuration !== undefined ||
+    hasGenerateMetadata ||
+    hasGenerateStaticParams;
+
+  if (!hasAny) return undefined;
+
+  return {
+    ...(dynamic !== undefined ? { dynamic } : {}),
+    ...(dynamicParams !== undefined ? { dynamicParams } : {}),
+    ...(revalidate !== undefined ? { revalidate } : {}),
+    ...(fetchCache !== undefined ? { fetchCache } : {}),
+    ...(runtime !== undefined ? { runtime } : {}),
+    ...(preferredRegion !== undefined ? { preferredRegion } : {}),
+    ...(maxDuration !== undefined ? { maxDuration } : {}),
+    ...(hasGenerateMetadata ? { hasGenerateMetadata } : {}),
+    ...(hasGenerateStaticParams ? { hasGenerateStaticParams } : {}),
+  };
+}
+
+/**
  * Scans a Next.js App Router directory and builds its route manifest.
  */
 async function scanNextAppRouter(baseDir: string): Promise<RouteInfo[]> {
@@ -247,50 +371,192 @@ async function scanNextAppRouter(baseDir: string): Promise<RouteInfo[]> {
     return chain;
   }
 
+  const validExts = ['.tsx', '.jsx', '.js', '.ts'];
+
   for (const file of files) {
     const b = basename(file);
     const ext = extname(file);
+    if (!validExts.includes(ext)) continue;
+
     const fileDir = dirname(file);
     const relDir = relative(baseDir, fileDir).replace(/\\/g, '/');
 
-    // Filter out route groups e.g. (marketing), (auth) from URL path
-    const urlSegments = relDir
-      ? relDir
-          .split('/')
-          .filter((seg) => !seg.startsWith('(') || !seg.endsWith(')'))
-      : [];
+    // Parse route groups, parallel slots, and intercepting segments
+    const rawSegments = relDir ? relDir.split('/').filter(Boolean) : [];
+    const routeGroups: string[] = [];
+    let parallelSlot: string | undefined;
+    let intercepting: string | undefined;
 
-    if (b.startsWith('page.') && ['.tsx', '.jsx', '.js', '.ts'].includes(ext)) {
-      const routePath = '/' + urlSegments.join('/');
-      routes.push({
-        path: routePath === '//' ? '/' : routePath || '/',
-        filePath: normalize(file),
-        type: 'page',
-        framework: 'next-app',
-        params: extractRouteParams(routePath),
-        layouts: getLayoutChain(fileDir),
-      });
-    } else if (b.startsWith('route.') && ['.ts', '.js'].includes(ext)) {
-      const routePath = '/' + urlSegments.join('/');
-      const handlers = await extractApiHandlers(file);
-      routes.push({
-        path: routePath === '//' ? '/' : routePath || '/',
-        filePath: normalize(file),
-        type: 'api',
-        framework: 'next-app',
-        params: extractRouteParams(routePath),
-        handlers,
-      });
+    const urlSegments: string[] = [];
+    for (const seg of rawSegments) {
+      if (seg.startsWith('(') && seg.endsWith(')')) {
+        routeGroups.push(seg);
+      } else if (seg.startsWith('@')) {
+        parallelSlot = seg;
+      } else if (seg.startsWith('(.)') || seg.startsWith('(..)') || seg.startsWith('(...)')) {
+        intercepting = seg;
+        const actual = seg.replace(/^\(\.{1,3}\)/, '');
+        if (actual) urlSegments.push(actual);
+      } else {
+        urlSegments.push(seg);
+      }
     }
+
+    const routePath = '/' + urlSegments.join('/');
+    const normalizedPath = routePath === '//' ? '/' : routePath || '/';
+
+    // Determine convention type
+    let routeType: RouteType | undefined;
+    if (b.startsWith('page.')) {
+      routeType = 'page';
+    } else if (b.startsWith('route.') && ['.ts', '.js'].includes(ext)) {
+      routeType = 'api';
+    } else if (b.startsWith('layout.')) {
+      routeType = 'layout';
+    } else if (b.startsWith('loading.')) {
+      routeType = 'loading';
+    } else if (b.startsWith('error.') || b.startsWith('global-error.')) {
+      routeType = 'error';
+    } else if (b.startsWith('not-found.')) {
+      routeType = 'not-found';
+    } else if (b.startsWith('template.')) {
+      routeType = 'template';
+    } else if (b.startsWith('default.')) {
+      routeType = 'default';
+    }
+
+    if (!routeType) continue;
+
+    let segmentConfig: NextSegmentConfigContract | undefined;
+    let handlers: string[] | undefined;
+
+    try {
+      const content = await readSourceFile(file);
+      segmentConfig = extractNextSegmentConfig(content);
+      if (routeType === 'api') {
+        handlers = await extractApiHandlers(file);
+      }
+    } catch {
+      // Ignore read errors
+    }
+
+    routes.push({
+      path: normalizedPath,
+      filePath: normalize(file),
+      type: routeType,
+      framework: 'next-app',
+      params: extractRouteParams(normalizedPath),
+      layouts: getLayoutChain(fileDir),
+      ...(handlers ? { handlers } : {}),
+      ...(routeGroups.length > 0 ? { routeGroups } : {}),
+      ...(parallelSlot ? { parallelSlot } : {}),
+      ...(intercepting ? { intercepting } : {}),
+      ...(segmentConfig ? { nextSegmentConfig: segmentConfig } : {}),
+    });
   }
 
   return routes;
 }
 
 /**
- * Scans a Nuxt 3 pages directory and builds its route manifest.
+ * Extracts definePageMeta configuration from a Nuxt page file via TypeScript AST.
+ */
+export function extractNuxtPageMeta(content: string): NuxtPageMetaContract | undefined {
+  if (!content.includes('definePageMeta')) return undefined;
+
+  let scriptCode = content;
+  if (content.includes('<script')) {
+    try {
+      const parsed = parseSfc(content);
+      scriptCode = parsed.scriptSetup?.content || parsed.script?.content || content;
+    } catch {
+      scriptCode = content;
+    }
+  }
+
+  const sourceFile = ts.createSourceFile('page.ts', scriptCode, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+
+  let metaObjNode: ts.ObjectLiteralExpression | undefined;
+
+  function findMeta(node: ts.Node) {
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'definePageMeta') {
+      const arg = node.arguments[0];
+      if (arg && ts.isObjectLiteralExpression(arg)) {
+        metaObjNode = arg;
+        return;
+      }
+    }
+    if (!metaObjNode) {
+      ts.forEachChild(node, findMeta);
+    }
+  }
+
+  findMeta(sourceFile);
+  if (!metaObjNode) return undefined;
+
+  const customMetaKeys: string[] = [];
+  let layout: string | false | undefined = undefined;
+  let middleware: string[] | undefined = undefined;
+  let alias: string[] | undefined = undefined;
+  let keepalive: boolean | undefined = undefined;
+  let pageTransition: boolean | undefined = undefined;
+
+  for (const prop of metaObjNode.properties) {
+    if (!ts.isPropertyAssignment(prop) && !ts.isShorthandPropertyAssignment(prop)) continue;
+    const name = prop.name.getText(sourceFile);
+    if (!customMetaKeys.includes(name)) {
+      customMetaKeys.push(name);
+    }
+
+    if (ts.isPropertyAssignment(prop)) {
+      const init = prop.initializer;
+      if (name === 'layout') {
+        if (init.kind === ts.SyntaxKind.FalseKeyword) {
+          layout = false;
+        } else if (ts.isStringLiteral(init)) {
+          layout = init.text;
+        }
+      } else if (name === 'middleware') {
+        if (ts.isStringLiteral(init)) {
+          middleware = [init.text];
+        } else if (ts.isArrayLiteralExpression(init)) {
+          middleware = init.elements
+            .filter((el): el is ts.StringLiteral => ts.isStringLiteral(el))
+            .map((el) => el.text);
+        }
+      } else if (name === 'alias') {
+        if (ts.isStringLiteral(init)) {
+          alias = [init.text];
+        } else if (ts.isArrayLiteralExpression(init)) {
+          alias = init.elements
+            .filter((el): el is ts.StringLiteral => ts.isStringLiteral(el))
+            .map((el) => el.text);
+        }
+      } else if (name === 'keepalive') {
+        if (init.kind === ts.SyntaxKind.TrueKeyword) keepalive = true;
+        else if (init.kind === ts.SyntaxKind.FalseKeyword) keepalive = false;
+      } else if (name === 'pageTransition') {
+        if (init.kind === ts.SyntaxKind.TrueKeyword) pageTransition = true;
+        else if (init.kind === ts.SyntaxKind.FalseKeyword) pageTransition = false;
+      }
+    }
+  }
+
+  return {
+    ...(layout !== undefined ? { layout } : {}),
+    ...(middleware ? { middleware } : {}),
+    ...(alias ? { alias } : {}),
+    ...(keepalive !== undefined ? { keepalive } : {}),
+    ...(pageTransition !== undefined ? { pageTransition } : {}),
+    customMetaKeys,
+  };
+}
+
+/**
+ * Scans a Nuxt 3/4 pages directory and builds its route manifest.
  */
 async function scanNuxtPages(baseDir: string, projectRoot: string): Promise<RouteInfo[]> {
+  if (!existsSync(baseDir)) return [];
   const files = await collectFiles(baseDir);
   const routes: RouteInfo[] = [];
 
@@ -317,14 +583,17 @@ async function scanNuxtPages(baseDir: string, projectRoot: string): Promise<Rout
 
     let pageLayouts: string[] | undefined;
     let explicitlyDisabledLayout = false;
+    let pageMeta: NuxtPageMetaContract | undefined;
+
     try {
       const content = await readSourceFile(file);
-      if (/layout:\s*false\b/.test(content)) {
+      pageMeta = extractNuxtPageMeta(content);
+
+      if (pageMeta?.layout === false || /layout:\s*false\b/.test(content)) {
         explicitlyDisabledLayout = true;
       } else {
-        const layoutMatch = content.match(/layout:\s*['"]([^'"]+)['"]/);
-        if (layoutMatch) {
-          const layoutName = layoutMatch[1];
+        const layoutName = typeof pageMeta?.layout === 'string' ? pageMeta.layout : content.match(/layout:\s*['"]([^'"]+)['"]/)?.[1];
+        if (layoutName) {
           const customCandidates = [
             join(projectRoot, 'app', 'layouts', `${layoutName}.vue`),
             join(projectRoot, 'src', 'app', 'layouts', `${layoutName}.vue`),
@@ -352,7 +621,81 @@ async function scanNuxtPages(baseDir: string, projectRoot: string): Promise<Rout
       framework: 'nuxt',
       params: extractRouteParams(routePath),
       layouts: pageLayouts,
+      ...(pageMeta ? { nuxtPageMeta: pageMeta } : {}),
     });
+  }
+
+  return routes;
+}
+
+/**
+ * Scans Nitro server API routes (server/api/** and server/routes/**).
+ */
+export async function scanNuxtNitroRoutes(projectRoot: string): Promise<RouteInfo[]> {
+  const routes: RouteInfo[] = [];
+
+  const candidateDirs = [
+    { dir: join(projectRoot, 'server', 'api'), prefix: '/api' },
+    { dir: join(projectRoot, 'src', 'server', 'api'), prefix: '/api' },
+    { dir: join(projectRoot, 'server', 'routes'), prefix: '' },
+    { dir: join(projectRoot, 'src', 'server', 'routes'), prefix: '' },
+  ];
+
+  for (const { dir, prefix } of candidateDirs) {
+    if (!existsSync(dir)) continue;
+
+    const files = await collectFiles(dir);
+    for (const file of files) {
+      const ext = extname(file);
+      if (!['.ts', '.js', '.mjs'].includes(ext)) continue;
+
+      const rel = relative(dir, file).replace(/\\/g, '/');
+      const methodSuffixMatch = rel.match(/\.(get|post|put|patch|delete|head|options)\.(?:ts|js|mjs)$/i);
+      let handlers: string[] = [];
+
+      let cleanRel = rel;
+      if (methodSuffixMatch) {
+        handlers = [methodSuffixMatch[1].toUpperCase()];
+        cleanRel = rel.slice(0, methodSuffixMatch.index);
+      } else {
+        cleanRel = rel.replace(/\.(?:ts|js|mjs)$/, '');
+      }
+
+      let routePath = prefix + '/' + cleanRel;
+      routePath = routePath.replace(/\/+/g, '/');
+      if (routePath.endsWith('/index')) {
+        routePath = routePath.slice(0, -6) || '/';
+      }
+
+      // If method was not specified by suffix, detect via AST/content or default ALL
+      if (handlers.length === 0) {
+        try {
+          const content = await readSourceFile(file);
+          const assertMatch = content.match(/assertMethod\s*\(\s*event\s*,\s*(?:'([^']+)'|"([^"]+)"|\[([\s\S]*?)\])\)/);
+          if (assertMatch) {
+            if (assertMatch[1] || assertMatch[2]) {
+              handlers = [(assertMatch[1] || assertMatch[2]).toUpperCase()];
+            } else if (assertMatch[3]) {
+              handlers = Array.from(assertMatch[3].matchAll(/['"]([^'"]+)['"]/g)).map(m => m[1].toUpperCase());
+            }
+          }
+        } catch {
+          // ignore
+        }
+        if (handlers.length === 0) {
+          handlers = ['ALL'];
+        }
+      }
+
+      routes.push({
+        path: routePath,
+        filePath: normalize(file),
+        type: 'api',
+        framework: 'nuxt',
+        params: extractRouteParams(routePath),
+        handlers,
+      });
+    }
   }
 
   return routes;
@@ -585,9 +928,12 @@ export async function scanRoutes(options: ScanRoutesOptions): Promise<RouteManif
     case 'next-app':
       routes = await scanNextAppRouter(baseDir);
       break;
-    case 'nuxt':
+    case 'nuxt': {
       routes = await scanNuxtPages(baseDir, effectiveScanTarget);
+      const nitroRoutes = await scanNuxtNitroRoutes(effectiveScanTarget);
+      routes.push(...nitroRoutes);
       break;
+    }
     case 'astro':
       routes = await scanAstroPages(baseDir);
       break;
