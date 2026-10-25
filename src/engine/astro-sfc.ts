@@ -1,14 +1,11 @@
 import type { AstroDescriptor, SfcBlock, SourceLocation } from '../types';
+import { getSourcePosition } from './source-file';
 
 /**
  * Calculates 1-based line and column from an offset within a string.
  */
 function getLineAndColumn(text: string, offset: number): { line: number; column: number } {
-  const prefix = text.slice(0, offset);
-  const lines = prefix.split('\n');
-  const line = lines.length;
-  const lastLine = lines[lines.length - 1];
-  const column = (lastLine ? lastLine.length : 0) + 1;
+  const { line, column } = getSourcePosition(text, offset);
   return { line, column };
 }
 
@@ -58,6 +55,7 @@ export function parseAstro(rawContent: string, filename: string = 'anonymous.ast
           end: { ...getLineAndColumn(rawContent, rawContent.length), offset: rawContent.length },
         },
       },
+      diagnostics: [{ code: 'ASTRO_FRONTMATTER_OPENING_FENCE', message: 'Opening frontmatter fence is not followed by a newline.' }],
     };
   }
 
@@ -82,6 +80,7 @@ export function parseAstro(rawContent: string, filename: string = 'anonymous.ast
           end: { ...getLineAndColumn(rawContent, rawContent.length), offset: rawContent.length },
         },
       },
+      diagnostics: [{ code: 'ASTRO_FRONTMATTER_UNCLOSED', message: 'Frontmatter opening fence has no closing fence.' }],
     };
   }
 

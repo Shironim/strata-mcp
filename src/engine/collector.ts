@@ -4,6 +4,8 @@ import { findProjectRoot } from './path-resolver';
 import { extname, join, relative, resolve, dirname, sep } from 'node:path';
 
 export const SUPPORTED_SCRIPT_EXTENSIONS = new Set(['.ts', '.js', '.tsx', '.jsx', '.mjs', '.cjs']);
+export const SUPPORTED_SFC_EXTENSIONS = new Set(['.vue', '.astro', '.svelte']);
+export const SUPPORTED_FRONTEND_EXTENSIONS = new Set([...SUPPORTED_SFC_EXTENSIONS, ...SUPPORTED_SCRIPT_EXTENSIONS]);
 
 export const IGNORED_DIRS = new Set([
   // Version Control & IDEs
@@ -168,7 +170,7 @@ export async function* iterateFiles(
         yield* walk(fullPath, contexts);
       } else if (entry.isFile()) {
         const ext = extname(entry.name).toLowerCase();
-        if (ext === '.vue' || ext === '.astro' || SUPPORTED_SCRIPT_EXTENSIONS.has(ext)) {
+        if (SUPPORTED_FRONTEND_EXTENSIONS.has(ext)) {
           yield fullPath;
         }
       }

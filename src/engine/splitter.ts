@@ -23,7 +23,7 @@ function createLocation(loc: {
  * Parses raw Vue Single File Component (SFC) content into structured blocks.
  */
 export function parseSfc(rawContent: string, filename: string = 'anonymous.vue'): SfcDescriptor {
-  const { descriptor } = parse(rawContent, {
+  const { descriptor, errors } = parse(rawContent, {
     filename,
     sourceMap: false,
     pad: false,
@@ -85,6 +85,10 @@ export function parseSfc(rawContent: string, filename: string = 'anonymous.vue')
     scriptSetup,
     styles,
     customBlocks,
+    diagnostics: errors.map((error, index) => ({
+      code: `VUE_SFC_PARSE_${index + 1}`,
+      message: error.message,
+    })),
   };
 }
 

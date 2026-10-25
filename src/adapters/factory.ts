@@ -2,6 +2,8 @@ import { extname } from 'node:path';
 import type { DocumentAdapter } from './types';
 import { VueDocumentAdapter } from './vue';
 import { AstroDocumentAdapter } from './astro';
+import { SvelteDocumentAdapter } from './svelte';
+import { JsxDocumentAdapter } from './jsx';
 import { ScriptDocumentAdapter } from './script';
 
 /**
@@ -16,6 +18,14 @@ export function createDocumentAdapter(filePath: string, content: string): Docume
 
   if (ext === '.astro') {
     return new AstroDocumentAdapter(filePath, content);
+  }
+
+  if (ext === '.svelte') {
+    return new SvelteDocumentAdapter(filePath, content);
+  }
+
+  if (ext === '.tsx' || ext === '.jsx') {
+    return new JsxDocumentAdapter(filePath, content);
   }
 
   return new ScriptDocumentAdapter(filePath, content);
