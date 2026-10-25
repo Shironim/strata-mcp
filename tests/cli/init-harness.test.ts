@@ -87,12 +87,16 @@ test('handleStrataInit initializes project, agent artifacts, and harness config'
 
   const rule = readFileSync(join(root, 'CLAUDE.md'), 'utf8');
   expect(rule).toBe(STRATA_FRONTEND_RULE);
+  expect(rule).toContain('Map First, Read Selectively');
+  expect(rule).toContain('source_ref');
   for (const content of [rule, STRATA_INSPECT_SKILL, STRATA_INSTRUCTIONS]) {
     expect(content).not.toMatch(/get_routes|get_api_contracts/);
     for (const tool of TOOL_CATALOG) expect(content).toContain(tool.name);
     expect(content).toContain('routes');
     expect(content).toContain('api-contracts');
   }
+  expect(STRATA_INSTRUCTIONS).toContain('Map first, read selectively');
+  expect(STRATA_INSTRUCTIONS).toContain('source_ref');
 
   const gitignore = readFileSync(join(root, '.gitignore'), 'utf8');
   expect(gitignore).toContain('.strata/');

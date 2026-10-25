@@ -15,6 +15,7 @@ Prioritaskan penggunaan tool MCP \`strata-mcp\` daripada melakukan pencarian tek
 
 | Skenario Frontend | Tool Strata-MCP | Keuntungan vs Pembacaan File Mentah |
 |---|---|---|
+| Memulai investigasi fitur atau komponen | \`find_code(action: "map")\`, lalu \`inspect_component(view: "map")\` | Pilih file/region dari peta tanpa memasukkan seluruh source; ambil source hanya melalui \`source_ref\` terikat hash. |
 | Memahami props, emits, slots, exposed methods, dan state komponen | \`inspect_component\` | Menghasilkan kontrak publik ringkas (10-30 baris) tanpa membanjiri konteks dengan ratusan baris template HTML. |
 | Memetakan hierarki pohon komponen atau relasi parent-child | \`get_component_tree\` | Menampilkan topologi komponen (\`downward\`/\`down\` atau \`upward\`/\`up\`), props drilling, dan import dependencies secara instan. |
 | Mencari struktur template, binding variabel, atau ekspresi | \`find_code\` | AST structural pattern matching yang kebal terhadap perbedaan spasi, pemformatan baris, dan penamaan lokal. |
@@ -25,6 +26,8 @@ Prioritaskan penggunaan tool MCP \`strata-mcp\` daripada melakukan pencarian tek
 | Perencanaan refactoring prop/event/model/slot pada seluruh consumer | \`generate_patch_plan\` | Rekomendasi patch AST presisi (\`rename_prop\`, \`remove_prop\`, \`rename_event\`, \`rename_model\`, \`rename_slot\`) tanpa resiko regresi manual. |
 
 ## 3. Protocol & Execution Principles
+- **Map First, Read Selectively:** Inventarisasi scope dengan \`find_code(action: "map")\`, petakan file yang dipilih dengan \`inspect_component(view: "map")\`, lalu salin \`source_ref\` yang dikembalikan untuk \`view: "source"\`. Jangan menyusun nomor baris atau offset sendiri.
+- **Evidence Boundaries:** Peta dan range menunjukkan lokasi source, bukan kualitas atau kebenaran implementasinya. Perlakukan framework dan path hints sebagai kandidat/konvensi; periksa parser diagnostics, status, dan coverage sebelum menyimpulkan hasil.
 - **No Blind Probing:** Jangan membaca komponen dari baris 1 jika hanya butuh mengetahui prop atau event emit. Gunakan \`inspect_component\`.
 - **Pre-Refactor Verification:** Sebelum mengubah prop, emit, v-model, atau slot komponen, selalu periksa consumers menggunakan \`get_component_tree\` (\`direction: "upward"\`) atau \`generate_patch_plan\`.
 `;
@@ -175,6 +178,7 @@ description: Deep frontend AST component inspection, component trees, reactivity
 # /strata-inspect
 
 Gunakan tool \`strata-mcp\` untuk inspeksi struktural frontend daripada membaca file utuh:
+- Mulai dengan \`find_code(action: "map")\` untuk memilih file, lalu \`inspect_component(view: "map")\` dan \`view: "source"\` dengan \`source_ref\` yang dikembalikan.
 - \`inspect_component\`: Kontrak publik komponen (props, emits, slots) & precision slicing fungsi.
 - \`get_component_tree\`: Hierarki pohon komponen dan props drilling (upward/downward).
 - \`find_code\`: Pencarian pola kode berbasis AST struktural.

@@ -1,7 +1,11 @@
 #!/usr/bin/env bun
-import { readSourceFile } from './engine/source-file';
+import { getSourceLineRange, readSourceFile, readSourceRef, readSourceSnapshot } from './engine/source-file';
+import { mapSourceFile } from './engine/source-map';
+import { mapFrontendScope } from './engine/frontend-map';
+import { extractComponentOutline, formatOutlineAsText } from './engine/outline';
+import { findCodeTool } from './tools/find-code';
 import { existsSync, promises as fs } from 'node:fs';
-import { findCode, findCodeByRule, findComponentUsage, formatMatchesAsText } from './engine/search';
+import { findCodeByRule, findComponentUsage, formatMatchesAsText } from './engine/search';
 import { extractComponentContract, formatContractAsText } from './engine/contract';
 import { sliceSymbol, formatSymbolSliceAsText } from './engine/slicer';
 import { auditEventHandlers, formatEventHandlerAuditAsText } from './engine/reactivity';
@@ -35,12 +39,14 @@ import {
   VALID_AUDIT_TARGETS,
 } from './engine/path-resolver';
 import { STRATA_VERSION } from './version';
+import { checkRuntimeVersion, formatUpdateNotice, type RuntimeVersionMeta } from './utils/version-check';
 import { StrataTelemetry, formatSummaryAsText } from './engine/telemetry';
 import type { PatchRefactorType, RouteFramework } from './types';
 
-export function printRootHelp() {
+export function printRootHelp(versionMeta?: RuntimeVersionMeta) {
+  const notice = versionMeta ? formatUpdateNotice(versionMeta) : null;
   console.log(`
-strata — Frontend Structural Code Search & Intelligence CLI
+strata — Frontend Structural Code Search & Intelligence CLI${notice ? `\n\n${notice}` : ''}
 
 Usage:
   strata <command> [options]
@@ -52,8 +58,8 @@ Operational Commands:
   sync [dir]                     Synchronize project cache and index database
 
 Core Analytical Commands (Aligned with 6 MCP Tools):
-  find, search <pattern>         AST code search (--component, --rule, --lang)
-  inspect, contract <file>       Inspect component contract (--symbol, --audit-events)
+  find, search <pattern>         AST code search (--component, --rule, --lang, --mode)
+  inspect, contract <file>       Inspect component (--view map|source, --symbol, --outline)
   tree, component-tree [entry]   Inspect component hierarchy tree (--route, --direction)
   trace, impact <state-id>       Trace state blast radius and consumers (--depth, --role)
   audit [dir]                    Audit frontend architecture (--target, --threshold)
@@ -101,6 +107,10 @@ Options:
   --rule <rule-yaml>         Execute custom ast-grep YAML rule (alias for "rule")
   --lang <lang>              Target language hint (default: ts)
   --scope <scope>            Scope: template | script | both (default: both)
+  --mode <mode>              Pattern mode: ast | auto | literal
+  --map                      Return bounded frontend inventory (no source bodies)
+  --limit <n>                Result/page size (default: 100 for map, 200 for search)
+  --offset <n>               Zero-based inventory offset
   -p, --path <path>          Target directory or file (default: .)
   --json                     Output raw JSON
 `);
@@ -114,7 +124,11 @@ Usage: strata inspect <component-file> [options]
 Inspect component contract (props, emits, slots, state, dependencies).
 
 Options:
+  --view <map|source>        Map regions or return a map-selected source slice
+  --source-ref <json>        Source ref copied from --view map output
+  --source-range <start:end> Return inclusive source lines (optional --expected-hash)
   --symbol <name>            Extract specific symbol or function with line numbers
+  --outline                  Extract component symbol outline
   --audit-events             Audit template-to-script event handler integrity
   --json                     Output raw JSON
 `);
@@ -266,6 +280,8 @@ export const BOOLEAN_FLAGS = new Set([
   'inferProps',
   'resolve-globals',
   'resolveGlobals',
+  'map',
+  'outline',
 ]);
 
 export function parseStringFlag(val: unknown): string | undefined {
@@ -367,15 +383,21 @@ export async function main(argv: string[] = process.argv.slice(2)) {
 
   if (flags.version) {
     console.log(`strata v${STRATA_VERSION}`);
+    const meta = await checkRuntimeVersion({ timeoutMs: 1200 });
+    const notice = formatUpdateNotice(meta);
+    if (notice) {
+      console.log(notice);
+    }
     return;
   }
 
   if (flags.help || !command || command === 'help') {
     const targetCommand = command === 'help' ? positional[1] : command;
+    const meta = await checkRuntimeVersion({ timeoutMs: 1000 });
     if (targetCommand) {
       printCommandHelp(targetCommand);
     } else {
-      printRootHelp();
+      printRootHelp(meta);
     }
     return;
   }
@@ -423,6 +445,20 @@ export async function main(argv: string[] = process.argv.slice(2)) {
     }
 
     if (command === 'search' || command === 'find') {
+      if (flags.map) {
+        const map = await mapFrontendScope((positional[1] && !positional[1].startsWith('-')) ? positional[1] : targetPath, {
+          limit: parseSafePositiveInt(flags.limit, 100),
+          offset: parseSafePositiveInt(flags.offset, 0) ?? 0,
+          excludeDirs: parseStringList(flags['exclude-dirs'] ?? flags.excludeDirs),
+        });
+        console.log(isJson ? JSON.stringify(map, null, 2) : [
+          `Frontend map: ${map.root}`,
+          `Status: ${map.status}; ${map.coverage.returnedFiles}/${map.coverage.knownFiles} files returned`,
+          `Framework candidates: ${map.frameworkCandidates.map(item => item.name).join(', ') || 'unknown'}`,
+          ...map.files.map(file => `- ${file.path}${file.roleHint ? ` [${file.roleHint}; heuristic]` : ''}`),
+        ].join('\n'));
+        return;
+      }
       const componentName = parseStringFlag(flags.component ?? flags.componentName);
       if (componentName) {
         const usageTarget = (positional[1] && !positional[1].startsWith('-')) ? positional[1] : targetPath;
@@ -469,17 +505,16 @@ export async function main(argv: string[] = process.argv.slice(2)) {
       }
 
       const searchTarget = (positional[2] && !positional[2].startsWith('-')) ? positional[2] : targetPath;
-      const matches = await findCode({
+      const result = await findCodeTool.handler({
+        path: searchTarget,
         pattern,
-        targetPath: searchTarget,
         language: parseStringFlag(flags.lang) || 'ts',
+        mode: flags.mode || 'ast',
+        max_results: parseSafePositiveInt(flags.limit, 200),
+        format: isJson ? 'json' : 'text',
       });
-
-      if (isJson) {
-        console.log(JSON.stringify(matches, null, 2));
-      } else {
-        console.log(formatMatchesAsText(matches));
-      }
+      if (result.isError) throw new Error(result.content[0]?.text ?? 'Search failed');
+      console.log(result.content[0]?.text ?? '');
       return;
     }
 
@@ -547,6 +582,38 @@ export async function main(argv: string[] = process.argv.slice(2)) {
         process.exit(1);
       }
 
+      const view = parseStringFlag(flags.view);
+      if (view === 'map') {
+        const map = await mapSourceFile(filePath, { maxRegions: parseSafePositiveInt(flags.limit, 200) });
+        console.log(isJson ? JSON.stringify(map, null, 2) : [
+          `${map.framework} map: ${map.snapshot.file}`, `Status: ${map.status}`,
+          ...map.regions.map(region => `- ${region.kind}${region.name ? ` ${region.name}` : ''}: lines ${region.lineRange ? `${region.lineRange.startLine}-${region.lineRange.endLine}` : 'empty'}; ref ${region.ref.sha256.slice(0, 12)}:${region.ref.startOffset}-${region.ref.endOffset}`),
+          ...map.diagnostics.map(item => `! ${item.code}: ${item.message}`),
+          ...(map.coverage?.truncated || map.coverage?.childRegionsTruncated ? [`Truncated: ${JSON.stringify(map.coverage)}`] : []),
+        ].join('\n'));
+        return;
+      }
+      if (view === 'source') {
+        const rawRef = parseStringFlag(flags['source-ref'] ?? flags.sourceRef);
+        if (!rawRef) throw new Error('--view source requires --source-ref <json> returned by --view map');
+        const ref = JSON.parse(rawRef);
+        const source = await readSourceRef(filePath, ref);
+        console.log(isJson ? JSON.stringify({ file: filePath, source_ref: ref, source }, null, 2) : source);
+        return;
+      }
+      const rawRange = parseStringFlag(flags['source-range'] ?? flags.sourceRange);
+      if (rawRange) {
+        const match = rawRange.match(/^(\d+):(\d+)$/);
+        if (!match) throw new Error('--source-range must use <start:end> inclusive line numbers');
+        const { snapshot, content } = await readSourceSnapshot(filePath);
+        const selected = getSourceLineRange(snapshot, content, Number(match[1]), Number(match[2]));
+        const expectedHash = parseStringFlag(flags['expected-hash'] ?? flags.expectedHash);
+        if (expectedHash && expectedHash !== snapshot.sha256) throw new Error('STALE_SOURCE_REF: expected_hash does not match current source');
+        const source = await readSourceRef(filePath, selected.ref);
+        console.log(isJson ? JSON.stringify({ file: filePath, source_ref: selected.ref, source }, null, 2) : source);
+        return;
+      }
+
       const symbol = parseStringFlag(flags.symbol ?? flags['symbol-name']);
       if (symbol) {
         const sliced = await sliceSymbol({ path: filePath, symbolName: symbol });
@@ -569,6 +636,12 @@ export async function main(argv: string[] = process.argv.slice(2)) {
         } else {
           console.log(formatEventHandlerAuditAsText(auditRes));
         }
+        return;
+      }
+
+      if (flags.outline) {
+        const outline = await extractComponentOutline(filePath, { path: filePath });
+        console.log(isJson ? JSON.stringify(outline, null, 2) : formatOutlineAsText(outline));
         return;
       }
 

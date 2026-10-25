@@ -211,5 +211,33 @@ describe('CLI Companion (Task 6 DoD)', () => {
     expect(patchHelp).toContain('rename_prop');
     expect(patchHelp).toContain('--old <name>');
   });
+
+  it('supports CLI workspace mapping and map-selected source slices', async () => {
+    const logs: string[] = [];
+    const originalLog = console.log;
+    console.log = (...args) => logs.push(args.join(' '));
+    const file = join(FIXTURES_DIR, 'NewButton.vue');
+    try {
+      await main(['find', '--map', FIXTURES_DIR, '--json', '--limit', '1']);
+      await main(['inspect', file, '--view', 'map', '--json']);
+      await main(['find', 'defineProps', '--mode', 'literal', '--path', FIXTURES_DIR]);
+    } finally {
+      console.log = originalLog;
+    }
+    const inventory = JSON.parse(logs[0]);
+    const fileMap = JSON.parse(logs[1]);
+    expect(logs[2]).toContain('NewButton.vue');
+    expect(inventory.coverage.returnedFiles).toBe(1);
+    expect(fileMap.regions.length).toBeGreaterThan(0);
+    const selected = fileMap.regions[0];
+    const sliceLogs: string[] = [];
+    console.log = (...args) => sliceLogs.push(args.join(' '));
+    try {
+      await main(['inspect', file, '--view', 'source', '--source-ref', JSON.stringify(selected.ref)]);
+    } finally {
+      console.log = originalLog;
+    }
+    expect(sliceLogs[0]).toBeTruthy();
+  });
 });
 
