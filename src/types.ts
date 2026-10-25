@@ -13,9 +13,127 @@ export interface Position {
   offset: number;
 }
 
+export type SourcePosition = Position;
+
 export interface SourceLocation {
   start: Position;
   end: Position;
+}
+
+export type SourceSpan = SourceLocation;
+
+export interface SourceSnapshot {
+  file: string;
+  sha256: string;
+  encoding: 'utf-8';
+  offsetUnit: 'utf16';
+  lineCount: number;
+}
+
+export interface SourceRef {
+  sha256: string;
+  startOffset: number;
+  endOffset: number;
+}
+
+export interface SourceLineRange {
+  startLine: number;
+  endLine: number;
+}
+
+export type EvidenceBasis = 'source' | 'derived' | 'heuristic';
+export type EvidenceResolution = 'resolved' | 'candidate' | 'unresolved' | 'unsupported';
+
+export interface Evidence {
+  basis: EvidenceBasis;
+  resolution: EvidenceResolution;
+  method: string;
+  reason?: string;
+  refs?: SourceRef[];
+}
+
+export interface SourceRegion {
+  kind: string;
+  name?: string;
+  attributes?: Record<string, string | boolean>;
+  span: SourceSpan;
+  lineRange: SourceLineRange | null;
+  ref: SourceRef;
+  evidence: Evidence;
+  children?: SourceRegion[];
+}
+
+export interface SourceMapDiagnostic {
+  code: string;
+  message: string;
+  span?: SourceSpan;
+}
+
+export type FrontendFramework =
+  | 'vue'
+  | 'nuxt'
+  | 'react'
+  | 'next'
+  | 'astro'
+  | 'svelte'
+  | 'solid'
+  | 'unknown';
+
+export type DocumentType =
+  | 'vue-sfc'
+  | 'astro-sfc'
+  | 'svelte-sfc'
+  | 'jsx-module'
+  | 'script-module'
+  | 'vue'
+  | 'astro'
+  | 'script';
+
+export type PatternCategory =
+  | 'reactivity'
+  | 'data-flow'
+  | 'rendering'
+  | 'ssr-hydration'
+  | 'boundary'
+  | 'performance'
+  | 'legacy-syntax';
+
+export interface CanonicalRemediation {
+  summary: string;
+  rationale: string;
+  canonicalCode: string;
+  referenceDoc?: string;
+}
+
+export interface CodePatternDiagnostic {
+  ruleId: string;                  // e.g. 'vue/no-prop-mutation', 'solid/no-props-destructure'
+  framework: FrontendFramework;
+  category: PatternCategory;
+  severity: 'error' | 'warning' | 'info';
+  fact: {
+    snippet: string;
+    span: SourceSpan;
+    lineRange: SourceLineRange | null;
+    ref: SourceRef;                // Terikat SHA-256 snapshot
+  };
+  smell: {
+    title: string;
+    explanation: string;           // Mengapa pola di dalam kode tersebut salah/berbahaya
+  };
+  canon: CanonicalRemediation;     // Bagaimana kode seharusnya ditulis sesuai standar
+  evidence: Evidence;              // basis: 'source' | 'derived' | 'heuristic'
+}
+
+export interface SourceMapResult {
+  snapshot: SourceSnapshot;
+  documentType: DocumentType;
+  framework: FrontendFramework | string;
+  status: 'complete' | 'partial';
+  regions: SourceRegion[];
+  diagnostics: SourceMapDiagnostic[];
+  supported: string[];
+  unsupported: string[];
+  coverage?: { totalRegions: number; returnedRegions: number; truncated: boolean; childRegionsTruncated: boolean };
 }
 
 export interface SfcBlock {
@@ -36,6 +154,7 @@ export interface SfcDescriptor {
   scriptSetup: SfcBlock | null;
   styles: SfcBlock[];
   customBlocks: SfcBlock[];
+  diagnostics?: Array<{ code: string; message: string }>;
 }
 
 export interface AstroDescriptor {
@@ -43,6 +162,7 @@ export interface AstroDescriptor {
   rawContent: string;
   frontmatter: SfcBlock | null;
   template: SfcBlock | null;
+  diagnostics?: Array<{ code: string; message: string }>;
 }
 
 export interface RawMatch {
@@ -104,6 +224,7 @@ export interface RenderBoundaryInfo {
   directive?: string;
   isClientHydrated: boolean;
   violations?: BoundaryViolation[];
+  evidence?: Evidence;
 }
 
 export interface ComponentVariantsInfo {
@@ -269,9 +390,30 @@ export interface BidirectionalTransportContract {
   transportRisks: string[];
 }
 
+export interface NuxtPageMetaContract {
+  layout?: string | false;
+  middleware?: string[];
+  alias?: string[];
+  keepalive?: boolean;
+  pageTransition?: boolean;
+  customMetaKeys: string[];
+}
+
+export interface NextSegmentConfigContract {
+  dynamic?: 'auto' | 'force-dynamic' | 'error' | 'force-static' | string;
+  dynamicParams?: boolean;
+  revalidate?: false | 0 | number;
+  fetchCache?: 'auto' | 'default-cache' | 'only-cache' | 'force-cache' | 'force-no-store' | 'default-no-store' | 'only-no-store' | string;
+  runtime?: 'nodejs' | 'edge' | string;
+  preferredRegion?: string | string[];
+  maxDuration?: number;
+  hasGenerateMetadata?: boolean;
+  hasGenerateStaticParams?: boolean;
+}
+
 export interface ComponentContract {
   component: string;
-  framework: 'vue' | 'react' | 'astro' | 'unknown' | 'vue-composable';
+  framework: FrontendFramework | 'vue-composable' | string;
   filePath: string;
   props: ComponentPropContract[];
   emits: ComponentEmitContract[];
@@ -289,9 +431,12 @@ export interface ComponentContract {
   layoutStructure?: ComponentLayoutStructure;
   transportContract?: BidirectionalTransportContract;
   reactivitySmells?: ReactivitySmell[];
+  patternDiagnostics?: CodePatternDiagnostic[];
   boundaryContracts?: BoundaryContract[];
   formContracts?: FormContract[];
   symbolOutline?: ComponentSymbolOutline;
+  nuxtPageMeta?: NuxtPageMetaContract;
+  nextSegmentConfig?: NextSegmentConfigContract;
 }
 
 export interface ContractOptions {
@@ -318,6 +463,7 @@ export interface ComponentTreeNode {
   warning?: string;
   depth: number;
   passedProps?: PassedPropInfo[];
+  transitiveBoundary?: 'client-hydrated (inherited from parent)' | string;
   children: ComponentTreeNode[];
 }
 
@@ -380,6 +526,8 @@ export interface EngineMetadata {
   engine?: 'in-memory-ast' | 'sqlite-graph-cache' | 'ast-grep' | 'template-similarity-comparator' | string;
   durationMs?: number;
   cached?: boolean;
+  syncGeneration?: number;
+  configFingerprint?: string;
   version?: string;
   framework?: string;
 }
@@ -420,7 +568,15 @@ export type RouteFramework =
   | 'vue-router'
   | 'unknown';
 
-export type RouteType = 'page' | 'api' | 'layout';
+export type RouteType =
+  | 'page'
+  | 'api'
+  | 'layout'
+  | 'loading'
+  | 'error'
+  | 'not-found'
+  | 'template'
+  | 'default';
 
 export interface RouteParam {
   name: string;
@@ -435,6 +591,11 @@ export interface RouteInfo {
   params: RouteParam[];
   layouts?: string[];
   handlers?: string[];
+  nuxtPageMeta?: NuxtPageMetaContract;
+  routeGroups?: string[];
+  parallelSlot?: string;
+  intercepting?: string;
+  nextSegmentConfig?: NextSegmentConfigContract;
 }
 
 export interface RouteManifestResult {
@@ -464,6 +625,9 @@ export interface SyncStats {
   unchanged: number;
   total: number;
   durationMs: number;
+  syncGeneration: number;
+  configFingerprint: string;
+  cacheHit: boolean;
 }
 
 export interface StateImpactConsumer {
@@ -623,8 +787,9 @@ export interface EventHandlerInfo {
   event: string;
   handlerName: string;
   line: number;
-  status: 'valid' | 'broken' | 'inline-expression';
-  source?: 'local-function' | 'composable-return' | 'prop' | 'import' | 'unresolved';
+  status: 'valid' | 'broken' | 'inline-expression' | 'candidate';
+  source?: 'local-function' | 'composable-return' | 'prop' | 'import' | 'unresolved' | 'nuxt-auto-import';
+  evidence?: Evidence;
 }
 
 export interface DeadHandlerInfo {
@@ -640,6 +805,7 @@ export interface EventHandlerAuditResult {
   validHandlers: EventHandlerInfo[];
   brokenHandlers: EventHandlerInfo[];
   inlineExpressions: EventHandlerInfo[];
+  candidateHandlers?: EventHandlerInfo[];
   deadScriptHandlers: DeadHandlerInfo[];
   _meta?: EngineMetadata;
 }
