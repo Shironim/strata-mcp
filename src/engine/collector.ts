@@ -1,8 +1,8 @@
-import { promises as fs } from 'node:fs';
+import { promises as fs, type Dirent } from 'node:fs';
 import ignore, { type Ignore } from 'ignore';
 import { findProjectRoot } from './path-resolver';
 import { extname, join, relative, resolve, dirname, sep } from 'node:path';
-import { NON_DOMAIN_DIRS, detectCodeDomains } from './domains';
+import { NON_DOMAIN_DIRS, detectCodeDomains, isNonDomainFile } from './domains';
 
 export const SUPPORTED_SCRIPT_EXTENSIONS = new Set(['.ts', '.js', '.tsx', '.jsx', '.mjs', '.cjs']);
 export const SUPPORTED_SFC_EXTENSIONS = new Set(['.vue', '.astro', '.svelte']);
@@ -58,14 +58,17 @@ export const IGNORED_DIRS = new Set([
   '.playwright',
   'storybook-static',
 
-  // AI & Indexer Caches
-  '.codegraph',
+  // AI Agent Harnesses & Indexer Caches
+  '.agents',
+  '.gemini',
+  '.claude',
+  '.codex',
   '.codex-evidence',
+  '.codegraph',
+  '.opencode',
+  'opencode',
   '.strata',
   '.vue-ast',
-  '.gemini',
-  '.cursor',
-  '.continue',
 
   // Documentation & Non-Code Folders
   'docs',
@@ -122,7 +125,8 @@ async function loadIgnoreRules(dirPath: string): Promise<string[]> {
     try {
       rules.push(...(await fs.readFile(join(dirPath, file), 'utf8')).split('\n'));
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT' && code !== 'EACCES' && code !== 'EPERM') throw err;
     }
   }
   return rules;
@@ -210,6 +214,9 @@ export async function* iterateFiles(
         if (entry.isFile()) {
           const ext = extname(entry.name).toLowerCase();
           if (SUPPORTED_FRONTEND_EXTENSIONS.has(ext)) {
+            if (!options?.includeTests && isNonDomainFile(entry.name)) {
+              continue;
+            }
             yield join(dirPath, entry.name);
           }
         }
@@ -226,7 +233,16 @@ export async function* iterateFiles(
     if (options?.respectIgnoreFiles !== false) {
       contexts.push({ base: currentDir, matcher: ignore().add(await loadIgnoreRules(currentDir)) });
     }
-    const entries = await fs.readdir(currentDir, { withFileTypes: true });
+    let entries: Dirent[];
+    try {
+      entries = await fs.readdir(currentDir, { withFileTypes: true });
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'EACCES' || code === 'EPERM' || code === 'ENOENT') {
+        return;
+      }
+      throw err;
+    }
     for (const entry of entries) {
       const fullPath = join(currentDir, entry.name);
       const relPath = relative(dirPath, fullPath).replace(/\\/g, '/');
@@ -243,6 +259,9 @@ export async function* iterateFiles(
       } else if (entry.isFile()) {
         const ext = extname(entry.name).toLowerCase();
         if (SUPPORTED_FRONTEND_EXTENSIONS.has(ext)) {
+          if (!options?.includeTests && isNonDomainFile(entry.name)) {
+            continue;
+          }
           yield fullPath;
         }
       }

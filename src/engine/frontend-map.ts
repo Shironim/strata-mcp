@@ -29,6 +29,7 @@ export async function mapFrontendScope(path: string, options: { limit?: number; 
     coverage: { knownFiles: files.length, returnedFiles: selected.length, offset, limit, truncated: offset + selected.length < files.length, extensions },
     domainRoots: domainResolution.activeDomainRoots,
     domains: domainResolution.domains,
+    agentHarnesses: domainResolution.agentHarnesses,
     frameworkCandidates: frameworks,
     frameworkDetection: frameworks.length ? 'package-manifest dependencies; candidate only' : 'unknown (no matching package dependency found)',
     files: selected.map(file => {

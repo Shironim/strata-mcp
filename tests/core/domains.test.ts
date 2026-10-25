@@ -151,4 +151,158 @@ describe('Domain Code Detection & Multi-Nested Folder Traversal', () => {
     expect(classification.subdomain).toBe('Auth');
     expect(classification.layer).toBe('route-or-page');
   });
+
+  it('classifies Feature-Sliced Design (FSD) entities, widgets, and shared layers', () => {
+    const dummyRoot = '/workspace/app';
+
+    // Entity
+    const entityFile = '/workspace/app/src/entities/user/ui/UserAvatar.vue';
+    const entityClass = classifyFileDomain(entityFile, dummyRoot);
+    expect(entityClass.isDomainCode).toBe(true);
+    expect(entityClass.domain).toBe('user');
+    expect(entityClass.layer).toBe('component');
+
+    // Widget
+    const widgetFile = '/workspace/app/src/widgets/Sidebar/ui/Sidebar.tsx';
+    const widgetClass = classifyFileDomain(widgetFile, dummyRoot);
+    expect(widgetClass.isDomainCode).toBe(true);
+    expect(widgetClass.domain).toBe('Sidebar');
+    expect(widgetClass.layer).toBe('component');
+
+    // Shared UI
+    const sharedFile = '/workspace/app/src/shared/ui/Button.tsx';
+    const sharedClass = classifyFileDomain(sharedFile, dummyRoot);
+    expect(sharedClass.isDomainCode).toBe(true);
+    expect(sharedClass.domain).toBe('shared');
+    expect(sharedClass.subdomain).toBe('ui');
+    expect(sharedClass.layer).toBe('component');
+  });
+
+  it('classifies meta-framework special files for Next.js and SvelteKit', () => {
+    const dummyRoot = '/workspace/next-project';
+
+    // Next.js special files
+    expect(classifyFileDomain('/workspace/next-project/app/api/users/route.ts', dummyRoot).layer).toBe('service');
+    expect(classifyFileDomain('/workspace/next-project/app/actions.ts', dummyRoot).layer).toBe('action');
+    expect(classifyFileDomain('/workspace/next-project/middleware.ts', dummyRoot).layer).toBe('middleware');
+    expect(classifyFileDomain('/workspace/next-project/app/layout.tsx', dummyRoot).layer).toBe('layout');
+    expect(classifyFileDomain('/workspace/next-project/app/loading.tsx', dummyRoot).layer).toBe('route-or-page');
+
+    // SvelteKit special files
+    expect(classifyFileDomain('/workspace/next-project/src/routes/+page.svelte', dummyRoot).layer).toBe('route-or-page');
+    expect(classifyFileDomain('/workspace/next-project/src/routes/+layout.svelte', dummyRoot).layer).toBe('layout');
+    expect(classifyFileDomain('/workspace/next-project/src/routes/api/+server.ts', dummyRoot).layer).toBe('service');
+    expect(classifyFileDomain('/workspace/next-project/src/hooks.server.ts', dummyRoot).layer).toBe('middleware');
+  });
+
+  it('flags in-place test, storybook, and mock files as non-domain code', () => {
+    const dummyRoot = '/workspace/my-app';
+
+    const testFile = classifyFileDomain('/workspace/my-app/src/components/Button.test.tsx', dummyRoot);
+    expect(testFile.isDomainCode).toBe(false);
+
+    const specFile = classifyFileDomain('/workspace/my-app/src/components/Button.spec.ts', dummyRoot);
+    expect(specFile.isDomainCode).toBe(false);
+
+    const storyFile = classifyFileDomain('/workspace/my-app/src/components/Button.stories.tsx', dummyRoot);
+    expect(storyFile.isDomainCode).toBe(false);
+
+    const mockFile = classifyFileDomain('/workspace/my-app/src/services/api.mock.ts', dummyRoot);
+    expect(mockFile.isDomainCode).toBe(false);
+  });
+
+  it('detects monorepo workspace packages in apps/ and packages/', async () => {
+    tempDir = join(tmpdir(), `strata-monorepo-test-${Date.now()}`);
+    await fs.mkdir(tempDir, { recursive: true });
+
+    // apps/web/src/components/Hero.vue
+    const webCompDir = join(tempDir, 'apps', 'web', 'src', 'components');
+    await fs.mkdir(webCompDir, { recursive: true });
+    await fs.writeFile(join(webCompDir, 'Hero.vue'), '<template/>', 'utf8');
+
+    // packages/ui/src/Button.tsx
+    const uiPkgDir = join(tempDir, 'packages', 'ui', 'src');
+    await fs.mkdir(uiPkgDir, { recursive: true });
+    await fs.writeFile(join(uiPkgDir, 'Button.tsx'), 'export const Button = () => null;', 'utf8');
+
+    const resolution = await detectCodeDomains(tempDir);
+    expect(resolution.isStandardLayout).toBe(true);
+
+    const domainNames = resolution.domains.map((d) => d.name);
+    expect(domainNames).toContain('web');
+    expect(domainNames).toContain('ui');
+
+    const heroFile = join(webCompDir, 'Hero.vue');
+    const heroClass = classifyFileDomain(heroFile, tempDir);
+    expect(heroClass.isDomainCode).toBe(true);
+    expect(heroClass.packageScope).toBe('web');
+    expect(heroClass.domain).toBe('components');
+    expect(heroClass.layer).toBe('component');
+  });
+
+  it('detects and classifies AI agent harness configurations (.gemini, .agents, .claude, .codex, opencode)', async () => {
+    tempDir = join(tmpdir(), `strata-ai-harness-test-${Date.now()}`);
+    await fs.mkdir(tempDir, { recursive: true });
+
+    // Google Antigravity config
+    const geminiDir = join(tempDir, '.gemini', 'skills', 'strata');
+    await fs.mkdir(geminiDir, { recursive: true });
+    await fs.writeFile(join(geminiDir, 'SKILL.md'), '# Antigravity Skill', 'utf8');
+    await fs.writeFile(join(tempDir, 'GEMINI.md'), '# Gemini Rules', 'utf8');
+
+    // .agents (general) config
+    const agentsDir = join(tempDir, '.agents', 'rules');
+    await fs.mkdir(agentsDir, { recursive: true });
+    await fs.writeFile(join(agentsDir, 'rules.md'), '# General Agent Rules', 'utf8');
+    await fs.writeFile(join(tempDir, 'AGENTS.md'), '# Agents Instructions', 'utf8');
+
+    // Opencode folder config
+    const opencodeDir = join(tempDir, 'opencode', 'skills', 'strata-inspect');
+    await fs.mkdir(opencodeDir, { recursive: true });
+    await fs.writeFile(join(opencodeDir, 'SKILL.md'), '# OpenCode Skill', 'utf8');
+
+    // App code
+    const srcDir = join(tempDir, 'src');
+    await fs.mkdir(srcDir, { recursive: true });
+    await fs.writeFile(join(srcDir, 'App.vue'), '<template/>', 'utf8');
+
+    const resolution = await detectCodeDomains(tempDir);
+    expect(resolution.agentHarnesses.length).toBeGreaterThanOrEqual(3);
+
+    const harnessNames = resolution.agentHarnesses.map((h) => h.harness);
+    expect(harnessNames).toContain('Google Antigravity');
+    expect(harnessNames).toContain('.agents (general)');
+    expect(harnessNames).toContain('OpenCode');
+
+    const geminiHarness = resolution.agentHarnesses.find((h) => h.harness === 'Google Antigravity');
+    expect(geminiHarness?.hasRules).toBe(true);
+    expect(geminiHarness?.hasSkills).toBe(true);
+
+    // Classify file domain for harness files
+    const geminiSkillFile = join(geminiDir, 'SKILL.md');
+    const geminiClass = classifyFileDomain(geminiSkillFile, tempDir);
+    expect(geminiClass.isDomainCode).toBe(false);
+    expect(geminiClass.isHarnessConfig).toBe(true);
+    expect(geminiClass.harnessType).toBe('Google Antigravity');
+
+    const agentsRuleFile = join(agentsDir, 'rules.md');
+    const agentsClass = classifyFileDomain(agentsRuleFile, tempDir);
+    expect(agentsClass.isDomainCode).toBe(false);
+    expect(agentsClass.isHarnessConfig).toBe(true);
+    expect(agentsClass.harnessType).toBe('.agents (general)');
+
+    const opencodeSkillFile = join(opencodeDir, 'SKILL.md');
+    const opencodeClass = classifyFileDomain(opencodeSkillFile, tempDir);
+    expect(opencodeClass.isDomainCode).toBe(false);
+    expect(opencodeClass.isHarnessConfig).toBe(true);
+    expect(opencodeClass.harnessType).toBe('OpenCode');
+
+    // Ensure collectFiles ignores .gemini, .agents, and opencode folder by default
+    const collected = await collectFiles(tempDir);
+    expect(collected).toContain(join(srcDir, 'App.vue'));
+    expect(collected).not.toContain(geminiSkillFile);
+    expect(collected).not.toContain(agentsRuleFile);
+    expect(collected).not.toContain(opencodeSkillFile);
+  });
 });
+
