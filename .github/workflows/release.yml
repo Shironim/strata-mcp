@@ -58,6 +58,8 @@ jobs:
             dist/strata-darwin-arm64
             dist/strata-windows-x64.exe
             dist/checksums.txt
+            scripts/install.sh
+            scripts/install.ps1
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

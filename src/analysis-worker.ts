@@ -5,7 +5,7 @@ import { getLastKnownProjectRoot, setLastKnownProjectRoot } from './engine/path-
 import { ANALYSIS_LIMITS } from './analysis-supervisor';
 import type { ToolCallResponse } from './tools/types';
 
-async function main(): Promise<void> {
+export async function runWorker(outputPath = process.argv[2]): Promise<void> {
   let response: ToolCallResponse;
   let detectedRoot: string | undefined;
   try {
@@ -29,11 +29,11 @@ async function main(): Promise<void> {
   const output = JSON.stringify(payload);
   if (Buffer.byteLength(output) > ANALYSIS_LIMITS.responseBytes) {
     response = { isError: true, content: [{ type: 'text', text: 'RESPONSE_TOO_LARGE: maximum response is 8 MiB' }] };
-    writeFileSync(process.argv[2], JSON.stringify(response), { mode: 0o600 });
+    writeFileSync(outputPath, JSON.stringify(response), { mode: 0o600 });
     return;
   }
   // Regular files also work where sandboxed Bun socket writes are denied.
-  writeFileSync(process.argv[2], output, { mode: 0o600 });
+  writeFileSync(outputPath, output, { mode: 0o600 });
 }
 
-if (import.meta.main) main().then(() => process.exit(0), err => { console.error(String(err)); process.exit(1); });
+if (import.meta.main) runWorker().then(() => process.exit(0), err => { console.error(String(err)); process.exit(1); });

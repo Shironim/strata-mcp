@@ -14,7 +14,21 @@ Strata delivers token-efficient structural code intelligence across **Vue SFCs (
 
 ## Installation
 
-Install Strata globally using [Bun](https://bun.sh):
+### Option 1: Standalone Binary (Zero Dependencies — Linux, macOS, Windows)
+
+Install the compiled single-file binary directly without needing Bun or Node.js:
+
+**Linux & macOS:**
+```bash
+curl -fsSL https://raw.githubusercontent.com/Shironim/strata-mcp/master/scripts/install.sh | bash
+```
+
+**Windows (PowerShell):**
+```powershell
+irm https://raw.githubusercontent.com/Shironim/strata-mcp/master/scripts/install.ps1 | iex
+```
+
+### Option 2: Via Bun Package Manager
 
 ```bash
 bun add -g @dimassetoid/strata-mcp

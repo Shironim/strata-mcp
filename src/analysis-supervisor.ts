@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { mkdtempSync, writeFileSync, openSync, closeSync, rmSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ToolCallResponse } from './tools/types';
 
@@ -106,7 +106,12 @@ export class AnalysisSupervisor {
       writeFileSync(inputPath, job.input, { mode: 0o600 });
       fd = openSync(inputPath, 'r');
       return await new Promise<AnalysisResponse>((resolve, reject) => {
-        const child = spawn(process.execPath, [this.workerPath, outputPath], {
+        const execName = basename(process.execPath).toLowerCase().replace(/\.exe$/, '');
+        const isStandaloneBinary = execName !== 'bun' && execName !== 'node';
+        const workerArgs = isStandaloneBinary
+          ? ['__worker', outputPath]
+          : [this.workerPath, outputPath];
+        const child = spawn(process.execPath, workerArgs, {
           stdio: [fd!, 'pipe', 'pipe'], detached: process.platform !== 'win32',
           env: { ...process.env, TMPDIR: workDir, TMP: workDir, TEMP: workDir },
         });

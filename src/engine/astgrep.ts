@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { existsSync, promises as fs } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { tmpdir } from 'node:os';
+import { tmpdir, homedir } from 'node:os';
 import type { RawMatch } from '../types';
 
 /**
@@ -187,6 +187,13 @@ export function resolveAstGrepBinary(): string {
   // Tier 3b. Search walking up from current working directory
   const cwdMatch = searchDirectory(process.cwd());
   if (cwdMatch) return cwdMatch;
+
+  // Tier 3c. Standalone binary / installer locations (sibling or ~/.strata/bin)
+  const execSibling = join(dirname(process.execPath), isWin ? 'ast-grep.exe' : 'ast-grep');
+  if (existsSync(execSibling)) return execSibling;
+
+  const userStrataBin = join(homedir(), '.strata', 'bin', isWin ? 'ast-grep.exe' : 'ast-grep');
+  if (existsSync(userStrataBin)) return userStrataBin;
 
   // Tier 4: fallback to system PATH (graceful degradation handled by verify/execute)
   return isWin ? 'ast-grep.exe' : 'ast-grep';
