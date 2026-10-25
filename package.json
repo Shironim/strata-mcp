@@ -10,7 +10,8 @@
     "strata-mcp": "dist/mcp.js"
   },
   "files": [
-    "dist",
+    "dist/*.js",
+    "dist/*.d.ts",
     "src/types.ts",
     "scripts/postinstall.mjs"
   ],
