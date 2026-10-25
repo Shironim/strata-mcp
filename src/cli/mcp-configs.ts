@@ -4,19 +4,15 @@ import {
   STRATA_FRONTEND_RULE,
   STRATA_INSPECT_SKILL,
   STRATA_POST_WRITE_HOOK,
-  STRATA_CURSOR_RULE,
   STRATA_CLAUDE_COMMAND,
-  STRATA_GOOSEHINTS,
 } from './templates';
 
 export type AgentHarness =
+  | 'antigravity'
   | 'claude'
-  | 'cursor'
   | 'codex'
   | 'opencode'
-  | 'antigravity'
-  | 'goose'
-  | 'pi'
+  | 'agents'
   | 'all'
   | 'skip';
 
@@ -137,17 +133,23 @@ async function writeOpenCodeConfig(
   };
 
   const mcp = (base.mcp && typeof base.mcp === 'object' && !Array.isArray(base.mcp)) ? base.mcp : {};
-  const strataExists = Boolean(mcp.strata);
+  const servers = (mcp.servers && typeof mcp.servers === 'object' && !Array.isArray(mcp.servers)) ? mcp.servers : {};
+  const strataExists = Boolean(mcp.strata || servers.strata);
 
   if (strataExists && !force) {
     return { action: 'skipped' };
   }
 
-  mcp.strata = {
+  const strataServerDef = {
     type: 'local',
     command: ['strata', 'serve'],
+    enabled: true,
   };
 
+  // Support both official OpenCode schema (mcp.servers.strata) and root mcp.strata
+  mcp.strata = strataServerDef;
+  servers.strata = strataServerDef;
+  mcp.servers = servers;
   base.mcp = mcp;
 
   await fs.writeFile(filePath, `${JSON.stringify(base, null, 2)}\n`, 'utf8');
@@ -282,7 +284,7 @@ async function configureClaudeHooks(projectRoot: string): Promise<HarnessConfigR
       {
         type: 'command',
         command:
-          "sh -c 'ROOT=\".\"; if [ ! -f \"$ROOT/.agents/hooks/strata-post-write.sh\" ]; then ROOT=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\"; fi; if [ -f \"$ROOT/.agents/hooks/strata-post-write.sh\" ]; then exec \"$ROOT/.agents/hooks/strata-post-write.sh\" \"$CLAUDE_FILE_PATH\"; fi'",
+          "sh -c 'ROOT=\".\"; if [ ! -f \"$ROOT/.claude/hooks/strata-post-write.sh\" ] && [ ! -f \"$ROOT/.agents/hooks/strata-post-write.sh\" ]; then ROOT=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\"; fi; if [ -f \"$ROOT/.claude/hooks/strata-post-write.sh\" ]; then exec \"$ROOT/.claude/hooks/strata-post-write.sh\" \"$CLAUDE_FILE_PATH\"; elif [ -f \"$ROOT/.agents/hooks/strata-post-write.sh\" ]; then exec \"$ROOT/.agents/hooks/strata-post-write.sh\" \"$CLAUDE_FILE_PATH\"; fi'",
       },
     ],
   };
@@ -296,48 +298,6 @@ async function configureClaudeHooks(projectRoot: string): Promise<HarnessConfigR
   }
 
   return { harness: 'Claude Code', file: '.claude/settings.json', action: 'skipped' };
-}
-
-/**
- * Configures Cursor IDE postToolUse lifecycle hook to auto-sync Strata graph.
- */
-async function configureCursorHooks(projectRoot: string): Promise<HarnessConfigResult | null> {
-  const cursorDir = join(projectRoot, '.cursor');
-  if (!existsSync(cursorDir)) {
-    await fs.mkdir(cursorDir, { recursive: true });
-  }
-  const hooksPath = join(cursorDir, 'hooks.json');
-  const result = await readJsonConfigFile<Record<string, any>>(hooksPath);
-  if (result.status === 'malformed') {
-    console.error(`  ✕ Error: Malformed JSON in '.cursor/hooks.json': ${result.error}. Preserving existing file without modification.`);
-    return { harness: 'Cursor', file: '.cursor/hooks.json', action: 'failed', error: result.error };
-  }
-
-  const config = result.status === 'valid' ? result.data : { version: 1, hooks: {} };
-  config.version = config.version || 1;
-  config.hooks = (typeof config.hooks === 'object' && config.hooks !== null && !Array.isArray(config.hooks))
-    ? config.hooks
-    : {};
-  const postToolUse = Array.isArray(config.hooks.postToolUse) ? config.hooks.postToolUse : [];
-
-  const hasStrataHook = postToolUse.some((h: any) =>
-    JSON.stringify(h).includes('strata-post-write')
-  );
-
-  const canonicalHook = {
-    matcher: 'Write|Edit',
-    command:
-      "sh -c 'ROOT=\".\"; if [ ! -f \"$ROOT/.agents/hooks/strata-post-write.sh\" ]; then ROOT=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\"; fi; if [ -f \"$ROOT/.agents/hooks/strata-post-write.sh\" ]; then exec \"$ROOT/.agents/hooks/strata-post-write.sh\"; fi'",
-  };
-
-  if (!hasStrataHook) {
-    postToolUse.push(canonicalHook);
-    config.hooks.postToolUse = postToolUse;
-    await fs.writeFile(hooksPath, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
-    return { harness: 'Cursor', file: '.cursor/hooks.json', action: result.status === 'valid' ? 'updated' : 'created' };
-  }
-
-  return { harness: 'Cursor', file: '.cursor/hooks.json', action: 'skipped' };
 }
 
 /**
@@ -379,7 +339,112 @@ async function configureGeminiHooks(projectRoot: string): Promise<HarnessConfigR
 }
 
 /**
+ * Configures Codex postToolUse lifecycle hook in .codex/hooks.json.
+ */
+async function configureCodexHooks(projectRoot: string): Promise<HarnessConfigResult | null> {
+  const codexDir = join(projectRoot, '.codex');
+  if (!existsSync(codexDir)) {
+    await fs.mkdir(codexDir, { recursive: true });
+  }
+  const hooksPath = join(codexDir, 'hooks.json');
+  const result = await readJsonConfigFile<Record<string, any>>(hooksPath);
+  if (result.status === 'malformed') {
+    console.error(`  ✕ Error: Malformed JSON in '.codex/hooks.json': ${result.error}. Preserving existing file without modification.`);
+    return { harness: 'Codex', file: '.codex/hooks.json', action: 'failed', error: result.error };
+  }
+
+  const config = result.status === 'valid' ? result.data : {};
+  const hooks = (typeof config.hooks === 'object' && config.hooks !== null && !Array.isArray(config.hooks))
+    ? config.hooks
+    : {};
+  const postToolHooks = Array.isArray(hooks.PostToolUse) ? hooks.PostToolUse : [];
+  const hasStrataHook = postToolHooks.some((h: any) => JSON.stringify(h).includes('strata-post-write'));
+
+  if (!hasStrataHook) {
+    postToolHooks.push({
+      type: 'command',
+      matcher: 'write|edit|replace_file_content|write_to_file',
+      command: '.codex/hooks/strata-post-write.sh',
+    });
+    hooks.PostToolUse = postToolHooks;
+    config.hooks = hooks;
+    await fs.writeFile(hooksPath, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
+    return { harness: 'Codex', file: '.codex/hooks.json', action: result.status === 'valid' ? 'updated' : 'created' };
+  }
+
+  return { harness: 'Codex', file: '.codex/hooks.json', action: 'skipped' };
+}
+
+/**
+ * Configures OpenCode postToolUse lifecycle hook in opencode/hooks.json.
+ */
+async function configureOpenCodeHooks(projectRoot: string): Promise<HarnessConfigResult | null> {
+  const opencodeDir = join(projectRoot, 'opencode');
+  if (!existsSync(opencodeDir)) {
+    await fs.mkdir(opencodeDir, { recursive: true });
+  }
+  const hooksPath = join(opencodeDir, 'hooks.json');
+  const result = await readJsonConfigFile<Record<string, any>>(hooksPath);
+  if (result.status === 'malformed') {
+    console.error(`  ✕ Error: Malformed JSON in 'opencode/hooks.json': ${result.error}. Preserving existing file without modification.`);
+    return { harness: 'OpenCode', file: 'opencode/hooks.json', action: 'failed', error: result.error };
+  }
+
+  const config = result.status === 'valid' ? result.data : { hooks: [] };
+  const hooks = Array.isArray(config.hooks) ? config.hooks : [];
+  const hasStrataHook = hooks.some((h: any) => JSON.stringify(h).includes('strata-post-write'));
+
+  if (!hasStrataHook) {
+    hooks.push({
+      event: 'post_tool_use',
+      matcher: 'write|edit|replace_file_content|write_to_file',
+      command: 'opencode/hooks/strata-post-write.sh',
+    });
+    config.hooks = hooks;
+    await fs.writeFile(hooksPath, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
+    return { harness: 'OpenCode', file: 'opencode/hooks.json', action: result.status === 'valid' ? 'updated' : 'created' };
+  }
+
+  return { harness: 'OpenCode', file: 'opencode/hooks.json', action: 'skipped' };
+}
+
+/**
+ * Configures .agents general postToolUse lifecycle hook in .agents/hooks.json.
+ */
+async function configureAgentsHooks(projectRoot: string): Promise<HarnessConfigResult | null> {
+  const agentsDir = join(projectRoot, '.agents');
+  if (!existsSync(agentsDir)) {
+    await fs.mkdir(agentsDir, { recursive: true });
+  }
+  const hooksPath = join(agentsDir, 'hooks.json');
+  const result = await readJsonConfigFile<Record<string, any>>(hooksPath);
+  if (result.status === 'malformed') {
+    console.error(`  ✕ Error: Malformed JSON in '.agents/hooks.json': ${result.error}. Preserving existing file without modification.`);
+    return { harness: '.agents (general)', file: '.agents/hooks.json', action: 'failed', error: result.error };
+  }
+
+  const config = result.status === 'valid' ? result.data : { hooks: [] };
+  const hooks = Array.isArray(config.hooks) ? config.hooks : [];
+  const hasStrataHook = hooks.some((h: any) => JSON.stringify(h).includes('strata-post-write'));
+
+  if (!hasStrataHook) {
+    hooks.push({
+      event: 'post_tool_use',
+      matcher: 'write|edit|replace_file_content|write_to_file',
+      command: '.agents/hooks/strata-post-write.sh',
+    });
+    config.hooks = hooks;
+    await fs.writeFile(hooksPath, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
+    return { harness: '.agents (general)', file: '.agents/hooks.json', action: result.status === 'valid' ? 'updated' : 'created' };
+  }
+
+  return { harness: '.agents (general)', file: '.agents/hooks.json', action: 'skipped' };
+}
+
+/**
  * Configures local project MCP settings for selected agent harnesses.
+ * Exclusively supports: Antigravity (.gemini), Claude Code (.claude), Codex (.codex),
+ * Opencode (opencode/), and .agents (general).
  */
 export async function setupHarnessConfigs(
   projectRoot: string,
@@ -395,50 +460,7 @@ export async function setupHarnessConfigs(
     return results;
   }
 
-  // 1. Claude Code (.mcp.json & .claude/settings.json)
-  if (shouldApply('claude')) {
-    const file = join(projectRoot, '.mcp.json');
-    const res = await writeStandardMcpConfig(file, 'mcpServers', force);
-    const hookRes = await configureClaudeHooks(projectRoot);
-    if (res.action === 'failed') {
-      results.push({ harness: 'Claude Code', file: '.mcp.json', action: 'failed', error: res.error });
-    } else if (hookRes && hookRes.action === 'failed') {
-      results.push({ harness: 'Claude Code', file: '.claude/settings.json', action: 'failed', error: hookRes.error });
-    } else {
-      results.push({ harness: 'Claude Code', file: '.mcp.json', action: res.action });
-    }
-  }
-
-  // 2. Cursor (.cursor/mcp.json & .cursor/hooks.json)
-  if (shouldApply('cursor')) {
-    const file = join(projectRoot, '.cursor', 'mcp.json');
-    const res = await writeStandardMcpConfig(file, 'mcpServers', force);
-    const hookRes = await configureCursorHooks(projectRoot);
-    if (res.action === 'failed') {
-      results.push({ harness: 'Cursor', file: '.cursor/mcp.json', action: 'failed', error: res.error });
-    } else if (hookRes && hookRes.action === 'failed') {
-      results.push({ harness: 'Cursor', file: '.cursor/hooks.json', action: 'failed', error: hookRes.error });
-    } else {
-      results.push({ harness: 'Cursor', file: '.cursor/mcp.json', action: res.action });
-    }
-  }
-
-  // 3. Codex (.codex/config.toml) (INIT-06, INIT-10)
-  if (shouldApply('codex')) {
-    const codexDir = join(projectRoot, '.codex');
-    const tomlPath = join(codexDir, 'config.toml');
-    const res = appendTomlMcpServer(tomlPath, 'strata', 'strata', ['serve'], force);
-    results.push({ harness: 'Codex', file: '.codex/config.toml', action: res.action, error: res.error });
-  }
-
-  // 4. OpenCode (opencode.json)
-  if (shouldApply('opencode')) {
-    const file = join(projectRoot, 'opencode.json');
-    const res = await writeOpenCodeConfig(file, force);
-    results.push({ harness: 'OpenCode', file: 'opencode.json', action: res.action, error: res.error });
-  }
-
-  // 5. Google Antigravity (.gemini/mcp_config.json & .gemini/hooks.json)
+  // 1. Google Antigravity (.gemini/mcp_config.json & .gemini/hooks.json)
   if (shouldApply('antigravity')) {
     const geminiDir = join(projectRoot, '.gemini');
     if (!existsSync(geminiDir)) {
@@ -456,22 +478,61 @@ export async function setupHarnessConfigs(
     }
   }
 
-  // 6. Goose (.goose/mcp.json)
-  if (shouldApply('goose')) {
-    const file = join(projectRoot, '.goose', 'mcp.json');
+  // 2. Claude Code (.mcp.json & .claude/settings.json)
+  if (shouldApply('claude')) {
+    const file = join(projectRoot, '.mcp.json');
     const res = await writeStandardMcpConfig(file, 'mcpServers', force);
-    results.push({ harness: 'Goose', file: '.goose/mcp.json', action: res.action, error: res.error });
+    const hookRes = await configureClaudeHooks(projectRoot);
+    if (res.action === 'failed') {
+      results.push({ harness: 'Claude Code', file: '.mcp.json', action: 'failed', error: res.error });
+    } else if (hookRes && hookRes.action === 'failed') {
+      results.push({ harness: 'Claude Code', file: '.claude/settings.json', action: 'failed', error: hookRes.error });
+    } else {
+      results.push({ harness: 'Claude Code', file: '.mcp.json', action: res.action });
+    }
   }
 
-  // 7. Pi / Oh My Pi (.pi/mcp.json & .omp/mcp.json)
-  if (shouldApply('pi')) {
-    const piFile = join(projectRoot, '.pi', 'mcp.json');
-    const piRes = await writeStandardMcpConfig(piFile, 'mcpServers', force);
-    results.push({ harness: 'Pi', file: '.pi/mcp.json', action: piRes.action, error: piRes.error });
+  // 3. OpenAI Codex (.codex/config.toml & .codex/hooks.json)
+  if (shouldApply('codex')) {
+    const codexDir = join(projectRoot, '.codex');
+    const tomlPath = join(codexDir, 'config.toml');
+    const res = appendTomlMcpServer(tomlPath, 'strata', 'strata', ['serve'], force);
+    const hookRes = await configureCodexHooks(projectRoot);
+    if (res.action === 'failed') {
+      results.push({ harness: 'Codex', file: '.codex/config.toml', action: 'failed', error: res.error });
+    } else if (hookRes && hookRes.action === 'failed') {
+      results.push({ harness: 'Codex', file: '.codex/hooks.json', action: 'failed', error: hookRes.error });
+    } else {
+      results.push({ harness: 'Codex', file: '.codex/config.toml', action: res.action });
+    }
+  }
 
-    const ompFile = join(projectRoot, '.omp', 'mcp.json');
-    const ompRes = await writeStandardMcpConfig(ompFile, 'mcpServers', force);
-    results.push({ harness: 'Oh My Pi', file: '.omp/mcp.json', action: ompRes.action, error: ompRes.error });
+  // 4. OpenCode (opencode.json & opencode/hooks.json)
+  if (shouldApply('opencode')) {
+    const file = join(projectRoot, 'opencode.json');
+    const res = await writeOpenCodeConfig(file, force);
+    const hookRes = await configureOpenCodeHooks(projectRoot);
+    if (res.action === 'failed') {
+      results.push({ harness: 'OpenCode', file: 'opencode.json', action: 'failed', error: res.error });
+    } else if (hookRes && hookRes.action === 'failed') {
+      results.push({ harness: 'OpenCode', file: 'opencode/hooks.json', action: 'failed', error: hookRes.error });
+    } else {
+      results.push({ harness: 'OpenCode', file: 'opencode.json', action: res.action });
+    }
+  }
+
+  // 5. .agents (general) (.agents/mcp.json & .agents/hooks.json)
+  if (shouldApply('agents')) {
+    const file = join(projectRoot, '.agents', 'mcp.json');
+    const res = await writeStandardMcpConfig(file, 'mcpServers', force);
+    const hookRes = await configureAgentsHooks(projectRoot);
+    if (res.action === 'failed') {
+      results.push({ harness: '.agents (general)', file: '.agents/mcp.json', action: 'failed', error: res.error });
+    } else if (hookRes && hookRes.action === 'failed') {
+      results.push({ harness: '.agents (general)', file: '.agents/hooks.json', action: 'failed', error: hookRes.error });
+    } else {
+      results.push({ harness: '.agents (general)', file: '.agents/mcp.json', action: res.action });
+    }
   }
 
   return results;
@@ -532,6 +593,8 @@ async function writeDedicatedArtifact(
 
 /**
  * Generates per-harness rules, skills, and lifecycle hook scripts.
+ * Exclusively supports: Antigravity (.gemini), Claude Code (.claude), Codex (.codex),
+ * Opencode (opencode/), and .agents (general).
  */
 export async function setupHarnessArtifacts(
   projectRoot: string,
@@ -546,49 +609,7 @@ export async function setupHarnessArtifacts(
     results.push({ harness, file, action });
   };
 
-  // 1. Claude Code
-  if (shouldApply('claude')) {
-    const rAction = await writeMarkdownGuidance(join(projectRoot, 'CLAUDE.md'), STRATA_FRONTEND_RULE, force);
-    record('Claude Code', 'CLAUDE.md', rAction);
-
-    const cAction = await writeDedicatedArtifact(join(projectRoot, '.claude', 'commands', 'strata-inspect.md'), STRATA_CLAUDE_COMMAND, force);
-    record('Claude Code', '.claude/commands/strata-inspect.md', cAction);
-
-    const hAction = await writeDedicatedArtifact(join(projectRoot, '.agents', 'hooks', 'strata-post-write.sh'), STRATA_POST_WRITE_HOOK, force, 0o755);
-    record('Claude Code', '.agents/hooks/strata-post-write.sh', hAction);
-  }
-
-  // 2. Cursor
-  if (shouldApply('cursor')) {
-    const rAction = await writeDedicatedArtifact(join(projectRoot, '.cursor', 'rules', 'strata-frontend.mdc'), STRATA_CURSOR_RULE, force);
-    record('Cursor', '.cursor/rules/strata-frontend.mdc', rAction);
-
-    const hAction = await writeDedicatedArtifact(join(projectRoot, '.agents', 'hooks', 'strata-post-write.sh'), STRATA_POST_WRITE_HOOK, force, 0o755);
-    record('Cursor', '.agents/hooks/strata-post-write.sh', hAction);
-  }
-
-  // 3. Codex
-  if (shouldApply('codex')) {
-    const rAction = await writeMarkdownGuidance(join(projectRoot, 'AGENTS.md'), STRATA_FRONTEND_RULE, force);
-    record('Codex', 'AGENTS.md', rAction);
-  }
-
-  // 5. OpenCode
-  if (shouldApply('opencode')) {
-    const agAction = await writeMarkdownGuidance(join(projectRoot, 'AGENTS.md'), STRATA_FRONTEND_RULE, force);
-    record('OpenCode', 'AGENTS.md', agAction);
-
-    const rAction = await writeDedicatedArtifact(join(projectRoot, '.agents', 'rules', 'strata-frontend.md'), STRATA_FRONTEND_RULE, force);
-    record('OpenCode', '.agents/rules/strata-frontend.md', rAction);
-
-    const sAction = await writeDedicatedArtifact(join(projectRoot, '.agents', 'skills', 'strata-inspect', 'SKILL.md'), STRATA_INSPECT_SKILL, force);
-    record('OpenCode', '.agents/skills/strata-inspect/SKILL.md', sAction);
-
-    const hAction = await writeDedicatedArtifact(join(projectRoot, '.agents', 'hooks', 'strata-post-write.sh'), STRATA_POST_WRITE_HOOK, force, 0o755);
-    record('OpenCode', '.agents/hooks/strata-post-write.sh', hAction);
-  }
-
-  // 6. Google Antigravity (.gemini/)
+  // 1. Google Antigravity (.gemini/)
   if (shouldApply('antigravity')) {
     const gmAction = await writeMarkdownGuidance(join(projectRoot, 'GEMINI.md'), STRATA_FRONTEND_RULE, force);
     record('Google Antigravity', 'GEMINI.md', gmAction);
@@ -603,25 +624,70 @@ export async function setupHarnessArtifacts(
     record('Google Antigravity', '.gemini/hooks/strata-post-write.sh', hAction);
   }
 
-  // 7. Goose
-  if (shouldApply('goose')) {
-    const rAction = await writeMarkdownGuidance(join(projectRoot, '.goosehints'), STRATA_GOOSEHINTS, force);
-    record('Goose', '.goosehints', rAction);
+  // 2. Claude Code (.claude/)
+  if (shouldApply('claude')) {
+    const rAction = await writeMarkdownGuidance(join(projectRoot, 'CLAUDE.md'), STRATA_FRONTEND_RULE, force);
+    record('Claude Code', 'CLAUDE.md', rAction);
+
+    const ruleAction = await writeDedicatedArtifact(join(projectRoot, '.claude', 'rules', 'strata-frontend.md'), STRATA_FRONTEND_RULE, force);
+    record('Claude Code', '.claude/rules/strata-frontend.md', ruleAction);
+
+    const skillAction = await writeDedicatedArtifact(join(projectRoot, '.claude', 'skills', 'strata-inspect', 'SKILL.md'), STRATA_INSPECT_SKILL, force);
+    record('Claude Code', '.claude/skills/strata-inspect/SKILL.md', skillAction);
+
+    const cAction = await writeDedicatedArtifact(join(projectRoot, '.claude', 'commands', 'strata-inspect.md'), STRATA_CLAUDE_COMMAND, force);
+    record('Claude Code', '.claude/commands/strata-inspect.md', cAction);
+
+    const hAction = await writeDedicatedArtifact(join(projectRoot, '.claude', 'hooks', 'strata-post-write.sh'), STRATA_POST_WRITE_HOOK, force, 0o755);
+    record('Claude Code', '.claude/hooks/strata-post-write.sh', hAction);
   }
 
-  // 8. Pi / Oh My Pi
-  if (shouldApply('pi')) {
-    const rAction = await writeMarkdownGuidance(join(projectRoot, 'AGENTS.md'), STRATA_FRONTEND_RULE, force);
-    record('Pi / Oh My Pi', 'AGENTS.md', rAction);
+  // 3. OpenAI Codex (.codex/)
+  if (shouldApply('codex')) {
+    const agAction = await writeMarkdownGuidance(join(projectRoot, 'AGENTS.md'), STRATA_FRONTEND_RULE, force);
+    record('Codex', 'AGENTS.md', agAction);
 
-    const piSkillAction = await writeDedicatedArtifact(join(projectRoot, '.pi', 'skills', 'strata-inspect', 'SKILL.md'), STRATA_INSPECT_SKILL, force);
-    record('Pi', '.pi/skills/strata-inspect/SKILL.md', piSkillAction);
+    const rAction = await writeDedicatedArtifact(join(projectRoot, '.codex', 'rules', 'strata-frontend.md'), STRATA_FRONTEND_RULE, force);
+    record('Codex', '.codex/rules/strata-frontend.md', rAction);
 
-    const ompSkillAction = await writeDedicatedArtifact(join(projectRoot, '.omp', 'skills', 'strata-inspect', 'SKILL.md'), STRATA_INSPECT_SKILL, force);
-    record('Oh My Pi', '.omp/skills/strata-inspect/SKILL.md', ompSkillAction);
+    const sAction = await writeDedicatedArtifact(join(projectRoot, '.codex', 'skills', 'strata-inspect', 'SKILL.md'), STRATA_INSPECT_SKILL, force);
+    record('Codex', '.codex/skills/strata-inspect/SKILL.md', sAction);
+
+    const hAction = await writeDedicatedArtifact(join(projectRoot, '.codex', 'hooks', 'strata-post-write.sh'), STRATA_POST_WRITE_HOOK, force, 0o755);
+    record('Codex', '.codex/hooks/strata-post-write.sh', hAction);
   }
 
-  // 9. Skip / Fallback
+  // 4. OpenCode (opencode/)
+  if (shouldApply('opencode')) {
+    const agAction = await writeMarkdownGuidance(join(projectRoot, 'AGENTS.md'), STRATA_FRONTEND_RULE, force);
+    record('OpenCode', 'AGENTS.md', agAction);
+
+    const rAction = await writeDedicatedArtifact(join(projectRoot, 'opencode', 'rules', 'strata-frontend.md'), STRATA_FRONTEND_RULE, force);
+    record('OpenCode', 'opencode/rules/strata-frontend.md', rAction);
+
+    const sAction = await writeDedicatedArtifact(join(projectRoot, 'opencode', 'skills', 'strata-inspect', 'SKILL.md'), STRATA_INSPECT_SKILL, force);
+    record('OpenCode', 'opencode/skills/strata-inspect/SKILL.md', sAction);
+
+    const hAction = await writeDedicatedArtifact(join(projectRoot, 'opencode', 'hooks', 'strata-post-write.sh'), STRATA_POST_WRITE_HOOK, force, 0o755);
+    record('OpenCode', 'opencode/hooks/strata-post-write.sh', hAction);
+  }
+
+  // 5. .agents (general)
+  if (shouldApply('agents')) {
+    const agAction = await writeMarkdownGuidance(join(projectRoot, 'AGENTS.md'), STRATA_FRONTEND_RULE, force);
+    record('.agents (general)', 'AGENTS.md', agAction);
+
+    const rAction = await writeDedicatedArtifact(join(projectRoot, '.agents', 'rules', 'strata-frontend.md'), STRATA_FRONTEND_RULE, force);
+    record('.agents (general)', '.agents/rules/strata-frontend.md', rAction);
+
+    const sAction = await writeDedicatedArtifact(join(projectRoot, '.agents', 'skills', 'strata-inspect', 'SKILL.md'), STRATA_INSPECT_SKILL, force);
+    record('.agents (general)', '.agents/skills/strata-inspect/SKILL.md', sAction);
+
+    const hAction = await writeDedicatedArtifact(join(projectRoot, '.agents', 'hooks', 'strata-post-write.sh'), STRATA_POST_WRITE_HOOK, force, 0o755);
+    record('.agents (general)', '.agents/hooks/strata-post-write.sh', hAction);
+  }
+
+  // Fallback if skipping MCP config
   if (selectedSet.has('skip')) {
     const rAction = await writeDedicatedArtifact(join(projectRoot, '.agents', 'rules', 'strata-frontend.md'), STRATA_FRONTEND_RULE, force);
     record('Fallback Rules', '.agents/rules/strata-frontend.md', rAction);

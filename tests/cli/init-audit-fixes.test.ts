@@ -158,11 +158,15 @@ describe('Audit Bug Fixes: INIT-01 to INIT-11', () => {
   it('INIT-09: parseHarnessArg throws on unknown harness values', () => {
     expect(() => parseHarnessArg('cluade')).toThrow(/Unknown agent harness: 'cluade'/);
     expect(() => parseHarnessArg('invalid')).toThrow(/Unknown agent harness: 'invalid'/);
+    expect(() => parseHarnessArg('pi')).toThrow(/Unknown agent harness: 'pi'/);
     expect(parseHarnessArg('')).toEqual(['all']);
     expect(parseHarnessArg('all')).toEqual(['all']);
     expect(parseHarnessArg('skip')).toEqual(['skip']);
-    expect(parseHarnessArg('pi')).toEqual(['pi']);
-    expect(parseHarnessArg('omp')).toEqual(['pi']);
+    expect(parseHarnessArg('antigravity')).toEqual(['antigravity']);
+    expect(parseHarnessArg('gemini')).toEqual(['antigravity']);
+    expect(parseHarnessArg('opencode')).toEqual(['opencode']);
+    expect(parseHarnessArg('agents')).toEqual(['agents']);
+    expect(parseHarnessArg('.agents')).toEqual(['agents']);
   });
 
   // INIT-10: Menu option '3' configures OpenAI Codex

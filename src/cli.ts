@@ -86,7 +86,7 @@ Usage: strata init [target-dir] [options]
 Initialize strata index, local MCP configs, and agent rules.
 
 Options:
-  --harness, --agent <name>  Target harness (gemini | claude | cursor | codex | opencode | all)
+  --harness, --agent <name>  Target harness (antigravity | claude | codex | opencode | agents | all)
   -f, --force                Overwrite existing agent rules and configurations
   -y, --yes                  Skip interactive prompts, auto-accept defaults
   -p, --path <dir>           Target directory (default: .)

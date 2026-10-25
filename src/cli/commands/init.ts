@@ -72,7 +72,8 @@ async function detectProjectFramework(projectRoot: string): Promise<string> {
 
 /**
  * Parses user input or CLI flags into recognized AgentHarness entries.
- * Throws actionable error for unrecognized harness values (INIT-09).
+ * Focused exclusively on: Antigravity (.gemini), Claude Code (.claude), Codex (.codex),
+ * Opencode (opencode/), and .agents (general).
  */
 export function parseHarnessArg(arg?: string): AgentHarness[] {
   if (!arg) return ['all'];
@@ -80,12 +81,13 @@ export function parseHarnessArg(arg?: string): AgentHarness[] {
   if (!normalized) return ['all'];
   switch (normalized) {
     case '1':
+    case 'antigravity':
+    case 'gemini':
+      return ['antigravity'];
+    case '2':
     case 'claude':
     case 'claude-code':
       return ['claude'];
-    case '2':
-    case 'cursor':
-      return ['cursor'];
     case '3':
     case 'codex':
     case 'openai-codex':
@@ -94,28 +96,20 @@ export function parseHarnessArg(arg?: string): AgentHarness[] {
     case 'opencode':
       return ['opencode'];
     case '5':
-    case 'antigravity':
-    case 'gemini':
-      return ['antigravity'];
+    case 'agents':
+    case '.agents':
+    case 'general':
+      return ['agents'];
     case '6':
-    case 'goose':
-      return ['goose'];
-    case '7':
-    case 'pi':
-    case 'oh-my-pi':
-    case 'ohmypi':
-    case 'omp':
-      return ['pi'];
-    case '8':
     case 'all':
       return ['all'];
-    case '9':
+    case '7':
     case 'skip':
     case 'none':
       return ['skip'];
     default:
       throw new Error(
-        `Unknown agent harness: '${arg}'. Valid options: claude, cursor, codex, opencode, antigravity, goose, pi, omp, all, skip (or 1-9)`
+        `Unknown agent harness: '${arg}'. Valid options: antigravity, claude, codex, opencode, agents, all, skip (or 1-7)`
       );
   }
 }
@@ -125,20 +119,18 @@ export function parseHarnessArg(arg?: string): AgentHarness[] {
  */
 async function promptHarnessChoice(): Promise<AgentHarness[]> {
   console.log(`?  Select AI Agent Harness to configure for this project:`);
-  console.log(`   [1] Claude Code        (.mcp.json, .claude/settings.json, CLAUDE.md)`);
-  console.log(`   [2] Cursor             (.cursor/mcp.json, .cursor/hooks.json, .cursor/rules/)`);
-  console.log(`   [3] OpenAI Codex       (.codex/config.toml & AGENTS.md)`);
-  console.log(`   [4] OpenCode           (opencode.json, AGENTS.md, .agents/skills/)`);
-  console.log(`   [5] Google Antigravity (.gemini/mcp_config.json, GEMINI.md, .gemini/skills/)`);
-  console.log(`   [6] Goose              (.goose/mcp.json & .goosehints)`);
-  console.log(`   [7] Pi / Oh My Pi      (.pi/ & .omp/ mcp.json & AGENTS.md)`);
-  console.log(`   [8] All (Multi-Harness - recommended)`);
-  console.log(`   [9] Skip MCP Config    (Rules & SQLite index only)\n`);
+  console.log(`   [1] Google Antigravity (.gemini/mcp_config.json, GEMINI.md, .gemini/skills/, .gemini/hooks/)`);
+  console.log(`   [2] Claude Code        (.mcp.json, .claude/settings.json, CLAUDE.md, .claude/skills/, .claude/hooks/)`);
+  console.log(`   [3] OpenAI Codex       (.codex/config.toml, AGENTS.md, .codex/skills/, .codex/hooks/)`);
+  console.log(`   [4] OpenCode           (opencode.json, AGENTS.md, opencode/skills/, opencode/hooks/)`);
+  console.log(`   [5] .agents (General)  (.agents/mcp.json, AGENTS.md, .agents/skills/, .agents/hooks/)`);
+  console.log(`   [6] All (Multi-Harness - recommended)`);
+  console.log(`   [7] Skip MCP Config    (Rules & SQLite index only)\n`);
 
   const rl = readline.createInterface({ input, output });
   try {
-    const answer = await rl.question('Enter choice [1-9] (default: 8): ');
-    const choice = answer.trim() || '8';
+    const answer = await rl.question('Enter choice [1-7] (default: 6): ');
+    const choice = answer.trim() || '6';
     return parseHarnessArg(choice);
   } finally {
     rl.close();
@@ -285,5 +277,5 @@ export async function handleStrataInit(options: StrataInitOptions = {}): Promise
 
   console.log(`${cyan}│${reset}`);
   console.log(`${cyan}└${reset}  ${bold}${green}Initialization complete!${reset} Your project is equipped with Strata AST intelligence. 🚀`);
-  console.log(`   You can now run your AI agent in this directory (e.g. ${cyan}claude${reset}, ${cyan}cursor${reset}, ${cyan}opencode${reset}).\n`);
+  console.log(`   You can now run your AI agent in this directory (e.g. ${cyan}antigravity${reset}, ${cyan}claude${reset}, ${cyan}codex${reset}, ${cyan}opencode${reset}).\n`);
 }

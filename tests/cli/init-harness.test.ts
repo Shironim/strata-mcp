@@ -35,8 +35,8 @@ test('setupHarnessConfigs generates Claude Code .mcp.json correctly', async () =
 test('all harness configurations use the shared server entrypoint without tool allowlists', async () => {
   const root = tempDir();
   const results = await setupHarnessConfigs(root, ['all']);
-  expect(results).toHaveLength(8);
-  for (const file of ['.mcp.json', '.cursor/mcp.json', '.goose/mcp.json', '.pi/mcp.json', '.omp/mcp.json', '.gemini/mcp_config.json']) {
+  expect(results).toHaveLength(5);
+  for (const file of ['.mcp.json', '.gemini/mcp_config.json', '.agents/mcp.json']) {
     const data = JSON.parse(readFileSync(join(root, file), 'utf8'));
     const server = (data.mcpServers ?? data.servers).strata;
     expect(server).toEqual({ command: 'strata', args: ['serve'] });
@@ -138,15 +138,15 @@ test('setupHarnessConfigs defensively preserves malformed JSON without data loss
   expect(contentAfter).toBe(malformedContent);
 });
 
-test('setupHarnessConfigs configures Claude and Cursor lifecycle hooks', async () => {
+test('setupHarnessConfigs configures Claude and Antigravity lifecycle hooks', async () => {
   const root = tempDir();
-  await setupHarnessConfigs(root, ['claude', 'cursor']);
+  await setupHarnessConfigs(root, ['claude', 'antigravity']);
 
   const claudeSettings = JSON.parse(readFileSync(join(root, '.claude', 'settings.json'), 'utf8'));
   expect(claudeSettings.hooks?.PostToolUse?.[0]?.hooks?.[0]?.command).toContain('strata-post-write.sh');
 
-  const cursorHooks = JSON.parse(readFileSync(join(root, '.cursor', 'hooks.json'), 'utf8'));
-  expect(cursorHooks.hooks?.postToolUse?.[0]?.command).toContain('strata-post-write.sh');
+  const geminiHooks = JSON.parse(readFileSync(join(root, '.gemini', 'hooks.json'), 'utf8'));
+  expect(geminiHooks['strata-autosync']).toBeDefined();
 });
 
 test('setupHarnessConfigs configures Codex CLI config.toml', async () => {
@@ -161,7 +161,7 @@ test('setupHarnessConfigs configures Codex CLI config.toml', async () => {
   expect(tomlContent).toContain('command = "strata"');
 });
 
-test('handleStrataInit initializes OpenAI Codex with AGENTS.md and .codex/config.toml', async () => {
+test('handleStrataInit initializes OpenAI Codex with AGENTS.md, config.toml, skills, and hooks', async () => {
   const root = tempDir();
   writeFileSync(join(root, 'package.json'), '{"name":"my-app"}');
 
@@ -174,30 +174,50 @@ test('handleStrataInit initializes OpenAI Codex with AGENTS.md and .codex/config
   expect(existsSync(join(root, '.strata'))).toBe(true);
   expect(existsSync(join(root, 'AGENTS.md'))).toBe(true);
   expect(existsSync(join(root, '.codex', 'config.toml'))).toBe(true);
+  expect(existsSync(join(root, '.codex', 'rules', 'strata-frontend.md'))).toBe(true);
+  expect(existsSync(join(root, '.codex', 'skills', 'strata-inspect', 'SKILL.md'))).toBe(true);
+  expect(existsSync(join(root, '.codex', 'hooks', 'strata-post-write.sh'))).toBe(true);
+  expect(existsSync(join(root, '.codex', 'hooks.json'))).toBe(true);
 
   const agentsRule = readFileSync(join(root, 'AGENTS.md'), 'utf8');
   expect(agentsRule).toContain('strata-mcp');
 });
 
-test('handleStrataInit initializes Pi / Oh My Pi with AGENTS.md, .pi/mcp.json, and skills', async () => {
+test('handleStrataInit initializes OpenCode in opencode folder with skills, hooks, and mcp configs', async () => {
   const root = tempDir();
   writeFileSync(join(root, 'package.json'), '{"name":"my-app"}');
 
   await handleStrataInit({
     cwd: root,
-    harness: 'pi',
+    harness: 'opencode',
     yes: true,
   });
 
   expect(existsSync(join(root, '.strata'))).toBe(true);
   expect(existsSync(join(root, 'AGENTS.md'))).toBe(true);
-  expect(existsSync(join(root, 'PI.md'))).toBe(false);
-  expect(existsSync(join(root, '.pi', 'mcp.json'))).toBe(true);
-  expect(existsSync(join(root, '.pi', 'skills', 'strata-inspect', 'SKILL.md'))).toBe(true);
-  expect(existsSync(join(root, '.omp', 'mcp.json'))).toBe(true);
-  expect(existsSync(join(root, '.omp', 'skills', 'strata-inspect', 'SKILL.md'))).toBe(true);
+  expect(existsSync(join(root, 'opencode.json'))).toBe(true);
+  expect(existsSync(join(root, 'opencode', 'rules', 'strata-frontend.md'))).toBe(true);
+  expect(existsSync(join(root, 'opencode', 'skills', 'strata-inspect', 'SKILL.md'))).toBe(true);
+  expect(existsSync(join(root, 'opencode', 'hooks', 'strata-post-write.sh'))).toBe(true);
+  expect(existsSync(join(root, 'opencode', 'hooks.json'))).toBe(true);
+});
 
-  const agentsRule = readFileSync(join(root, 'AGENTS.md'), 'utf8');
-  expect(agentsRule).toContain('strata-mcp');
+test('handleStrataInit initializes .agents general harness with skills, hooks, and mcp configs', async () => {
+  const root = tempDir();
+  writeFileSync(join(root, 'package.json'), '{"name":"my-app"}');
+
+  await handleStrataInit({
+    cwd: root,
+    harness: 'agents',
+    yes: true,
+  });
+
+  expect(existsSync(join(root, '.strata'))).toBe(true);
+  expect(existsSync(join(root, 'AGENTS.md'))).toBe(true);
+  expect(existsSync(join(root, '.agents', 'mcp.json'))).toBe(true);
+  expect(existsSync(join(root, '.agents', 'rules', 'strata-frontend.md'))).toBe(true);
+  expect(existsSync(join(root, '.agents', 'skills', 'strata-inspect', 'SKILL.md'))).toBe(true);
+  expect(existsSync(join(root, '.agents', 'hooks', 'strata-post-write.sh'))).toBe(true);
+  expect(existsSync(join(root, '.agents', 'hooks.json'))).toBe(true);
 });
 
