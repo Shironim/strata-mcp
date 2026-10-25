@@ -7,12 +7,13 @@ import type {
 import { COMMON_HOOKS_IGNORE } from '../contract';
 import { escapeRegExp } from '../patterns';
 import ts from 'typescript';
+import type { FrontendFramework } from '../../types';
 import { createDocumentAdapter } from '../../adapters/factory';
 import { extractTemplateExpressions } from '../template';
 
 export function extractStateDependencies(
   content: string,
-  _framework: 'vue' | 'react' | 'astro' | 'unknown' | 'vue-composable',
+  _framework: FrontendFramework | 'vue-composable' | string,
   selfComponentName?: string
 ): StateDependencyInfo {
   const stores = new Set<string>();
@@ -79,7 +80,13 @@ export function extractStateDependencies(
           const name = aliases.get(local) ?? local;
           const arg = node.arguments[0];
           if (name === 'useStore' && arg && ts.isIdentifier(arg)) stores.add(arg.text);
+          else if (name === 'useState' && arg && (ts.isIdentifier(arg) || ts.isStringLiteralLike(arg))) stores.add(arg.text);
           else if ((name === 'useContext' || name === 'inject') && arg && (ts.isIdentifier(arg) || ts.isStringLiteralLike(arg))) contexts.add(arg.text);
+          else if (name === 'use' && arg && (ts.isIdentifier(arg) || ts.isPropertyAccessExpression(arg))) {
+            const argText = arg.getText(sf);
+            if (/Context$/.test(argText) || /^[A-Z]/.test(argText)) contexts.add(argText);
+          }
+          else if ((name === 'useAtom' || name === 'useAtomValue' || name === 'useSetAtom') && arg && ts.isIdentifier(arg)) stores.add(arg.text);
           else classify(local);
         } else if (ts.isPropertyAccessExpression(node.expression) && ts.isIdentifier(node.expression.expression)) {
           const name = node.expression.expression.text;
@@ -158,6 +165,55 @@ export function extractStateDependencies(
     for (const match of executableContent.matchAll(arrayDestructureRegex)) {
       if (match[1]) readVars.add(match[1]);
       if (match[2]) actionVars.add(match[2]);
+    }
+
+    // D. Context consumer patterns: const theme = useContext(ThemeContext) or use(ThemeContext)
+    if (kind === 'context') {
+      const ctxInstRegex = new RegExp(
+        `(?:const|let|var)\\s+([A-Za-z0-9_$]+)\\s*=\\s*(?:await\\s+)?(?:useContext|use|inject)\\s*\\(\\s*${escapeRegExp(ident)}\\b`,
+        'g'
+      );
+      for (const match of executableContent.matchAll(ctxInstRegex)) {
+        instanceVars.add(match[1]);
+        readVars.add(match[1]);
+      }
+      const ctxDestructRegex = new RegExp(
+        `(?:const|let|var)\\s*\\{([^}]+)\\}\\s*=\\s*(?:await\\s+)?(?:useContext|use|inject)\\s*\\(\\s*${escapeRegExp(ident)}\\b`,
+        'g'
+      );
+      for (const match of executableContent.matchAll(ctxDestructRegex)) {
+        const vars = match[1].split(',').map((v) => v.trim().split(':')[0].trim()).filter(Boolean);
+        for (const v of vars) {
+          if (/^(?:set|update|dispatch|toggle)/i.test(v)) actionVars.add(v);
+          else readVars.add(v);
+        }
+      }
+    }
+
+    // E. Atom store patterns: const [value, setValue] = useAtom(myAtom) or const val = useAtomValue(myAtom)
+    if (kind === 'store') {
+      const atomArrayRegex = new RegExp(
+        `(?:const|let|var)\\s*\\[\\s*([A-Za-z0-9_$]+)?\\s*,\\s*([A-Za-z0-9_$]+)\\s*\\]\\s*=\\s*(?:await\\s+)?(?:useAtom)\\s*\\(\\s*${escapeRegExp(ident)}\\b`,
+        'g'
+      );
+      for (const match of executableContent.matchAll(atomArrayRegex)) {
+        if (match[1]) readVars.add(match[1]);
+        if (match[2]) actionVars.add(match[2]);
+      }
+      const atomValRegex = new RegExp(
+        `(?:const|let|var)\\s+([A-Za-z0-9_$]+)\\s*=\\s*(?:await\\s+)?(?:useAtomValue|useStore)\\s*\\(\\s*${escapeRegExp(ident)}\\b`,
+        'g'
+      );
+      for (const match of executableContent.matchAll(atomValRegex)) {
+        readVars.add(match[1]);
+      }
+      const atomSetRegex = new RegExp(
+        `(?:const|let|var)\\s+([A-Za-z0-9_$]+)\\s*=\\s*(?:await\\s+)?(?:useSetAtom)\\s*\\(\\s*${escapeRegExp(ident)}\\b`,
+        'g'
+      );
+      for (const match of executableContent.matchAll(atomSetRegex)) {
+        actionVars.add(match[1]);
+      }
     }
 
     allTracked.push({ kind, identifier: ident, instanceVars, actionVars, readVars });
@@ -287,7 +343,7 @@ export function extractStateDependencies(
  */
 export function extractDataDependencies(
   content: string,
-  _framework: 'vue' | 'react' | 'astro' | 'unknown' | 'vue-composable'
+  _framework: FrontendFramework | 'vue-composable' | string
 ): DataDependencyInfo | undefined {
   const serverActions = new Set<string>();
   const queryKeys = new Set<string>();
@@ -339,7 +395,15 @@ export function extractDataDependencies(
     }
   }
 
-  const useAsyncDataRegex = /useAsyncData\s*\(\s*['"]([^'"]+)['"]/g;
+  const nuxtFetchRegex = /\b(?:useFetch|useLazyFetch)\s*(?:<[^>]+>)?\s*\(\s*(?:['"`]([^'"`]+)['"`]|\(\)\s*=>\s*['"`]([^'"`]+)['"`])/g;
+  for (const m of content.matchAll(nuxtFetchRegex)) {
+    const url = (m[1] || m[2])?.trim();
+    if (url && (url.startsWith('/') || url.startsWith('http') || url.startsWith('api/'))) {
+      endpoints.add(url);
+    }
+  }
+
+  const useAsyncDataRegex = /\b(?:useAsyncData|useLazyAsyncData)\s*\(\s*['"]([^'"]+)['"]/g;
   for (const m of content.matchAll(useAsyncDataRegex)) {
     queryKeys.add(`"${m[1]}"`);
   }

@@ -1,9 +1,9 @@
 import { watch, type FSWatcher } from 'node:fs';
 import { resolve, extname, basename } from 'node:path';
 import type { Database } from 'bun:sqlite';
-import { IGNORED_DIRS, SUPPORTED_SCRIPT_EXTENSIONS } from './collector';
+import { IGNORED_DIRS, SUPPORTED_FRONTEND_EXTENSIONS } from './collector';
 
-const SUPPORTED_EXTENSIONS = new Set(['.vue', '.astro', ...SUPPORTED_SCRIPT_EXTENSIONS]);
+const SUPPORTED_EXTENSIONS = SUPPORTED_FRONTEND_EXTENSIONS;
 const IGNORED_DIR_NAMES = new Set([...IGNORED_DIRS, '.strata', '.vue-ast']);
 
 const IGNORED_FILE_PATTERNS = [

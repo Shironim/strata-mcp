@@ -1,6 +1,8 @@
 import { readSourceFile } from './source-file';
-import { promises as fs } from 'node:fs';
-import { resolve } from 'node:path';
+import { findProjectRoot } from './path-resolver';
+import { getProjectEcosystem } from './framework-detector';
+import { existsSync, promises as fs } from 'node:fs';
+import { join, resolve } from 'node:path';
 import {
   parse as parseDom,
   NodeTypes,
@@ -45,6 +47,37 @@ const BUILTIN_GLOBALS = new Set([
   'false',
   'null',
   'undefined',
+]);
+
+const NUXT_AUTO_IMPORTS = new Set([
+  'navigateTo',
+  'refreshNuxtData',
+  'abortNavigation',
+  'clearError',
+  'createError',
+  'showError',
+  'reloadNuxtApp',
+  'useFetch',
+  'useLazyFetch',
+  'useAsyncData',
+  'useLazyAsyncData',
+  'useRoute',
+  'useRouter',
+  'useState',
+  'useCookie',
+  'useHead',
+  'useSeoMeta',
+  'useRuntimeConfig',
+  'useNuxtApp',
+  'useRequestHeaders',
+  'useRequestEvent',
+  'setResponseStatus',
+  'definePageMeta',
+  'defineNuxtComponent',
+  'defineNuxtPlugin',
+  'defineNuxtRouteMiddleware',
+  'onNuxtReady',
+  'callOnce',
 ]);
 
 const INLINE_OP_REGEX = /(?:=|\+\+|--|\+=|-=|\bemit\s*\(|\$emit\s*\()/;
@@ -201,8 +234,34 @@ export async function auditEventHandlers(
 
   const validHandlers: EventHandlerInfo[] = [];
   const brokenHandlers: EventHandlerInfo[] = [];
+  const candidateHandlers: EventHandlerInfo[] = [];
   const inlineExpressions: EventHandlerInfo[] = [];
   const referencedIdentifiersInTemplate = new Set<string>();
+
+  const projectRoot = findProjectRoot(targetFile);
+  const eco = getProjectEcosystem(projectRoot);
+  const isNuxt =
+    eco.hasNuxt ||
+    targetFile.includes('/pages/') ||
+    targetFile.includes('/app/') ||
+    fileContent.includes('definePageMeta') ||
+    fileContent.includes('useFetch') ||
+    fileContent.includes('useAsyncData');
+
+  function isNuxtCandidate(ident: string): boolean {
+    if (!isNuxt) return false;
+    if (NUXT_AUTO_IMPORTS.has(ident)) return true;
+    if (/^use[A-Z][A-Za-z0-9_$]*$/.test(ident)) return true;
+    const candidates = [
+      join(projectRoot, 'composables', `${ident}.ts`),
+      join(projectRoot, 'composables', `${ident}.js`),
+      join(projectRoot, 'utils', `${ident}.ts`),
+      join(projectRoot, 'utils', `${ident}.js`),
+      join(projectRoot, 'app', 'composables', `${ident}.ts`),
+      join(projectRoot, 'app', 'utils', `${ident}.ts`),
+    ];
+    return candidates.some((c) => existsSync(c));
+  }
 
   function walkTemplate(node: RootNode | TemplateChildNode): void {
     if (node.type === NodeTypes.ELEMENT) {
@@ -255,6 +314,19 @@ export async function auditEventHandlers(
               status: 'valid',
               source: scriptDeclaredFunctions.has(ident) ? 'local-function' : 'import',
             });
+          } else if (isNuxtCandidate(ident)) {
+            candidateHandlers.push({
+              event: fullEvent,
+              handlerName: ident,
+              line: absPos.line,
+              status: 'candidate',
+              source: 'nuxt-auto-import',
+              evidence: {
+                basis: 'derived',
+                resolution: 'candidate',
+                method: 'nuxt-auto-import',
+              },
+            });
           } else {
             brokenHandlers.push({
               event: fullEvent,
@@ -291,6 +363,19 @@ export async function auditEventHandlers(
                 line: absPos.line,
                 status: 'valid',
                 source: scriptDeclaredFunctions.has(ident) ? 'local-function' : 'import',
+              });
+            } else if (isNuxtCandidate(ident)) {
+              candidateHandlers.push({
+                event: fullEvent,
+                handlerName: ident || expContent,
+                line: absPos.line,
+                status: 'candidate',
+                source: 'nuxt-auto-import',
+                evidence: {
+                  basis: 'derived',
+                  resolution: 'candidate',
+                  method: 'nuxt-auto-import',
+                },
               });
             } else {
               brokenHandlers.push({
@@ -337,7 +422,8 @@ export async function auditEventHandlers(
     }
   }
 
-  const totalEventBindings = validHandlers.length + brokenHandlers.length + inlineExpressions.length;
+  const totalEventBindings =
+    validHandlers.length + brokenHandlers.length + inlineExpressions.length + candidateHandlers.length;
 
   return {
     filePath: targetFile,
@@ -345,6 +431,7 @@ export async function auditEventHandlers(
     validHandlers,
     brokenHandlers,
     inlineExpressions,
+    ...(candidateHandlers.length > 0 ? { candidateHandlers } : {}),
     deadScriptHandlers,
   };
 }
@@ -365,6 +452,14 @@ export function formatEventHandlerAuditAsText(result: EventHandlerAuditResult): 
     lines.push('');
   } else {
     lines.push('✅ **No broken event handlers detected.**\n');
+  }
+
+  if (result.candidateHandlers && result.candidateHandlers.length > 0) {
+    lines.push(`ℹ️ **AUTO-IMPORTED / CANDIDATE HANDLERS (${result.candidateHandlers.length}):**`);
+    for (const ch of result.candidateHandlers) {
+      lines.push(`- Line ${ch.line}: \`@${ch.event}="${ch.handlerName}"\` — ℹ️ Candidate auto-import [${ch.source || 'nuxt-auto-import'}]`);
+    }
+    lines.push('');
   }
 
   if (result.deadScriptHandlers.length > 0) {
@@ -423,26 +518,41 @@ export async function detectReactivitySmells(
 
   // 1. Vue SFC Analysis
   if (ext === 'vue') {
+    let isPreVue35 = true;
+    try {
+      const rootDir = findProjectRoot(filePath);
+      const eco = getProjectEcosystem(rootDir);
+      if (eco.frameworks.vue?.major) {
+        isPreVue35 = eco.frameworks.vue.major < 3 || (eco.frameworks.vue.major === 3 && (eco.frameworks.vue.minor ?? 0) < 5);
+      }
+    } catch {
+      // default
+    }
+
     for (let i = 0; i < lines.length; i++) {
       const lineNum = i + 1;
       const line = lines[i];
+      const isComment = /^\s*(?:\/\/|\/\*|\*)/.test(line);
 
-      // Smell A: Destructuring defineProps directly (loses reactivity in Vue 3)
-      const definePropsDestructMatch = line.match(/(?:const|let|var)\s*\{([^}]+)\}\s*=\s*defineProps/);
-      if (definePropsDestructMatch) {
-        const destructuredVars = definePropsDestructMatch[1].trim();
-        smells.push({
-          type: 'vue-props-destructure',
-          severity: 'warning',
-          message: `Destructuring '{ ${destructuredVars} }' directly from defineProps() causes loss of reactivity.`,
-          line: lineNum,
-          snippet: line.trim(),
-          recommendation: `Access via props object (e.g. 'props.${destructuredVars.split(',')[0].trim()}') or use 'toRefs(props)' to preserve reactivity.`,
-        });
+      // Smell A: Destructuring defineProps directly (only loses reactivity in Vue < 3.5)
+      if (isPreVue35) {
+        const definePropsDestructMatch = line.match(/(?:const|let|var)\s*\{([^}]+)\}\s*=\s*defineProps/);
+        if (definePropsDestructMatch && !isComment) {
+          const destructuredVars = definePropsDestructMatch[1].trim();
+          smells.push({
+            type: 'vue-props-destructure',
+            severity: 'warning',
+            message: `Destructuring '{ ${destructuredVars} }' directly from defineProps() causes loss of reactivity in Vue < 3.5.`,
+            line: lineNum,
+            snippet: line.trim(),
+            recommendation: `Access via props object (e.g. 'props.${destructuredVars.split(',')[0].trim()}') or use 'toRefs(props)' to preserve reactivity.`,
+          });
+        }
       }
 
       // Smell B: Destructuring props object without toRefs
       if (
+        !isComment &&
         /(?:const|let|var)\s*\{([^}]+)\}\s*=\s*props\b/.test(line) &&
         !line.includes('toRefs') &&
         !line.includes('storeToRefs')
@@ -461,7 +571,7 @@ export async function detectReactivitySmells(
 
       // Smell C: Direct prop mutation in template (v-model="props.xxx" or v-model="$props.xxx")
       const vModelPropMatch = line.match(/v-model(?::[A-Za-z0-9_-]+)?=["'](?:\$?props)\.([A-Za-z0-9_$.]+)["']/);
-      if (vModelPropMatch) {
+      if (vModelPropMatch && !isComment) {
         const propName = vModelPropMatch[1];
         smells.push({
           type: 'vue-prop-mutation',
@@ -475,7 +585,7 @@ export async function detectReactivitySmells(
 
       // Smell D: Direct prop mutation in script (props.foo = ... or $props.foo = ...)
       const scriptPropMutMatch = line.match(/(?:\bprops|\$props)\.([A-Za-z0-9_$]+)\s*(?:=|\+\+|--|\+=|-=)/);
-      if (scriptPropMutMatch && !line.includes('defineProps') && !line.includes('==') && !line.includes('===')) {
+      if (!isComment && scriptPropMutMatch && !line.includes('defineProps') && !line.includes('==') && !line.includes('===')) {
         const propName = scriptPropMutMatch[1];
         smells.push({
           type: 'vue-prop-mutation',

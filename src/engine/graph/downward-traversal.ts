@@ -355,7 +355,8 @@ async function getDownwardComponentTree(
     filePath: string,
     depth: number,
     visitedInBranch: Set<string>,
-    availableProviders: ContextDependencyNode[] = []
+    availableProviders: ContextDependencyNode[] = [],
+    isClientParent: boolean = false
   ): Promise<ComponentTreeNode> {
     const normPath = normalize(filePath);
     const componentName = basename(filePath);
@@ -383,6 +384,12 @@ async function getDownwardComponentTree(
     } catch {
       return node;
     }
+
+    const hasUseClient = /^\s*['"]use client['"]/m.test(content);
+    if (isClientParent && !hasUseClient) {
+      node.transitiveBoundary = 'client-hydrated (inherited from parent)';
+    }
+    const currentBranchIsClient = hasUseClient || isClientParent;
 
     // Extract Context Nodes (Vue provide/inject & React Context)
     const { providers: localProviders, consumers: localConsumers } = extractComponentContextNodes(normPath, content);
@@ -445,7 +452,8 @@ async function getDownwardComponentTree(
           childNorm,
           depth + 1,
           new Set(visitedInBranch),
-          currentAvailableProviders
+          currentAvailableProviders,
+          currentBranchIsClient
         );
         childNode.alias = imp.alias;
         childNode.isDynamic = imp.isDynamic;
@@ -487,7 +495,8 @@ async function getDownwardComponentTree(
             catalogTarget,
             depth + 1,
             new Set(visitedInBranch),
-            currentAvailableProviders
+            currentAvailableProviders,
+            currentBranchIsClient
           );
           childNode.isAutoImported = true;
           childNode.isPage = isPageFile(catalogTarget);
@@ -669,6 +678,7 @@ export function formatTreeAsText(result: ComponentTreeResult): string {
       if (node.isDynamic && !node.warning) label += ` [dynamic/lazy]`;
       if (node.isAutoImported) label += ` [auto-imported]`;
       if (node.isPage) label += ` [Page]`;
+      if (node.transitiveBoundary) label += ` [${node.transitiveBoundary}]`;
       if (node.isExternalScope) label += ` [external-domain/package]`;
       if (node.warning) label += ` ⚠️ ${node.warning}`;
       text += `${prefix}${branch}${label}\n`;
