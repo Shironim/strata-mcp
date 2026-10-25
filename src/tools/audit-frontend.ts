@@ -26,6 +26,7 @@ import {
 } from '../engine/path-resolver';
 import type { RouteFramework } from '../types';
 import type { McpToolDefinition } from './types';
+import { checkRuntimeVersion, getCachedRuntimeVersion } from '../utils/version-check';
 
 export const auditFrontendTool: McpToolDefinition = {
   ...TOOL_CATALOG[4],
@@ -59,6 +60,23 @@ export const auditFrontendTool: McpToolDefinition = {
       const threshold = parseSafeFloat(args.threshold);
       const routeView = args.view === 'full' || args.view === 'tree' ? args.view : 'summary';
 
+      const runtimeVersion = getCachedRuntimeVersion();
+      void checkRuntimeVersion().catch(() => {});
+      const formatAuditResponse = (payload: any, formattedText: string) => {
+        const finalJson = isJson
+          ? JSON.stringify({ runtime_version: runtimeVersion, ...(typeof payload === 'object' && payload !== null ? payload : { data: payload }) }, null, 2)
+          : undefined;
+        let finalText = isJson ? finalJson! : formattedText;
+        if (!isJson && runtimeVersion.update_available) {
+          finalText = `[Notice: Update available: v${runtimeVersion.server_version} -> v${runtimeVersion.latest_version}. Run: ${runtimeVersion.upgrade_command}]\n\n` + finalText;
+        }
+        return {
+          content: [{ type: 'text' as const, text: finalText }],
+          metadata: { runtime_version: runtimeVersion },
+          runtime_version: runtimeVersion,
+        };
+      };
+
       if (target === 'routes') {
         const manifest = await scanRoutes({
           targetPath,
@@ -68,14 +86,7 @@ export const auditFrontendTool: McpToolDefinition = {
           prefix: args.prefix ? String(args.prefix) : undefined,
           view: routeView,
         });
-        return {
-          content: [
-            {
-              type: 'text',
-              text: isJson ? JSON.stringify(manifest, null, 2) : formatRoutesAsText(manifest),
-            },
-          ],
-        };
+        return formatAuditResponse(manifest, formatRoutesAsText(manifest));
       }
 
       if (target === 'dead-components') {
@@ -86,26 +97,12 @@ export const auditFrontendTool: McpToolDefinition = {
           excludePages: !includePages,
           excludeDirs,
         });
-        return {
-          content: [
-            {
-              type: 'text',
-              text: isJson ? JSON.stringify(result, null, 2) : formatUnusedAsText(result),
-            },
-          ],
-        };
+        return formatAuditResponse(result, formatUnusedAsText(result));
       }
 
       if (target === 'dead-state') {
         const result = await findUnusedState(targetPath, { scopePath, excludeDirs });
-        return {
-          content: [
-            {
-              type: 'text',
-              text: isJson ? JSON.stringify(result, null, 2) : formatUnusedStateAsText(result),
-            },
-          ],
-        };
+        return formatAuditResponse(result, formatUnusedStateAsText(result));
       }
 
       if (target === 'similar-templates') {
@@ -115,14 +112,7 @@ export const auditFrontendTool: McpToolDefinition = {
           threshold,
           excludeDirs,
         });
-        return {
-          content: [
-            {
-              type: 'text',
-              text: isJson ? JSON.stringify(result, null, 2) : formatSimilarTemplatesAsText(result),
-            },
-          ],
-        };
+        return formatAuditResponse(result, formatSimilarTemplatesAsText(result));
       }
 
       if (target === 'design-tokens') {
@@ -131,38 +121,17 @@ export const auditFrontendTool: McpToolDefinition = {
           scopePath,
           excludeDirs,
         });
-        return {
-          content: [
-            {
-              type: 'text',
-              text: isJson ? JSON.stringify(result, null, 2) : formatDesignAuditAsText(result),
-            },
-          ],
-        };
+        return formatAuditResponse(result, formatDesignAuditAsText(result));
       }
 
       if (target === 'bundle-health') {
         const result = await auditBundleHealth({ targetPath, scopePath, excludeDirs });
-        return {
-          content: [
-            {
-              type: 'text',
-              text: isJson ? JSON.stringify(result, null, 2) : formatBundleAuditAsText(result),
-            },
-          ],
-        };
+        return formatAuditResponse(result, formatBundleAuditAsText(result));
       }
 
       if (target === 'api-contracts') {
         const result = await extractWorkspaceApiContracts({ targetPath, scopePath, excludeDirs });
-        return {
-          content: [
-            {
-              type: 'text',
-              text: isJson ? JSON.stringify(result, null, 2) : formatApiContractsAsText(result),
-            },
-          ],
-        };
+        return formatAuditResponse(result, formatApiContractsAsText(result));
       }
 
       if (target === 'archetype-drift') {
@@ -189,14 +158,7 @@ export const auditFrontendTool: McpToolDefinition = {
           workspaceRoot: targetPath,
         });
 
-        return {
-          content: [
-            {
-              type: 'text',
-              text: isJson ? JSON.stringify(result, null, 2) : formatArchetypeAuditAsText(result),
-            },
-          ],
-        };
+        return formatAuditResponse(result, formatArchetypeAuditAsText(result));
       }
 
       // target === 'all'
@@ -240,17 +202,6 @@ export const auditFrontendTool: McpToolDefinition = {
         }),
       ]);
 
-      if (isJson) {
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify({ routes, unusedComponents, unusedState, similarTemplates, designSystemAudit, bundleAudit, apiContracts }, null, 2),
-            },
-          ],
-        };
-      }
-
       const report = [
         '## Frontend Architecture & Health Audit',
         `Target: \`${targetPath}\`\n`,
@@ -269,9 +220,10 @@ export const auditFrontendTool: McpToolDefinition = {
         formatApiContractsAsText(apiContracts),
       ].join('\n');
 
-      return {
-        content: [{ type: 'text', text: report }],
-      };
+      return formatAuditResponse(
+        { routes, unusedComponents, unusedState, similarTemplates, designSystemAudit, bundleAudit, apiContracts },
+        report
+      );
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       return {

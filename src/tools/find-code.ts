@@ -8,6 +8,7 @@ import {
   formatMatchesAsText,
 } from '../engine/search';
 import { dumpSyntaxTree, executeAstGrep, isPatternParseError } from '../engine/astgrep';
+import { mapFrontendScope } from '../engine/frontend-map';
 import {
   parseSafePositiveInt,
   parseStringList,
@@ -15,6 +16,7 @@ import {
   resolveWorkspacePath,
 } from '../engine/path-resolver';
 import type { McpToolDefinition } from './types';
+import { checkRuntimeVersion, getCachedRuntimeVersion } from '../utils/version-check';
 
 export const findCodeTool: McpToolDefinition = {
   ...TOOL_CATALOG[0],
@@ -38,6 +40,34 @@ export const findCodeTool: McpToolDefinition = {
     let fallbackReason: string | undefined;
     const metadata = () => ({ modeRequested: mode, modeUsed, ...(fallbackReason ? { fallbackReason } : {}) });
     const notice = () => fallbackReason ? '[Notice: Invalid AST pattern; used exact literal line search.]\n' : '';
+
+    if (args.action === 'map') {
+      if (pattern || args.rule_yaml || codeSnippet || args.component || args.component_name || args.componentName || args.mode) {
+        return { isError: true, content: [{ type: 'text', text: "'action: map' accepts a path, limit, offset, and exclude_dirs only." }] };
+      }
+      try {
+        const targetPath = rawTargetPath ? resolveWorkspacePath(rawTargetPath) : resolveProjectRoot();
+        const result = await mapFrontendScope(targetPath, {
+          limit: parseSafePositiveInt(args.limit ?? args.max_results ?? args.maxResults, 100),
+          offset: Number.isSafeInteger(args.offset) && args.offset >= 0 ? args.offset : 0,
+          excludeDirs: parseStringList(args.exclude_dirs ?? args.excludeDirs),
+        });
+        const runtimeVersion = getCachedRuntimeVersion();
+        void checkRuntimeVersion().catch(() => {});
+        const payload = { runtime_version: runtimeVersion, ...result };
+        let textOutput = isJson ? JSON.stringify(payload, null, 2) : formatFrontendMap(result);
+        if (!isJson && runtimeVersion.update_available) {
+          textOutput = `[Notice: Update available: v${runtimeVersion.server_version} -> v${runtimeVersion.latest_version}. Run: ${runtimeVersion.upgrade_command}]\n\n` + textOutput;
+        }
+        return {
+          content: [{ type: 'text', text: textOutput }],
+          metadata: { runtime_version: runtimeVersion },
+          runtime_version: runtimeVersion,
+        };
+      } catch (err) {
+        return { isError: true, content: [{ type: 'text', text: `Failed to map frontend scope: ${err instanceof Error ? err.message : String(err)}` }] };
+      }
+    }
 
     // Mode A: dump_ast
     if (args.action === 'dump_ast' || (!rawTargetPath && codeSnippet && !pattern && !args.rule_yaml)) {
@@ -174,3 +204,13 @@ export const findCodeTool: McpToolDefinition = {
     }
   },
 };
+
+function formatFrontendMap(result: Awaited<ReturnType<typeof mapFrontendScope>>): string {
+  return [
+    `Frontend map: ${result.root}`,
+    `Status: ${result.status}; ${result.coverage.returnedFiles}/${result.coverage.knownFiles} files returned (offset ${result.coverage.offset})`,
+    `Framework candidates: ${result.frameworkCandidates.map(item => item.name).join(', ') || 'unknown'} (${result.frameworkDetection})`,
+    ...result.files.map(file => `- ${file.path}${file.roleHint ? ` [${file.roleHint}; heuristic]` : ''}`),
+    `Extension coverage: ${Object.entries(result.coverage.extensions).filter(([, count]) => count > 0).map(([ext, count]) => `${ext}=${count}`).join(', ') || 'none'}`,
+  ].join('\n');
+}

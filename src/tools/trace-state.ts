@@ -83,6 +83,12 @@ export const traceStateTool: McpToolDefinition = {
       if (!isWorkspaceIndexed(targetPath)) {
         const notIndexedPayload = {
           status: 'NOT_INDEXED',
+          workspace_root: targetPath,
+          suggested_action: {
+            cli: 'strata init',
+            tool: 'find_code',
+            params: { action: 'map' },
+          },
           message: "Workspace belum diindeks oleh Strata. Jalankan 'strata init' terlebih dahulu di terminal atau panggil tool inisialisasi yang disetujui.",
         };
         return {
@@ -91,7 +97,7 @@ export const traceStateTool: McpToolDefinition = {
               type: 'text',
               text: isJson
                 ? JSON.stringify(notIndexedPayload, null, 2)
-                : `[strata] ${notIndexedPayload.message}`,
+                : `[strata NOT_INDEXED] ${notIndexedPayload.message}`,
             },
           ],
         };

@@ -5,7 +5,7 @@ export const TOOL_CATALOG: Array<Tool & { description: string }> = [
 {
 name: 'find_code',
 description:
-    'Searches workspace code using AST patterns (ast-grep), relational YAML rules, or component adoption across .vue, .astro, and .tsx. For inspecting a single known component or file, use inspect_component instead.',
+    'Maps a bounded frontend inventory or searches workspace code using AST patterns (ast-grep), relational YAML rules, or component adoption across .vue, .astro, .tsx, .jsx, .ts, and .js. For inspecting one file and retrieving exact source slices, use inspect_component.',
 inputSchema: {
     type: 'object',
     properties: {
@@ -36,8 +36,8 @@ inputSchema: {
       },
       action: {
         type: 'string',
-        enum: ['search', 'dump_ast'],
-        description: 'Action: "search" (default) or "dump_ast" to inspect CST syntax tree',
+        enum: ['search', 'dump_ast', 'map'],
+        description: 'Action: search (default), dump_ast, or map a bounded frontend file inventory without reading file bodies.',
       },
       language: {
         type: 'string',
@@ -59,6 +59,8 @@ inputSchema: {
         type: 'number',
         description: 'Maximum matches to return (default: 200)',
       },
+      limit: { type: 'integer', minimum: 1, maximum: 500, description: 'Maximum inventory file paths returned for action: map (default: 100).' },
+      offset: { type: 'integer', minimum: 0, description: 'Stable zero-based inventory offset for action: map.' },
       exclude_dirs: {
         type: 'array',
         items: { type: 'string' },
@@ -70,13 +72,46 @@ inputSchema: {
 {
 name: 'inspect_component',
 description:
-    'Deep component inspection (.vue, .tsx, .jsx, .astro). Extracts interface contracts (props/emits/slots), layout structure & dynamic classes (:class, Tailwind layout tokens, v-show/v-if), data fetching boundaries (Inertia, TanStack Query, Axios endpoints & backend target hints), form schemas, and reactivity smells.',
+    'Maps and selectively inspects frontend source (.vue, .astro, .tsx, .jsx, .ts, .js). Use view: map for exact regions and source refs, then view: source with a returned source_ref for a hash-validated source slice. Legacy contract, symbol, and audit inspection remain available.',
 inputSchema: {
     type: 'object',
     properties: {
       path: {
         type: 'string',
         description: 'Target component or file path (e.g. "src/components/MyButton.vue", alias: file_path, target_path)',
+      },
+      view: {
+        type: 'string',
+        enum: ['map', 'source'],
+        description: 'Map exact source regions or retrieve a source slice by a source_ref from the map.',
+      },
+      source_ref: {
+        type: 'object',
+        properties: {
+          sha256: { type: 'string' },
+          startOffset: { type: 'integer', minimum: 0 },
+          endOffset: { type: 'integer', minimum: 0 },
+        },
+        required: ['sha256', 'startOffset', 'endOffset'],
+        description: 'Exact hash-bound UTF-16 source reference returned by view: map.',
+      },
+      max_regions: { type: 'integer', minimum: 1, maximum: 500, description: 'Maximum top-level map regions returned (default: 200).' },
+      sfc_sections: {
+        type: 'boolean',
+        description: 'For Vue SFC files, return exact content boundaries for each <script>, <template>, <style>, and custom block.',
+      },
+      source_range: {
+        type: 'object',
+        properties: {
+          start_line: { type: 'integer', minimum: 1 },
+          end_line: { type: 'integer', minimum: 1 },
+        },
+        required: ['start_line', 'end_line'],
+        description: 'Return the original file lines from start_line through end_line, inclusive, with verified line numbers.',
+      },
+      expected_hash: {
+        type: 'string',
+        description: 'Optional SHA-256 from an earlier map; rejects stale inclusive source_range requests.',
       },
       project_root: {
         type: 'string',

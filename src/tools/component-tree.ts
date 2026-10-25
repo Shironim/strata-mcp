@@ -85,6 +85,12 @@ export const componentTreeTool: McpToolDefinition = {
         const isJson = args.output_format === 'json' || args.format === 'json';
         const notIndexedPayload = {
           status: 'NOT_INDEXED',
+          workspace_root: targetPath,
+          suggested_action: {
+            cli: 'strata init',
+            tool: 'find_code',
+            params: { action: 'map' },
+          },
           message: "Workspace belum diindeks oleh Strata. Jalankan 'strata init' terlebih dahulu di terminal atau panggil tool inisialisasi yang disetujui.",
         };
         return {
