@@ -207,6 +207,22 @@ function appendDependenciesAndTokens(contract: ComponentContract, lines: string[
 }
 
 function appendDiagnosticsAndForms(contract: ComponentContract, lines: string[]): void {
+  if (contract.patternDiagnostics && contract.patternDiagnostics.length > 0) {
+    lines.push('');
+    lines.push(`Canonical Pattern Diagnostics (${contract.patternDiagnostics.length} detected):`);
+    for (const d of contract.patternDiagnostics) {
+      const icon = d.severity === 'error' ? '❌' : d.severity === 'warning' ? '⚠️' : 'ℹ️';
+      const lineStr = d.fact.lineRange ? `Line ${d.fact.lineRange.startLine}` : 'Line ?';
+      lines.push(`  ${icon} [${d.severity.toUpperCase()}] [${d.ruleId}] ${lineStr}: ${d.smell.title}`);
+      lines.push(`     Fact: \`${d.fact.snippet}\` (ref: ${d.fact.ref.sha256.slice(0, 8)}:${d.fact.ref.startOffset}-${d.fact.ref.endOffset})`);
+      lines.push(`     Smell: ${d.smell.explanation}`);
+      lines.push(`     Canon: ${d.canon.summary}`);
+      if (d.canon.canonicalCode) {
+        lines.push(`     Standard Code:\n       ${d.canon.canonicalCode.replace(/\n/g, '\n       ')}`);
+      }
+    }
+  }
+
   if (contract.reactivitySmells && contract.reactivitySmells.length > 0) {
     lines.push('');
     lines.push(`Reactivity Smells (${contract.reactivitySmells.length} detected):`);

@@ -1,4 +1,6 @@
-import { readSourceFile } from './source-file';
+import { readSourceFile, readSourceSnapshot } from './source-file';
+import { runCanonAudit } from './canon';
+import { extractNuxtPageMeta, extractNextSegmentConfig } from './routes';
 import { existsSync, promises as fs, readFileSync } from 'node:fs';
 import { basename, extname, join, resolve } from 'node:path';
 import { findProjectRoot } from './path-resolver';
@@ -48,153 +50,25 @@ export * from './parsers/contract-react';
 export * from './parsers/contract-astro';
 export * from './parsers/state-dependency';
 
-interface ProjectEcosystem {
-  hasVue: boolean;
-  hasReact: boolean;
-  hasAstro: boolean;
-}
+import {
+  getProjectEcosystem,
+  detectFramework,
+  detectFrameworkWithEvidence,
+  type ProjectEcosystem,
+  type ProjectFrameworkInfo,
+  type FrameworkDetectionResult,
+} from './framework-detector';
 
-
-/**
- * Discovers frontend ecosystem dependencies present in the project root.
- */
-export function getProjectEcosystem(rootDir: string): ProjectEcosystem {
-
-  let hasVue = false;
-  let hasReact = false;
-  let hasAstro = false;
-
-  try {
-    const pkgPath = join(rootDir, 'package.json');
-    if (existsSync(pkgPath)) {
-      const pkgRaw = readFileSync(pkgPath, 'utf8');
-      const pkg = JSON.parse(pkgRaw);
-      const deps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
-      if (deps['vue'] || deps['@inertiajs/vue3'] || deps['@vitejs/plugin-vue'] || deps['nuxt']) {
-        hasVue = true;
-      }
-      if (deps['react'] || deps['react-dom'] || deps['next'] || deps['@inertiajs/react']) {
-        hasReact = true;
-      }
-      if (deps['astro']) {
-        hasAstro = true;
-      }
-    }
-  } catch {
-    // ignore
-  }
-
-  if (!hasVue && (existsSync(join(rootDir, 'nuxt.config.ts')) || existsSync(join(rootDir, 'nuxt.config.js')))) {
-    hasVue = true;
-  }
-  if (!hasReact && (existsSync(join(rootDir, 'next.config.js')) || existsSync(join(rootDir, 'next.config.ts')) || existsSync(join(rootDir, 'next.config.mjs')))) {
-    hasReact = true;
-  }
-  if (!hasAstro && (existsSync(join(rootDir, 'astro.config.mjs')) || existsSync(join(rootDir, 'astro.config.ts')))) {
-    hasAstro = true;
-  }
-
-  const result: ProjectEcosystem = { hasVue, hasReact, hasAstro };
-  return result;
-}
-
-/**
- * Detects the component framework based on 4-Tier Heuristic Matrix:
- * Tier 1: AST Code & Import Signatures in the file (Vue reactivity vs React hooks)
- * Tier 2: Directory Conventions (/composables/ vs /hooks/)
- * Tier 3: Project Root Manifest (package.json dependencies)
- * Tier 4: Safe Neutral Fallback
- */
-export function detectFramework(
-  filePath: string,
-  explicitContent?: string
-): 'vue' | 'react' | 'astro' | 'unknown' | 'vue-composable' {
-  const ext = extname(filePath).toLowerCase();
-  if (ext === '.vue') return 'vue';
-  if (ext === '.astro') return 'astro';
-
-  const isScriptOrJsx = ext === '.tsx' || ext === '.jsx' || ext === '.ts' || ext === '.js';
-  if (!isScriptOrJsx) return 'unknown';
-
-  let content = explicitContent;
-  if (content === undefined) {
-    try {
-      if (existsSync(filePath)) {
-        content = readFileSync(filePath, 'utf8');
-      }
-    } catch {
-      // ignore
-    }
-  }
-
-  const normPath = filePath.replace(/\\/g, '/');
-  const base = basename(filePath, ext);
-  const isComposableName = /^use[A-Z0-9_]/.test(base);
-
-  // --- Tier 1: AST Code & Import Signatures in the file ---
-  if (content) {
-    const hasVueImportsOrReactivity =
-      /\bfrom\s+['"](?:vue|@vue\/[^'"]+|@vueuse\/[^'"]+|pinia|@inertiajs\/vue3|vue-router)['"]/.test(content) ||
-      /\b(?:ref|reactive|computed|watch|watchEffect|shallowRef|toRef|toRefs|inject|provide)\s*\(/.test(content);
-
-    const hasReactImportsOrHooks =
-      /\bfrom\s+['"](?:react|react-dom|next\/[^'"]+|@tanstack\/react-query)['"]/.test(content) ||
-      /\b(?:useState|useEffect|useCallback|useMemo|useRef|useContext|useReducer|useTransition|useId)\s*\(/.test(content);
-
-    if (hasVueImportsOrReactivity && !hasReactImportsOrHooks) {
-      return isComposableName || normPath.includes('/composables/') ? 'vue-composable' : 'vue';
-    }
-
-    if (hasReactImportsOrHooks && !hasVueImportsOrReactivity) {
-      return 'react';
-    }
-  }
-
-  // --- Tier 2: Directory Conventions ---
-  if (normPath.includes('/composables/')) {
-    try {
-      const rootDir = findProjectRoot(filePath);
-      const eco = getProjectEcosystem(rootDir);
-      if (eco.hasVue && !eco.hasReact) return 'vue-composable';
-    } catch {
-      // ignore
-    }
-  } else if (normPath.includes('/hooks/')) {
-    try {
-      const rootDir = findProjectRoot(filePath);
-      const eco = getProjectEcosystem(rootDir);
-      if (eco.hasReact && !eco.hasVue) return 'react';
-    } catch {
-      // ignore
-    }
-  }
-
-  // --- Tier 3: Project Root Manifest ---
-  try {
-    const rootDir = findProjectRoot(filePath);
-    const eco = getProjectEcosystem(rootDir);
-
-    if (eco.hasVue && !eco.hasReact) {
-      if (isComposableName || normPath.includes('/composables/')) {
-        return 'vue-composable';
-      }
-      return 'vue-composable';
-    }
-
-    if (eco.hasReact && !eco.hasVue) {
-      return 'react';
-    }
-  } catch {
-    // ignore
-  }
-
-  // --- Tier 4: Safe Neutral Fallback ---
-  if (ext === '.tsx' || ext === '.jsx') {
-    return 'react';
-  }
-
-  return 'unknown';
-}
+export {
+  getProjectEcosystem,
+  detectFramework,
+  detectFrameworkWithEvidence,
+};
+export type {
+  ProjectEcosystem,
+  ProjectFrameworkInfo,
+  FrameworkDetectionResult,
+};
 
 
 export function extractStyleTokens(content: string): ComponentStyleTokens | undefined {
@@ -273,13 +147,19 @@ export function extractRenderBoundary(
     };
   }
 
-  if (framework === 'react') {
+  if (framework === 'react' || framework === 'next') {
     // 1. Check for 'use client' directive
     if (/^\s*['"]use client['"]/m.test(content)) {
       return {
         boundary: 'client-component',
         directive: 'use client',
         isClientHydrated: true,
+        evidence: {
+          basis: 'source',
+          resolution: 'resolved',
+          method: 'directive-node',
+          reason: "'use client' directive found at top of file",
+        },
       };
     }
 
@@ -289,6 +169,12 @@ export function extractRenderBoundary(
         boundary: 'server-action',
         directive: 'use server',
         isClientHydrated: false,
+        evidence: {
+          basis: 'source',
+          resolution: 'resolved',
+          method: 'directive-node',
+          reason: "'use server' directive found at top of file",
+        },
       };
     }
 
@@ -338,6 +224,26 @@ export function extractRenderBoundary(
         boundary: 'server-component',
         isClientHydrated: false,
         violations: violations.length > 0 ? violations : undefined,
+        evidence: {
+          basis: 'source',
+          resolution: 'resolved',
+          method: 'app-router-convention',
+          reason: 'Next.js App Router default render boundary without client directive',
+        },
+      };
+    }
+
+    // Shared component directory without explicit directive
+    if (normPath.includes('/components/') || normPath.includes('/ui/')) {
+      return {
+        boundary: 'isomorphic',
+        isClientHydrated: true,
+        evidence: {
+          basis: 'derived',
+          resolution: 'candidate',
+          method: 'neutral-component',
+          reason: 'Component without explicit directive in shared component directory',
+        },
       };
     }
 
@@ -345,10 +251,16 @@ export function extractRenderBoundary(
     return {
       boundary: 'client-component',
       isClientHydrated: true,
+      evidence: {
+        basis: 'derived',
+        resolution: 'resolved',
+        method: 'framework-default',
+        reason: 'Standard client component in client-side framework',
+      },
     };
   }
 
-  if (framework === 'vue') {
+  if (framework === 'vue' || framework === 'nuxt') {
     if (normPath.endsWith('.client.vue')) {
       return {
         boundary: 'client-only',
@@ -796,7 +708,15 @@ export function detectGlobalSymbols(content: string): GlobalSymbolInfo[] {
   const commonFrontendAutoImports = [
     { name: 'navigateTo', hint: 'Nuxt / Frontend Router Navigation Helper' },
     { name: 'useFetch', hint: 'Nuxt / Universal Data Fetching Composable' },
+    { name: 'useLazyFetch', hint: 'Nuxt Lazy Data Fetching Composable' },
     { name: 'useAsyncData', hint: 'Nuxt Async Data Fetching Composable' },
+    { name: 'useLazyAsyncData', hint: 'Nuxt Lazy Async Data Composable' },
+    { name: 'useState', hint: 'Nuxt SSR-Safe State Composable' },
+    { name: 'useRuntimeConfig', hint: 'Nuxt Runtime Config Composable' },
+    { name: 'useNuxtApp', hint: 'Nuxt Application Context Composable' },
+    { name: 'useCookie', hint: 'Nuxt SSR-Friendly Cookie Composable' },
+    { name: 'definePageMeta', hint: 'Nuxt Page Metadata Compiler Macro' },
+    { name: 'abortNavigation', hint: 'Nuxt Navigation Guard Abort Helper' },
     { name: 'useHead', hint: 'Unhead / SEO Meta Composable' },
     { name: 'useSeoMeta', hint: 'Nuxt SEO Meta Composable' },
     { name: 'useRouter', hint: 'Vue Router Navigation Composable' },
@@ -1164,9 +1084,11 @@ export async function extractComponentContract(
   let baseContract: ComponentContract;
   switch (framework) {
     case 'vue':
+    case 'nuxt':
       baseContract = await extractVueContract(resolvedPath, content);
       break;
     case 'react':
+    case 'next':
       baseContract = await extractReactContract(resolvedPath, content);
       break;
     case 'astro':
@@ -1179,7 +1101,7 @@ export async function extractComponentContract(
       const component = basename(resolvedPath, extname(resolvedPath));
       baseContract = {
         component,
-        framework: 'unknown',
+        framework: framework || 'unknown',
         filePath: resolvedPath,
         props: [],
         emits: [],
@@ -1216,6 +1138,26 @@ export async function extractComponentContract(
     ? detectGlobalSymbols(content)
     : undefined;
 
+  let patternDiagnostics: any[] | undefined;
+  try {
+    const { snapshot } = await readSourceSnapshot(resolvedPath);
+    patternDiagnostics = await runCanonAudit(
+      snapshot,
+      content,
+      framework === 'vue-composable' ? 'vue' : framework
+    );
+  } catch {
+    // optional snapshot fallback
+  }
+
+  const nuxtPageMeta = (framework === 'nuxt' || content.includes('definePageMeta'))
+    ? extractNuxtPageMeta(content)
+    : undefined;
+
+  const nextSegmentConfig = (framework === 'react' || framework === 'next')
+    ? extractNextSegmentConfig(content)
+    : undefined;
+
   return {
     ...baseContract,
     variants,
@@ -1231,6 +1173,9 @@ export async function extractComponentContract(
     formContracts: formContracts.length > 0 ? formContracts : undefined,
     inferredProps: inferredProps && inferredProps.length > 0 ? inferredProps : undefined,
     globalSymbols: globalSymbols && globalSymbols.length > 0 ? globalSymbols : undefined,
+    patternDiagnostics: patternDiagnostics && patternDiagnostics.length > 0 ? patternDiagnostics : undefined,
+    nuxtPageMeta,
+    ...(nextSegmentConfig ? { nextSegmentConfig } : {}),
   };
 }
 
