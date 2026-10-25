@@ -1,10 +1,27 @@
-import { describe, expect, it } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
 import { createMcpServer } from '../../src/mcp';
+import { rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { closeAllDatabases, getWorkspaceDatabase, syncWorkspace } from '../../src/engine/database';
 
 const FIXTURES_DIR = join(import.meta.dir, '../fixtures');
+const INERTIA_APP_DIR = join(import.meta.dir, '../mock-projects/inertia-app');
 
 describe('MCP Server & Core Tools', () => {
+  beforeAll(async () => {
+    for (const root of [FIXTURES_DIR, INERTIA_APP_DIR]) {
+      getWorkspaceDatabase(root, { create: true });
+      await syncWorkspace(root);
+    }
+  });
+
+  afterAll(() => {
+    closeAllDatabases();
+    for (const root of [FIXTURES_DIR, INERTIA_APP_DIR]) {
+      rmSync(join(root, '.strata'), { recursive: true, force: true });
+    }
+  });
+
   it('registers exactly 6 Core MCP tools in tool definitions', async () => {
     const server = createMcpServer();
     expect(server).toBeDefined();

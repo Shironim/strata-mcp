@@ -1,11 +1,27 @@
-import { describe, expect, it } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
+import { rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { createMcpServer } from '../../src/mcp';
+import { closeAllDatabases, getWorkspaceDatabase, syncWorkspace } from '../../src/engine/database';
 
 const FIXTURES_DIR = join(import.meta.dir, '../fixtures');
 const INERTIA_APP_DIR = join(import.meta.dir, '../mock-projects/inertia-app');
 
 describe('Sprint 1 — MCP JSON Structured Output Integration', () => {
+  beforeAll(async () => {
+    for (const root of [FIXTURES_DIR, INERTIA_APP_DIR]) {
+      getWorkspaceDatabase(root, { create: true });
+      await syncWorkspace(root);
+    }
+  });
+
+  afterAll(() => {
+    closeAllDatabases();
+    for (const root of [FIXTURES_DIR, INERTIA_APP_DIR]) {
+      rmSync(join(root, '.strata'), { recursive: true, force: true });
+    }
+  });
+
   it('returns valid parseable JSON for get_component_tree when output_format is json', async () => {
     const server = createMcpServer();
     const callHandler = (server as any)._requestHandlers?.get('tools/call');
