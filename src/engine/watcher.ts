@@ -1,7 +1,7 @@
 import { watch, type FSWatcher } from 'node:fs';
 import { resolve, extname, basename } from 'node:path';
 import type { Database } from 'bun:sqlite';
-import { IGNORED_DIRS, SUPPORTED_FRONTEND_EXTENSIONS } from './collector';
+import { IGNORED_DIRS, INDEX_CONFIG_FILES, SUPPORTED_FRONTEND_EXTENSIONS } from './collector';
 
 const SUPPORTED_EXTENSIONS = SUPPORTED_FRONTEND_EXTENSIONS;
 const IGNORED_DIR_NAMES = new Set([...IGNORED_DIRS, '.strata', '.vue-ast']);
@@ -22,6 +22,8 @@ export interface WatcherOptions {
   onSyncComplete?: (changedFiles: string[]) => void;
   onError?: (err: Error) => void;
   scopeSubdirs?: string[];
+  fallbackPolling?: boolean;
+  pollingIntervalMs?: number;
 }
 
 /**
@@ -75,6 +77,9 @@ export class WorkspaceWatcher {
   private pendingDirtyPaths = new Set<string>();
   private isProcessing = false;
   private isClosed = false;
+  private isDegradedMode = false;
+  private mode: 'native' | 'polling' | 'degraded' | 'closed' = 'closed';
+  private pollingTimer: NodeJS.Timeout | null = null;
 
   constructor(absRoot: string, db: Database, options?: WatcherOptions) {
     this.absRoot = resolve(absRoot);
@@ -84,12 +89,90 @@ export class WorkspaceWatcher {
       batchThreshold: options?.batchThreshold ?? 50,
       onSyncComplete: options?.onSyncComplete ?? (() => {}),
       scopeSubdirs: options?.scopeSubdirs ?? [],
+      fallbackPolling: options?.fallbackPolling ?? false,
+      pollingIntervalMs: options?.pollingIntervalMs ?? 3000,
       onError:
         options?.onError ??
         ((err) => {
           process.stderr.write(`[strata-watcher] Warning: ${err.message}\n`);
         }),
     };
+  }
+
+  /**
+   * Returns whether the watcher is in a degraded fallback state.
+   */
+  public isDegraded(): boolean {
+    return this.isDegradedMode;
+  }
+
+  /**
+   * Returns current watcher lifecycle status.
+   */
+  public getStatus(): {
+    active: boolean;
+    degraded: boolean;
+    mode: 'native' | 'polling' | 'degraded' | 'closed';
+  } {
+    return {
+      active: (this.mode === 'native' || this.mode === 'polling') && !this.isClosed,
+      degraded: this.isDegradedMode,
+      mode: this.mode,
+    };
+  }
+
+  /**
+   * Handles watcher runtime or setup error, transitioning to degraded or polling mode.
+   */
+  public handleWatchError(err: Error): void {
+    this.isDegradedMode = true;
+    this.options.onError(err);
+    if (this.options.fallbackPolling && !this.isClosed) {
+      this.enablePollingFallback();
+    } else {
+      this.mode = 'degraded';
+      if (this.fsWatcher) {
+        try {
+          this.fsWatcher.close();
+        } catch {
+          // ignore
+        }
+        this.fsWatcher = null;
+      }
+    }
+  }
+
+  /**
+   * Activates interval-based polling fallback when native OS watching is exhausted or unavailable.
+   */
+  public enablePollingFallback(): void {
+    if (this.isClosed) return;
+    if (this.fsWatcher) {
+      try {
+        this.fsWatcher.close();
+      } catch {
+        // ignore
+      }
+      this.fsWatcher = null;
+    }
+    this.mode = 'polling';
+    this.isDegradedMode = true;
+    if (this.pollingTimer) clearInterval(this.pollingTimer);
+
+    const interval = this.options.pollingIntervalMs ?? 3000;
+    this.pollingTimer = setInterval(async () => {
+      if (this.isClosed || this.isProcessing) return;
+      try {
+        const { syncWorkspace } = await import('./storage/delta-sync');
+        const stats = await syncWorkspace(this.absRoot, undefined, this.db);
+        if (stats.added > 0 || stats.modified > 0 || stats.deleted > 0) {
+          this.options.onSyncComplete([]);
+        }
+      } catch (pollErr) {
+        this.options.onError(pollErr instanceof Error ? pollErr : new Error(String(pollErr)));
+      }
+    }, interval);
+    this.pollingTimer.unref?.();
   }
 
   /**
@@ -113,21 +196,20 @@ export class WorkspaceWatcher {
         }
       );
 
+      this.mode = 'native';
       this.fsWatcher.on('error', (err: Error) => {
-        this.options.onError(err);
-        this.close();
+        this.handleWatchError(err);
       });
 
       return true;
     } catch (err: unknown) {
       const error = err instanceof Error ? err : new Error(String(err));
       // Graceful fallback on OS watch limitations (e.g. Linux inotify ENOSPC)
-      this.options.onError(
+      this.handleWatchError(
         new Error(
           `Recursive watch unavailable on "${this.absRoot}" (${error.message}). Falling back to on-demand sync.`
         )
       );
-      this.close();
       return false;
     }
   }
@@ -139,7 +221,9 @@ export class WorkspaceWatcher {
     if (this.isClosed) return;
     const normalizedRel = normalizePath(relPath);
 
-    if (this.options.scopeSubdirs.length > 0) {
+    const fileName = basename(normalizedRel);
+    const isConfig = INDEX_CONFIG_FILES.has(fileName) || /^(nuxt|next|astro|svelte)\.config\.(ts|js|mjs)$/.test(fileName);
+    if (this.options.scopeSubdirs.length > 0 && !isConfig) {
       const inScope = this.options.scopeSubdirs.some(
         (dir) => normalizedRel === dir || normalizedRel.startsWith(`${dir}/`)
       );
@@ -150,7 +234,7 @@ export class WorkspaceWatcher {
       return;
     }
 
-    if (!isSupportedFile(normalizedRel)) {
+    if (!isConfig && !isSupportedFile(normalizedRel)) {
       return;
     }
 
@@ -206,12 +290,18 @@ export class WorkspaceWatcher {
       return;
     }
     this.isClosed = true;
+    this.mode = 'closed';
     this.pendingDirtyPaths.clear();
     if (activeWatchers.get(this.absRoot) === this) activeWatchers.delete(this.absRoot);
 
     if (this.debounceTimer) {
       clearTimeout(this.debounceTimer);
       this.debounceTimer = null;
+    }
+
+    if (this.pollingTimer) {
+      clearInterval(this.pollingTimer);
+      this.pollingTimer = null;
     }
 
     if (this.fsWatcher) {

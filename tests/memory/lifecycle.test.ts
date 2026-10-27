@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'bun:test';
-import { mkdtempSync, writeFileSync, rmSync, utimesSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync, utimesSync, mkdirSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseCache } from '@vue/compiler-sfc';
 import { parseSfc } from '../../src/engine/splitter';
@@ -24,8 +24,57 @@ test('parsing repeated revisions does not retain source or AST in the compiler c
 
 test('project ecosystem follows manifest changes instead of retaining stale cache', () => {
   const r = root(); expect(getProjectEcosystem(r).hasVue).toBe(true);
+  const time = new Date(1700000000000);
+  utimesSync(join(r, 'package.json'), time, time);
+  expect(getProjectEcosystem(r).hasVue).toBe(true);
   writeFileSync(join(r, 'package.json'), '{"dependencies":{"react":"19"}}');
+  utimesSync(join(r, 'package.json'), time, time);
   expect(getProjectEcosystem(r)).toMatchObject({ hasVue: false, hasReact: true, hasAstro: false });
+});
+
+test('project ecosystem follows framework config creation, replacement and deletion', () => {
+  const r = root();
+  expect(getProjectEcosystem(r).hasNext).toBe(false);
+  writeFileSync(join(r, 'next.config.mjs'), 'export default {}');
+  expect(getProjectEcosystem(r).frameworks.next?.configFile).toBe('next.config.mjs');
+  writeFileSync(join(r, 'next.config.js'), 'module.exports = {}');
+  expect(getProjectEcosystem(r).frameworks.next?.configFile).toBe('next.config.js');
+  unlinkSync(join(r, 'next.config.js'));
+  unlinkSync(join(r, 'next.config.mjs'));
+  expect(getProjectEcosystem(r).hasNext).toBe(false);
+});
+
+test('watcher refreshes graph after config changes including ignored files and mjs framework config', async () => {
+  const r = root(); const file = join(r, 'App.vue');
+  writeFileSync(file, '<template><div /></template>');
+  const db = getWorkspaceDatabase(r);
+  await syncWorkspace(r);
+  const watcher = new WorkspaceWatcher(r, db, { debounceMs: 60000, scopeSubdirs: ['src'] });
+  try {
+    writeFileSync(join(r, '.gitignore'), 'App.vue\n');
+    (watcher as any).handleFsEvent('.gitignore');
+    await watcher.flushQueue();
+    expect(db.query('SELECT path FROM files').all()).toEqual([]);
+    unlinkSync(join(r, '.gitignore'));
+    (watcher as any).handleFsEvent('.gitignore');
+    await watcher.flushQueue();
+    expect(db.query('SELECT framework FROM files WHERE path = ?').get(file)).toEqual({ framework: 'vue' });
+    writeFileSync(join(r, 'package.json'), '{"dependencies":{"nuxt":"3"}}');
+    (watcher as any).handleFsEvent('package.json');
+    await watcher.flushQueue();
+    expect(db.query('SELECT framework FROM files WHERE path = ?').get(file)).toEqual({ framework: 'nuxt' });
+    writeFileSync(join(r, 'package.json'), '{"dependencies":{"vue":"3"}}');
+    (watcher as any).handleFsEvent('package.json');
+    await watcher.flushQueue();
+    writeFileSync(join(r, 'nuxt.config.mjs'), 'export default {}');
+    (watcher as any).handleFsEvent('nuxt.config.mjs');
+    await watcher.flushQueue();
+    expect(db.query('SELECT framework FROM files WHERE path = ?').get(file)).toEqual({ framework: 'nuxt' });
+    unlinkSync(join(r, 'nuxt.config.mjs'));
+    (watcher as any).handleFsEvent('nuxt.config.mjs');
+    await watcher.flushQueue();
+    expect(db.query('SELECT framework FROM files WHERE path = ?').get(file)).toEqual({ framework: 'vue' });
+  } finally { watcher.close(); }
 });
 
 test('closed watchers release their dirty queue and can be replaced in the registry', () => {
