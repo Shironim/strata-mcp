@@ -106,6 +106,8 @@ export interface CollectOptions {
   ignoreRoot?: string;
   /** Include configuration fingerprints while streaming an index scan. */
   includeConfigFiles?: boolean;
+  /** Fail rather than silently omit unreadable directories or ignore rules. */
+  failOnReadError?: boolean;
   /** Include test suites and test fixture directories */
   includeTests?: boolean;
   /** Include build scripts and tool directories */
@@ -116,17 +118,19 @@ export interface CollectOptions {
   domainOnly?: boolean;
 }
 
+export const INDEX_CONFIG_FILES = new Set(['package.json', 'tsconfig.json', 'jsconfig.json', '.gitignore', '.strataignore', 'nuxt.config.mjs', 'next.config.mjs', 'astro.config.mjs']);
+
 /**
  * Loads ignore rules from .strataignore or .gitignore in the target directory.
  */
-async function loadIgnoreRules(dirPath: string): Promise<string[]> {
+async function loadIgnoreRules(dirPath: string, failOnReadError = false): Promise<string[]> {
   const rules: string[] = [];
   for (const file of ['.gitignore', '.strataignore']) {
     try {
       rules.push(...(await fs.readFile(join(dirPath, file), 'utf8')).split('\n'));
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
-      if (code !== 'ENOENT' && code !== 'EACCES' && code !== 'EPERM') throw err;
+      if (code !== 'ENOENT' && (failOnReadError || (code !== 'EACCES' && code !== 'EPERM'))) throw err;
     }
   }
   return rules;
@@ -198,7 +202,7 @@ export async function* iterateFiles(
     }
     for (const base of ancestors) {
       if (inherited.length && isIgnored(base, true, inherited)) return;
-      inherited.push({ base, matcher: ignore().add(await loadIgnoreRules(base)) });
+      inherited.push({ base, matcher: ignore().add(await loadIgnoreRules(base, options?.failOnReadError)) });
     }
     if (inherited.length && isIgnored(dirPath, stat.isDirectory(), inherited)) return;
   }
@@ -231,14 +235,14 @@ export async function* iterateFiles(
   async function* walk(currentDir: string, inherited: IgnoreContext[] = []): AsyncGenerator<string> {
     const contexts = [...inherited];
     if (options?.respectIgnoreFiles !== false) {
-      contexts.push({ base: currentDir, matcher: ignore().add(await loadIgnoreRules(currentDir)) });
+      contexts.push({ base: currentDir, matcher: ignore().add(await loadIgnoreRules(currentDir, options?.failOnReadError)) });
     }
     let entries: Dirent[];
     try {
       entries = await fs.readdir(currentDir, { withFileTypes: true });
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
-      if (code === 'EACCES' || code === 'EPERM' || code === 'ENOENT') {
+      if (!options?.failOnReadError && (code === 'EACCES' || code === 'EPERM' || code === 'ENOENT')) {
         return;
       }
       throw err;
@@ -248,7 +252,7 @@ export async function* iterateFiles(
       const relPath = relative(dirPath, fullPath).replace(/\\/g, '/');
 
       if (isExcluded(entry.name, relPath)) continue;
-      if (entry.isFile() && options?.includeConfigFiles && ['package.json', 'tsconfig.json', 'jsconfig.json', '.gitignore', '.strataignore'].includes(entry.name)) {
+      if (entry.isFile() && options?.includeConfigFiles && INDEX_CONFIG_FILES.has(entry.name)) {
         yield fullPath;
         continue;
       }

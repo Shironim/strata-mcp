@@ -75,16 +75,24 @@ export function getWorkspaceDatabase(
 
   const dbPath = join(dbDir, 'graph.db');
   const db = new Database(dbPath, { create: true });
+  try {
+    // Enable WAL mode & foreign keys for high-concurrency performance
+    db.run('PRAGMA journal_mode = WAL;');
+    db.run('PRAGMA synchronous = NORMAL;');
+    db.run('PRAGMA foreign_keys = ON;');
+    db.run('PRAGMA busy_timeout = 15000;');
+    db.run('PRAGMA cache_size = -8192;');
+    db.run('PRAGMA temp_store = FILE;');
 
-  // Enable WAL mode & foreign keys for high-concurrency performance
-  db.run('PRAGMA journal_mode = WAL;');
-  db.run('PRAGMA synchronous = NORMAL;');
-  db.run('PRAGMA foreign_keys = ON;');
-  db.run('PRAGMA busy_timeout = 5000;');
-  db.run('PRAGMA cache_size = -8192;');
-  db.run('PRAGMA temp_store = FILE;');
-
-  initSchema(db);
+    initSchema(db);
+  } catch (err) {
+    db.close();
+    const code = (err as { code?: string })?.code;
+    if (code === 'SQLITE_CORRUPT' || code === 'SQLITE_NOTADB') {
+      throw new Error(`SQLite database may be corrupt: ${dbPath}. Back up graph.db and any graph.db-wal and graph.db-shm files before manual diagnosis.`, { cause: err });
+    }
+    throw err;
+  }
   dbRegistry.set(absRoot, db);
 
   // Start reactive background watcher for instant cache updates if enabled (default: true)

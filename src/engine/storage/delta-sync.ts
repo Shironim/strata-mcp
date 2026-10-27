@@ -136,13 +136,26 @@ export async function syncWorkspace(
   const previous = syncQueues.get(db) ?? Promise.resolve();
   const operation = previous.catch(() => {}).then(async () => {
     const { stagedSync } = await import('./staged-sync');
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try { return await stagedSync(absRoot, scopePath, db); }
-      catch (err) {
-        if (attempt || !(err instanceof Error && err.message.startsWith('WORKSPACE_CHANGED'))) throw err;
+    const maxRetries = 3;
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      try {
+        return await stagedSync(absRoot, scopePath, db);
+      } catch (err) {
+        const isBusy =
+          (err as { code?: string })?.code === 'SQLITE_BUSY' ||
+          (err instanceof Error && (err.message.includes('locked') || err.message.includes('busy') || err.message.includes('SQLITE_BUSY')));
+        const isWorkspaceChanged = err instanceof Error && err.message.startsWith('WORKSPACE_CHANGED');
+
+        if (attempt < maxRetries - 1 && (isBusy || isWorkspaceChanged)) {
+          if (isBusy) {
+            await new Promise((r) => setTimeout(r, 50 * (attempt + 1)));
+          }
+          continue;
+        }
+        throw err;
       }
     }
-    throw new Error('WORKSPACE_CHANGED: retries exhausted');
+    throw new Error('syncWorkspace: retries exhausted');
   });
   syncQueues.set(db, operation);
   try { return await operation; }

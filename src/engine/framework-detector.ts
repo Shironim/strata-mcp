@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { basename, extname, join, resolve } from 'node:path';
 import type { Evidence, FrontendFramework } from '../types';
 import { findProjectRoot } from './path-resolver';
@@ -52,30 +52,14 @@ export function parseSemver(versionStr?: string): FrameworkVersionInfo | undefin
   };
 }
 
-// In-memory cache for root directory ecosystems keyed by path and package.json mtime
-const ecosystemCache = new Map<string, { mtimeMs: number; eco: ProjectEcosystem }>();
-
 export function clearEcosystemCache(): void {
-  ecosystemCache.clear();
+  // Kept for callers; ecosystem information is read fresh.
 }
 
 /**
  * Discovers frontend framework dependencies, versions, and config files from project root.
  */
 export function getProjectEcosystem(rootDir: string): ProjectEcosystem {
-  const pkgPath = join(rootDir, 'package.json');
-  let currentMtime = 0;
-  try {
-    if (existsSync(pkgPath)) {
-      currentMtime = statSync(pkgPath).mtimeMs;
-    }
-  } catch {
-    // ignore
-  }
-
-  const cached = ecosystemCache.get(rootDir);
-  if (cached && cached.mtimeMs === currentMtime) return cached.eco;
-
   const frameworks: Partial<Record<FrontendFramework, ProjectFrameworkInfo>> = {};
 
   try {
@@ -160,7 +144,6 @@ export function getProjectEcosystem(rootDir: string): ProjectEcosystem {
     hasSolid: Boolean(frameworks.solid),
   };
 
-  ecosystemCache.set(rootDir, { mtimeMs: currentMtime, eco: result });
   return result;
 }
 

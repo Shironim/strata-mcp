@@ -1,5 +1,6 @@
-import { afterEach, describe, expect, it } from 'bun:test';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, unlinkSync } from 'node:fs';
+import { afterEach, describe, expect, it, spyOn } from 'bun:test';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, chmodSync, rmSync, unlinkSync, promises as fs } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { Database } from 'bun:sqlite';
 import { initSchema } from '../../src/engine/storage/schema';
@@ -30,6 +31,78 @@ afterEach(() => {
 });
 
 describe('Audit regression cases', () => {
+  it.skipIf(process.getuid?.() === 0)('fails sync when a source directory becomes unreadable and recovers after access returns', async () => {
+    const root = workspace();
+    put(root, 'src/App.tsx', 'export default () => <div />;');
+    const db = getWorkspaceDatabase(root, { create: true });
+    await syncWorkspace(root);
+    const dir = join(root, 'src');
+    chmodSync(dir, 0);
+    try {
+      await expect(syncWorkspace(root)).rejects.toThrow();
+      expect(db.query("SELECT value FROM meta WHERE key = 'index_invalid'").get()).toEqual({ value: '1' });
+    } finally {
+      chmodSync(dir, 0o700);
+    }
+    await syncWorkspace(root);
+    expect(db.query('SELECT path FROM files').all()).toEqual([{ path: join(dir, 'App.tsx') }]);
+  });
+
+  it.skipIf(process.getuid?.() === 0)('fails sync when an ignore file cannot be read', async () => {
+    const root = workspace();
+    put(root, 'App.tsx', 'export default () => <div />;');
+    const ignoreFile = join(root, '.strataignore');
+    writeFileSync(ignoreFile, 'App.tsx\n');
+    getWorkspaceDatabase(root, { create: true });
+    chmodSync(ignoreFile, 0);
+    try {
+      await expect(syncWorkspace(root)).rejects.toThrow();
+    } finally {
+      chmodSync(ignoreFile, 0o600);
+    }
+    await syncWorkspace(root);
+  });
+
+  it('retries when source changes after parsing and indexes the new content', async () => {
+    const root = workspace();
+    const path = join(root, 'App.tsx');
+    const updated = 'export default () => <main />;';
+    writeFileSync(path, 'export default () => <div />;');
+    const db = getWorkspaceDatabase(root, { create: true });
+    const open = fs.open.bind(fs);
+    let reads = 0;
+    const spy = spyOn(fs, 'open').mockImplementation(async (...args: Parameters<typeof fs.open>) => {
+      const file = await open(...args);
+      if (args[0] === path && ++reads === 2) {
+        const close = file.close.bind(file);
+        file.close = async () => { await close(); writeFileSync(path, updated); };
+      }
+      return file;
+    });
+    try {
+      await syncWorkspace(root);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(db.query('SELECT content_hash FROM files WHERE path = ?').get(path)).toEqual({
+      content_hash: createHash('sha256').update(updated).digest('hex'),
+    });
+  });
+
+  it('reports a corrupt database without deleting it', () => {
+    const root = workspace();
+    mkdirSync(join(root, '.strata'));
+    const path = join(root, '.strata', 'graph.db');
+    writeFileSync(path, 'not a database');
+    try {
+      getWorkspaceDatabase(root);
+      throw new Error('expected database open to fail');
+    } catch (err) {
+      expect((err as Error).message).toContain('Back up graph.db');
+      expect(((err as Error).cause as { code: string }).code).toBe('SQLITE_NOTADB');
+    }
+    expect(readFileSync(path, 'utf8')).toBe('not a database');
+  });
   it('refreshes old graph payloads and preserves named component aliases', async () => {
     const root = workspace();
     put(root, 'Button.tsx', 'export function Button() { return <button/>; }');

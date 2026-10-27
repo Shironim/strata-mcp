@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { basename, extname, normalize, sep, resolve } from 'node:path';
 import type { Database, Statement } from 'bun:sqlite';
-import { iterateFiles } from '../collector';
+import { INDEX_CONFIG_FILES, iterateFiles } from '../collector';
 import { assertSourceSize } from '../source-file';
 import { canonicalizePath } from '../path-resolver';
 import { scanRoutes } from '../routes';
@@ -13,8 +13,7 @@ import { STRATA_VERSION } from '../../version';
 import type { SyncStats } from '../../types';
 
 // Reparse imports and state dependencies after AST extraction fixes.
-const CACHE_VERSION = `memory-v4:${STRATA_VERSION}`;
-const CONFIG_FILES = new Set(['package.json', 'tsconfig.json', 'jsconfig.json', '.gitignore', '.strataignore']);
+const CACHE_VERSION = `memory-v5:${STRATA_VERSION}`;
 
 async function hashFile(path: string): Promise<{hash: string; mtime: number; size: number}> {
   const file = await fs.open(path, 'r');
@@ -55,15 +54,15 @@ export async function stagedSync(root: string, scopePath: string | undefined, db
     const insert = prepare('INSERT INTO sync_files(path, hash, mtime, size, config) VALUES (?,?,?,?,?)');
     const verifyInsert = prepare('INSERT INTO sync_verify VALUES (?,?,?,?,?)');
     async function scan(statement: Statement): Promise<void> {
-      for await (const raw of iterateFiles(root, {ignoreRoot: root, includeConfigFiles: true})) {
-        const config = CONFIG_FILES.has(basename(raw));
+      for await (const raw of iterateFiles(root, {ignoreRoot: root, includeConfigFiles: true, failOnReadError: true})) {
+        const config = INDEX_CONFIG_FILES.has(basename(raw));
         if (!config && !SUPPORTED_EXTENSIONS.has(extname(raw).toLowerCase())) continue;
         const path = normalize(canonicalizePath(raw)); const info = await hashFile(path);
         statement.run(path, info.hash, info.mtime, info.size, config ? 1 : 0);
       }
     }
     await scan(insert);
-    const configHash = createHash('sha256').update(CACHE_VERSION);
+    const configHash = createHash('sha256').update(CACHE_VERSION).update('\0alias-resolution-jsx');
     const configRows = prepare('SELECT path, hash FROM sync_files WHERE config = 1 ORDER BY path');
     for (const row of configRows.iterate() as Iterable<{path: string; hash: string}>) configHash.update(row.path).update('\0').update(row.hash);
     const fingerprint = configHash.digest('hex');
@@ -183,10 +182,17 @@ export async function stagedSync(root: string, scopePath: string | undefined, db
     };
   } catch (err) {
     // Derived data cannot be trusted after an unreadable file or an unsuccessful refresh.
-    if (!(err instanceof Error && err.message.startsWith('WORKSPACE_CHANGED'))) {
-      db.transaction(() => {
-        db.run('DELETE FROM files'); db.run("INSERT OR REPLACE INTO meta VALUES ('index_invalid', '1')");
-      })();
+    const isBusy =
+      (err as { code?: string })?.code === 'SQLITE_BUSY' ||
+      (err instanceof Error && (err.message.includes('locked') || err.message.includes('busy') || err.message.includes('SQLITE_BUSY')));
+    if (!isBusy && !(err instanceof Error && err.message.startsWith('WORKSPACE_CHANGED'))) {
+      try {
+        db.transaction(() => {
+          db.run('DELETE FROM files'); db.run("INSERT OR REPLACE INTO meta VALUES ('index_invalid', '1')");
+        })();
+      } catch {
+        // ignore if database cannot be written during clean up
+      }
     }
     throw err;
   } finally {
