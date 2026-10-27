@@ -1,5 +1,5 @@
 import { readSourceFile } from './source-file';
-import { promises as fs } from 'node:fs';
+import { statSync, promises as fs } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 
 /** User-supplied alias map: `{ "@/*": "resources/js/*", "@/": "src/" }`. */
@@ -189,7 +189,34 @@ function buildAliasConfigFromTsconfigPaths(
 
   const entries = Object.entries(paths)
     .filter(([, targets]) => Array.isArray(targets) && targets.length > 0)
-    .map(([alias, targets]) => buildAliasEntry(alias, String(targets[0])));
+    .map(([alias, targets]) => targets.map(target => buildAliasEntry(alias, String(target))))
+    .sort((a, b) => Number(b[0].matchKind === 'exact') - Number(a[0].matchKind === 'exact') || b[0].aliasBefore.length - a[0].aliasBefore.length);
 
-  return createAliasConfigFromEntries(entries, baseDir);
+  return {
+    isAlias: specifier => entries.some(group => matchAliasEntry(group[0], specifier) !== null),
+    resolve(specifier) {
+      for (const group of entries) {
+        const remainder = matchAliasEntry(group[0], specifier);
+        if (remainder === null) continue;
+        const candidates = group.map(entry => resolve(baseDir, entry.targetBefore + remainder + entry.targetAfter));
+        for (const candidate of candidates) {
+          if (candidate.endsWith('.js') || candidate.endsWith('.jsx')) {
+            const jsx = candidate.endsWith('.jsx');
+            for (const ext of jsx ? ['.tsx'] : ['.ts', '.tsx']) {
+              const source = candidate.slice(0, jsx ? -4 : -3) + ext;
+              try { if (statSync(source).isFile()) return source; } catch {}
+            }
+          }
+          if (['', '.vue', '.tsx', '.jsx', '.astro', '.ts', '.js', '/index.vue', '/index.tsx', '/index.jsx', '/index.astro', '/index.ts', '/index.js']
+            .some(suffix => {
+              try { return statSync(candidate + suffix).isFile(); } catch { return false; }
+            })) return candidate;
+        }
+        return candidates.find(candidate => {
+          try { return statSync(candidate).isDirectory(); } catch { return false; }
+        }) ?? candidates[0];
+      }
+      return null;
+    },
+  };
 }

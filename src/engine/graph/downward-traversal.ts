@@ -31,8 +31,8 @@ import {
   isPageFile,
   resolveImportPath,
   resolveBarrelExport,
-  extractLocalImports,
 } from "./resolution";
+import { extractImports } from './path-helpers';
 import {
   extractPassedProps,
   detectPropsDrilling,
@@ -419,7 +419,8 @@ async function getDownwardComponentTree(
       }
     }
 
-    const imports = extractLocalImports(content, aliasConfig, normPath);
+    const allImports = extractImports(content, normPath);
+    const imports = allImports.filter(i => i.source.startsWith('.') || i.source.startsWith('/') || aliasConfig?.isAlias(i.source));
     const resolvedChildren = new Set<string>();
 
     // 1. Static and dynamic imports
@@ -486,6 +487,7 @@ async function getDownwardComponentTree(
     // 2. Auto-import resolution fallback for template tags not in imports
     const customTags = extractRenderedCustomTags(content);
     for (const tag of customTags) {
+      if (allImports.some(i => isComponentNameMatch(tag, i.alias || i.name))) continue;
       const lower = tag.toLowerCase();
       const catalogTarget = catalog.get(lower);
       if (catalogTarget && catalogTarget !== normPath && !resolvedChildren.has(catalogTarget)) {
@@ -528,7 +530,7 @@ async function getDownwardComponentTree(
     // 3. Dynamic component fallback tags (e.g. from dynamic map evaluation)
     for (const tag of customTags) {
       const isRegistered =
-        imports.some((i) => (i.alias || i.name) === tag) || catalog.has(tag.toLowerCase());
+        allImports.some((i) => isComponentNameMatch(tag, i.alias || i.name)) || catalog.has(tag.toLowerCase());
       if (isRegistered || tag.startsWith('app-') || tag.startsWith('base-')) {
         continue;
       }

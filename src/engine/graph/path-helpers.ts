@@ -1,5 +1,5 @@
-import { existsSync, readFileSync, statSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { basename, dirname, extname, resolve } from 'node:path';
 import { escapeRegExp } from '../patterns';
 import { findProjectRoot } from '../path-resolver';
 import type { AliasConfig } from '../resolver';
@@ -161,6 +161,68 @@ export function extractImports(
         if (body && ts.isBlock(body)) body = body.statements.find(ts.isReturnStatement)?.expression;
         if (body && ts.isCallExpression(body) && body.expression.kind === ts.SyntaxKind.ImportKeyword && body.arguments[0] && ts.isStringLiteralLike(body.arguments[0])) {
           if (ts.isIdentifier(node.name) || ts.isStringLiteral(node.name)) add(node.name.text, body.arguments[0].text, true);
+        }
+      }
+    }
+    // Universal dynamic import expression resolution: () => import(...), await import(...), etc.
+    if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword && node.arguments.length > 0) {
+      const arg = node.arguments[0];
+      const inferName = (fallbackSource: string): string => {
+        let current: ts.Node = node;
+        while (current.parent) {
+          current = current.parent;
+          if (ts.isPropertyAssignment(current)) {
+            const propName = ts.isIdentifier(current.name) || ts.isStringLiteral(current.name) ? current.name.text : '';
+            if (propName && propName !== 'component' && propName !== 'default') return propName;
+            return basename(fallbackSource, extname(fallbackSource));
+          } else if (ts.isArrayLiteralExpression(current)) {
+            return basename(fallbackSource, extname(fallbackSource));
+          } else if (ts.isVariableDeclaration(current)) {
+            if (ts.isIdentifier(current.name)) return current.name.text;
+          }
+        }
+        return basename(fallbackSource, extname(fallbackSource));
+      };
+
+      if (ts.isStringLiteralLike(arg)) {
+        const source = arg.text;
+        let current: ts.Node = node;
+        let boundNames: string[] = [];
+        while (current.parent) {
+          current = current.parent;
+          if (ts.isVariableDeclaration(current) && ts.isObjectBindingPattern(current.name)) {
+            boundNames = current.name.elements
+              .map((el) => (ts.isIdentifier(el.name) ? el.name.text : ''))
+              .filter(Boolean);
+            break;
+          }
+        }
+        if (boundNames.length > 0) {
+          for (const bName of boundNames) {
+            add(bName, source, true);
+          }
+        } else {
+          const name = inferName(source);
+          add(name, source, true);
+        }
+      } else if (ts.isTemplateExpression(arg) && filePath) {
+        const head = arg.head.text;
+        const lastSpan = arg.templateSpans[arg.templateSpans.length - 1];
+        const suffix = lastSpan ? lastSpan.literal.text : '';
+        const baseDir = resolve(dirname(filePath), head);
+        if (existsSync(baseDir) && statSync(baseDir).isDirectory()) {
+          try {
+            const entries = readdirSync(baseDir);
+            for (const entry of entries) {
+              if (suffix ? entry.endsWith(suffix) : /\.(vue|tsx|jsx|ts|js|svelte|astro)$/.test(entry)) {
+                const compName = basename(entry, extname(entry));
+                const resolvedSource = `${head.endsWith('/') ? head : head + '/'}${entry}`;
+                add(compName, resolvedSource, true);
+              }
+            }
+          } catch {
+            // ignore read error
+          }
         }
       }
     }
