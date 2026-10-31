@@ -430,7 +430,7 @@ export async function checkNextRules(
     }
 
     // 7. next/rsc-event-handler
-    if (!hasUseClientDirective && ts.isJsxAttribute(node)) {
+    if (!hasUseClientDirective && ts.isJsxAttribute(node) && ts.isIdentifier(node.name)) {
       const attrName = node.name.text;
       if (/^on[A-Z]/.test(attrName) && !attrName.startsWith('onServer')) {
         diagnostics.push(

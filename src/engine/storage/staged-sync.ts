@@ -38,6 +38,7 @@ function meta(db: Database, key: string): string {
 /** TEMP tables spill to disk and disappear even after a killed worker. */
 export async function stagedSync(root: string, scopePath: string | undefined, db: Database): Promise<SyncStats> {
   const start = performance.now(); const statements: Statement[] = [];
+  let parserInvocations = 0;
   const prepare = (sql: string) => { const stmt = db.prepare(sql); statements.push(stmt); return stmt; };
   const generation = meta(db, 'sync_generation');
   const targetScope = scopePath ? canonicalizePath(resolve(root, scopePath)) : root;
@@ -62,29 +63,43 @@ export async function stagedSync(root: string, scopePath: string | undefined, db
       }
     }
     await scan(insert);
-    const configHash = createHash('sha256').update(CACHE_VERSION).update('\0alias-resolution-jsx');
+    const configHash = createHash('sha256').update(CACHE_VERSION).update('\0alias-resolution-jsx').update('\0contract-typing-v1').update('\0scoped-dependency-fallback-v1');
     const configRows = prepare('SELECT path, hash FROM sync_files WHERE config = 1 ORDER BY path');
     for (const row of configRows.iterate() as Iterable<{path: string; hash: string}>) configHash.update(row.path).update('\0').update(row.hash);
     const fingerprint = configHash.digest('hex');
     const reset = meta(db, 'index_invalid') === '1' || meta(db, 'cache_version') !== CACHE_VERSION || meta(db, 'config_fingerprint') !== fingerprint;
-    const scope = normalize(reset ? root : targetScope), prefix = scope + sep;
+    let scope = normalize(reset ? root : targetScope), prefix = scope + sep;
     const scopeSql = '(s.path = $scope OR substr(s.path, 1, length($prefix)) = $prefix)';
-    const bindings = {$scope: scope, $prefix: prefix};
-    const counts = db.query(`SELECT
+    let bindings = {$scope: scope, $prefix: prefix};
+    const countFiles = () => db.query(`SELECT
       sum(CASE WHEN f.id IS NULL THEN 1 ELSE 0 END) AS added,
       sum(CASE WHEN f.id IS NOT NULL AND (f.content_hash IS NOT s.hash OR $reset) THEN 1 ELSE 0 END) AS modified,
       sum(CASE WHEN f.id IS NOT NULL AND f.content_hash = s.hash AND NOT $reset THEN 1 ELSE 0 END) AS unchanged,
       count(*) AS total
       FROM sync_files s LEFT JOIN files f ON f.path = s.path WHERE s.config = 0 AND ${scopeSql}`)
       .get({...bindings, $reset: reset ? 1 : 0}) as {added: number; modified: number; unchanged: number; total: number};
-    const deleted = (db.query(`SELECT count(*) AS n FROM files s WHERE ${scopeSql} AND NOT EXISTS (SELECT 1 FROM sync_files t WHERE t.path=s.path AND t.config=0)`).get(bindings) as {n: number}).n;
+    const countDeleted = () => (db.query(`SELECT count(*) AS n FROM files s WHERE ${scopeSql} AND NOT EXISTS (SELECT 1 FROM sync_files t WHERE t.path=s.path AND t.config=0)`).get(bindings) as {n: number}).n;
+    let counts = countFiles();
+    let deleted = countDeleted();
+    let fallbackReason: 'INDEX_INVALIDATED' | 'DEPENDENCY_CLOSURE_UNVERIFIED' | null = reset && targetScope !== root ? 'INDEX_INVALIDATED' : null;
+    if (!reset && scope !== root && (counts.added ?? 0) + (counts.modified ?? 0) + deleted > 0) {
+      // Type/config dependencies are not a complete reverse graph. Preserve correctness
+      // by refreshing outside dependents until a bounded impact set can be proven.
+      scope = root;
+      prefix = scope + sep;
+      bindings = { $scope: scope, $prefix: prefix };
+      counts = countFiles();
+      deleted = countDeleted();
+      fallbackReason = 'DEPENDENCY_CLOSURE_UNVERIFIED';
+    }
     const changed = reset || (counts.added ?? 0) + (counts.modified ?? 0) + deleted > 0;
     if (changed) {
-      // Rebuild scoped dependents as well: a changed imported type can alter unchanged contracts.
+      // Rebuild effective-scope dependents as well: imported types can alter unchanged contracts.
       const candidates = prepare(`SELECT path, hash FROM sync_files s WHERE config=0 AND ${scopeSql} ORDER BY path`);
       const update = prepare('UPDATE sync_files SET payload = ? WHERE path = ?');
       for (const row of candidates.iterate(bindings) as Iterable<{path: string; hash: string}>) {
         try {
+          parserInvocations++;
           const parsed = await batchParser([row.path], root, new Map(), false);
           const payload = parsed.files.get(row.path);
           if (!payload) throw new Error('PARSE_FAILED: parser returned no result');
@@ -174,11 +189,13 @@ export async function stagedSync(root: string, scopePath: string | undefined, db
       modified: counts.modified ?? 0,
       deleted,
       unchanged: counts.unchanged ?? 0,
+      parserInvocations,
       total: counts.total,
       durationMs: Math.round(performance.now() - start),
       syncGeneration: Number(generation || 0) + 1,
       configFingerprint: fingerprint,
       cacheHit: !changed,
+      scope: { requested: targetScope, effective: scope, fallbackReason },
     };
   } catch (err) {
     // Derived data cannot be trusted after an unreadable file or an unsuccessful refresh.

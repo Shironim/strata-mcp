@@ -267,6 +267,10 @@ const emit = defineEmits<{ (e: 'update:modelValue', val: string): void }>();
         expect(d).toBeDefined();
         expect(d?.severity).toBe('info');
         expect(d?.canon.summary).toContain('defineModel');
+        const call = 'defineProps<{ modelValue: string }>()';
+        expect(d!.fact.ref.startOffset).toBe(code.indexOf(call));
+        expect(d!.fact.ref.endOffset).toBe(code.indexOf(call) + call.length);
+        expect(await readSourceRef(filePath, d!.fact.ref)).toBe(call);
       } finally {
         await fs.rm(testDir, { recursive: true, force: true });
       }

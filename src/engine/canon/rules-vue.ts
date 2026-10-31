@@ -187,7 +187,7 @@ export async function checkVueRules(
 
   let hasModelValueProp = false;
   let hasUpdateModelValueEmit = false;
-  let definePropsNode: ts.Node | null = null;
+  const modelProps: { span?: { startOffset: number; endOffset: number } } = {};
   const reactiveVariableNames = new Set<string>();
 
   for (const block of scriptBlocks) {
@@ -441,7 +441,10 @@ export async function checkVueRules(
       if (isVue34Plus) {
         if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)) {
           if (node.expression.text === 'defineProps') {
-            definePropsNode = node;
+            modelProps.span = {
+              startOffset: block.loc.start.offset + node.getStart(sourceFile),
+              endOffset: block.loc.start.offset + node.end,
+            };
             const text = node.getText(sourceFile);
             if (text.includes('modelValue')) hasModelValueProp = true;
           }
@@ -459,30 +462,26 @@ export async function checkVueRules(
   }
 
   // Rule: vue/prefer-define-model
-  if (isVue34Plus && hasModelValueProp && hasUpdateModelValueEmit && definePropsNode) {
-    const block = parsed.scriptSetup || parsed.script;
-    if (block) {
-      const startOffset = block.loc.start.offset + definePropsNode.pos;
-      const endOffset = block.loc.start.offset + definePropsNode.end;
-      diagnostics.push(
-        createDiagnostic({
-          ruleId: 'vue/prefer-define-model',
-          framework: 'vue',
-          category: 'legacy-syntax',
-          severity: 'info',
-          snapshot,
-          content,
-          startOffset,
-          endOffset,
-          smellTitle: 'Manual modelValue Props & update:modelValue Emit Boilerplate',
-          smellExplanation: 'In Vue >= 3.4, defineModel() replaces the verbose combination of modelValue in defineProps and update:modelValue in defineEmits.',
-          canonSummary: `Use 'const model = defineModel<string>()'.`,
-          canonRationale: 'defineModel() simplifies two-way v-model binding down to a single reactive ref declaration.',
-          canonicalCode: `const model = defineModel<string>();`,
-          referenceDoc: 'https://vuejs.org/guide/components/v-model.html',
-        })
-      );
-    }
+  if (isVue34Plus && hasModelValueProp && hasUpdateModelValueEmit && modelProps.span) {
+    const { startOffset, endOffset } = modelProps.span;
+    diagnostics.push(
+      createDiagnostic({
+        ruleId: 'vue/prefer-define-model',
+        framework: 'vue',
+        category: 'legacy-syntax',
+        severity: 'info',
+        snapshot,
+        content,
+        startOffset,
+        endOffset,
+        smellTitle: 'Manual modelValue Props & update:modelValue Emit Boilerplate',
+        smellExplanation: 'In Vue >= 3.4, defineModel() replaces the verbose combination of modelValue in defineProps and update:modelValue in defineEmits.',
+        canonSummary: `Use 'const model = defineModel<string>()'.`,
+        canonRationale: 'defineModel() simplifies two-way v-model binding down to a single reactive ref declaration.',
+        canonicalCode: `const model = defineModel<string>();`,
+        referenceDoc: 'https://vuejs.org/guide/components/v-model.html',
+      })
+    );
   }
 
   return diagnostics;

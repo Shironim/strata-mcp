@@ -120,7 +120,7 @@ export async function findUnusedComponents(
     name: string;
     fileName: string;
     filePath: string;
-    framework: 'vue' | 'react' | 'astro' | 'unknown' | 'vue-composable';
+    framework: ReturnType<typeof detectFramework>;
     candidates: string[];
     isPage: boolean;
     usageCount: number;

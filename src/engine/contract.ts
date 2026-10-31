@@ -24,6 +24,7 @@ import type {
   DataDependencyInfo,
   FormContract,
   FormFieldContract,
+  FrontendFramework,
   GlobalSymbolInfo,
   InferredPropDetail,
   RenderBoundaryInfo,
@@ -137,7 +138,7 @@ import { analyzeBidirectionalTransport } from './transport-analyzer';
 export function extractRenderBoundary(
   filePath: string,
   content: string,
-  framework: 'vue' | 'react' | 'astro' | 'unknown' | 'vue-composable'
+  framework: FrontendFramework | 'vue-composable'
 ): RenderBoundaryInfo {
   const normPath = filePath.replace(/\\/g, '/');
   const violations: BoundaryViolation[] = [];
