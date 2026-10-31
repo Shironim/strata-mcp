@@ -36,6 +36,30 @@ export interface SourceRef {
   endOffset: number;
 }
 
+/** Source retrieval evidence; completeness is relative to the declared selection policy. */
+export interface RetrievalEvidence {
+  version: 1;
+  workspace: string | null;
+  scope: string | null;
+  queryId: string;
+  retrievalId: string;
+  inputIdentity?: { kind: 'inline'; hash: string; algorithm: 'sha256-canonical-json' };
+  policy: string;
+  engineRevision: string;
+  index: null | { generation: string; configFingerprint: string; cacheVersion: string; manifestHash: string; consistency: 'observed-stable' | 'changed' | 'unavailable' };
+  config: { applicability: 'not-used' | 'unverified' | 'indexed'; reason: string; fingerprint?: string };
+  source?: SourceSnapshot;
+  freshness: 'current' | 'stale' | 'unavailable';
+  freshnessBoundary: 'source-rechecked-after-selection' | 'index-rechecked-after-analysis' | 'not-verified';
+  completeness: 'complete' | 'partial';
+  basis: 'source' | 'derived';
+  sourceFreshness?: 'current' | 'stale' | 'unavailable';
+  dependencies?: { status: 'unverified'; reason: string };
+  selectionReason: string;
+  omissions: Array<{ code: string; reason: string }>;
+  limitations: string[];
+}
+
 export interface SourceLineRange {
   startLine: number;
   endLine: number;
@@ -96,7 +120,12 @@ export type PatternCategory =
   | 'ssr-hydration'
   | 'boundary'
   | 'performance'
-  | 'legacy-syntax';
+  | 'legacy-syntax'
+  | 'architecture'
+  | 'syntax'
+  | 'security'
+  | 'correctness'
+  | 'reliability';
 
 export interface CanonicalRemediation {
   summary: string;
@@ -286,6 +315,7 @@ export interface ComponentModelContract {
 export interface ComponentSlotDetail {
   name: string;
   isScoped: boolean;
+  description?: string;
   bindings?: string[];
   payload?: Record<string, string>;
 }
@@ -498,6 +528,56 @@ export interface PropsDrillingAlert {
 }
 
 export interface ComponentTreeResult {
+  /** Traversal gaps; absence does not establish complete resolution. */
+  diagnostics?: Array<{
+    code: 'UNRESOLVED_RENDERED_IMPORT';
+    filePath: string;
+    sourceHash: string;
+    specifier: string;
+    identifier: string;
+    resolution: 'unresolved';
+    reason: string;
+  } | {
+    code: 'CYCLE_TRUNCATED';
+    filePath: string;
+    sourceHash: string;
+    targetPath: string;
+    depth: number;
+    reason: string;
+  } | {
+    code: 'VUE_PARSE_FAILED' | 'VUE_TEMPLATE_UNSUPPORTED';
+    filePath: string;
+    sourceHash: string;
+    depth: number;
+    reason: string;
+  } | {
+    code: 'VUE_DYNAMIC_COMPONENT';
+    selectorKind: 'static-is' | 'bound-is' | 'dynamic-argument' | 'object-binding';
+    argument: string | null;
+    filePath: string;
+    sourceHash: string;
+    sourceRef: SourceRef;
+    depth: number;
+    expression: string;
+    resolution: 'candidate';
+    reason: string;
+  } | {
+    code: 'CONSUMER_INPUT_UNSUPPORTED';
+    filePath: string;
+    sourceHash: string;
+    reason: string;
+  } | {
+    code: 'CONSUMER_SOURCE_READ_FAILED';
+    filePath: string;
+    sourceHash: null;
+    reason: string;
+  } | {
+    code: 'MAX_DEPTH_REACHED' | 'SCOPE_BOUNDARY' | 'SOURCE_READ_FAILED';
+    filePath: string;
+    sourceHash: null;
+    depth: number;
+    reason: string;
+  }>;
   root: ComponentTreeNode;
   totalComponents: number;
   maxDepthReached: number;
@@ -557,7 +637,7 @@ export interface UnusedComponentInfo {
   name: string;
   fileName: string;
   filePath: string;
-  framework: 'vue' | 'react' | 'astro' | 'unknown' | 'vue-composable';
+  framework: FrontendFramework | 'vue-composable';
   isPage?: boolean;
 }
 
@@ -641,6 +721,14 @@ export interface ScanRoutesOptions {
 }
 
 export interface SyncStats {
+  /** Counts/parser work describe effective scope; changed scoped inputs may require workspace fallback. */
+  scope?: {
+    requested: string;
+    effective: string;
+    fallbackReason: 'INDEX_INVALIDATED' | 'DEPENDENCY_CLOSURE_UNVERIFIED' | null;
+  };
+  /** Actual batchParser calls in the successful sync attempt, not modified-file count. */
+  parserInvocations: number;
   added: number;
   modified: number;
   deleted: number;
@@ -1024,6 +1112,8 @@ export type PatchRefactorType =
   | 'remove_slot';
 
 export interface ComponentPatchItem {
+  /** Present on generated plans; legacy items without this precondition must be regenerated. */
+  sourceRef?: SourceRef;
   file: string;
   line: number;
   column: number;
@@ -1047,6 +1137,29 @@ export interface PatchPlanResult {
   oldName: string;
   newName?: string;
   totalConsumersAudited: number;
+  coverage: {
+    candidateCount: number;
+    analyzedCount: number;
+    failedCount: number;
+    unsupportedCount: number;
+    analyzedWithPatchCount: number;
+    analyzedWithoutPatchCount: number;
+    discovery: 'graph-bounded';
+    omissions: Array<{
+      file: string;
+      code: string;
+      message: string;
+      resolution: 'candidate' | 'unsupported';
+      sourceRef?: SourceRef;
+    }>;
+    operationScope: {
+      consumerUsages: 'supported-static-usages';
+      targetDeclaration: 'not-included';
+      forwarding: 'not-included';
+      dynamicComponents: 'not-included';
+    };
+    diagnostics: Array<{ file: string; code: string; message: string }>;
+  };
   totalPatches: number;
   patches: ComponentPatchItem[];
   _meta?: EngineMetadata;
