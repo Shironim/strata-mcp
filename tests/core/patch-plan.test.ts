@@ -22,6 +22,10 @@ describe('Patch Plan Engine — Automated Refactoring Plans', () => {
     expect(result.oldName).toBe('variant');
     expect(result.newName).toBe('colorTheme');
     expect(result.totalConsumersAudited).toBeGreaterThanOrEqual(1);
+    expect(result.coverage.candidateCount).toBe(result.coverage.analyzedCount + result.coverage.failedCount + result.coverage.unsupportedCount);
+    expect(result.coverage.analyzedCount).toBe(result.coverage.analyzedWithPatchCount + result.coverage.analyzedWithoutPatchCount);
+    expect(result.totalConsumersAudited).toBe(result.coverage.analyzedCount);
+    expect(result.coverage.discovery).toBe('graph-bounded');
     expect(result.totalPatches).toBeGreaterThanOrEqual(1);
 
     const patch = result.patches.find((p) => p.file.includes('PageThree.vue'));

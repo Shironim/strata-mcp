@@ -1,4 +1,4 @@
-import { readSourceFile } from './source-file';
+import { readSourceFile, readSourceSnapshot, sliceSourceSnapshot } from './source-file';
 import { promises as fs, existsSync } from 'node:fs';
 import { basename, extname, resolve } from 'node:path';
 import { parse as parseDom, NodeTypes, type ElementNode, type RootNode, type TemplateChildNode } from '@vue/compiler-dom';
@@ -13,6 +13,7 @@ import { collectFiles } from './collector';
 import { getCandidateNames } from './template';
 import { STRATA_VERSION } from '../version';
 import { escapeRegExp } from './patterns';
+import { collectVuePatchOmissions } from './patch-coverage';
 import type {
   ComponentPatchItem,
   PatchPlanOptions,
@@ -601,16 +602,31 @@ export async function generatePatchPlan(options: PatchPlanOptions): Promise<Patc
   collectConsumerPaths(treeResult.root);
 
   const allPatches: ComponentPatchItem[] = [];
+  const coverage: PatchPlanResult['coverage'] = {
+    candidateCount: consumerFiles.size, analyzedCount: 0, failedCount: 0,
+    unsupportedCount: 0, analyzedWithPatchCount: 0, analyzedWithoutPatchCount: 0,
+    discovery: 'graph-bounded', diagnostics: [], omissions: [],
+    operationScope: { consumerUsages: 'supported-static-usages', targetDeclaration: 'not-included', forwarding: 'not-included', dynamicComponents: 'not-included' },
+  };
 
   // 2. For each consumer file, parse template / JSX and locate exact code replacements
-  for (const consumerPath of consumerFiles) {
+  for (const consumerPath of [...consumerFiles].sort()) {
+    const patchesBefore = allPatches.length;
+    const omissionsBefore = coverage.omissions.length;
     if (!existsSync(consumerPath)) {
+      coverage.failedCount++;
+      coverage.diagnostics.push({ file: consumerPath, code: 'SOURCE_MISSING', message: 'Discovered consumer no longer exists.' });
       continue;
     }
 
     try {
-      const content = await readSourceFile(consumerPath);
+      const { content, snapshot } = await readSourceSnapshot(consumerPath);
       const ext = extname(consumerPath).toLowerCase();
+      if (!['.vue', '.astro', '.tsx', '.jsx'].includes(ext)) {
+        coverage.unsupportedCount++;
+        coverage.diagnostics.push({ file: consumerPath, code: 'UNSUPPORTED_CONSUMER', message: `Patch scanning is not supported for ${ext}.` });
+        continue;
+      }
       const aliasConfig = await loadAliasConfig(consumerPath);
       const consumerTags = new Set<string>();
       const boundToOther = new Set<string>();
@@ -647,9 +663,20 @@ export async function generatePatchPlan(options: PatchPlanOptions): Promise<Patc
         }
       }
 
+      if (consumerTags.size === 0) {
+        coverage.omissions.push({ file: consumerPath, code: 'TARGET_BINDING_UNRESOLVED', resolution: 'candidate', message: 'Graph discovery identified this candidate, but no supported local binding to the target was resolved from the analyzed source.' });
+      }
+
       if (ext === '.vue') {
         const sfc = parseSfc(content, consumerPath);
+        if (sfc.diagnostics?.length) throw new Error(`PARSE_FAILED: ${sfc.diagnostics.map(d => d.message).join('; ')}`);
         if (sfc.template) {
+          if (sfc.template.lang && sfc.template.lang !== 'html') {
+            coverage.unsupportedCount++;
+            coverage.diagnostics.push({ file: consumerPath, code: 'UNSUPPORTED_TEMPLATE_LANGUAGE', message: `Patch analysis does not support template language ${sfc.template.lang}.` });
+            continue;
+          }
+          coverage.omissions.push(...collectVuePatchOmissions(sfc.template.content, sfc.template.loc.start.offset, consumerPath, snapshot.sha256, consumerTags));
           const templatePatches = scanVueTemplateProps(
             sfc.template.content,
             sfc.template.loc.start.line,
@@ -663,6 +690,7 @@ export async function generatePatchPlan(options: PatchPlanOptions): Promise<Patc
           allPatches.push(...templatePatches);
         }
       } else if (ext === '.astro') {
+        coverage.omissions.push({ file: consumerPath, code: 'USAGE_COVERAGE_NOT_ENUMERATED', resolution: 'unsupported', message: 'Astro patches cover supported static usages; spread, forwarding and dynamic usages are not exhaustively inventoried.' });
         const astroTemplatePatches = scanAstroProps(
           content,
           consumerTags,
@@ -673,6 +701,7 @@ export async function generatePatchPlan(options: PatchPlanOptions): Promise<Patc
         );
         allPatches.push(...astroTemplatePatches);
       } else if (ext === '.tsx' || ext === '.jsx') {
+        coverage.omissions.push({ file: consumerPath, code: 'USAGE_COVERAGE_NOT_ENUMERATED', resolution: 'unsupported', message: 'JSX patches cover supported static usages; spread, forwarding and dynamic usages are not exhaustively inventoried.' });
         const jsxPatches = scanJsxProps(
           content,
           consumerTags,
@@ -683,8 +712,22 @@ export async function generatePatchPlan(options: PatchPlanOptions): Promise<Patc
         );
         allPatches.push(...jsxPatches);
       }
-    } catch {
-      // Ignore unparseable consumer file
+      for (const patch of allPatches.slice(patchesBefore)) {
+        const lines = content.split('\n');
+        if (patch.line < 1 || patch.line > lines.length || patch.column < 1) throw new Error('INVALID_PATCH_SPAN: invalid source coordinates');
+        const startOffset = lines.slice(0, patch.line - 1).reduce((sum, line) => sum + line.length + 1, 0) + patch.column - 1;
+        const ref = { sha256: snapshot.sha256, startOffset, endOffset: startOffset + patch.oldSnippet.length };
+        if (sliceSourceSnapshot(snapshot, content, ref) !== patch.oldSnippet) throw new Error('INVALID_PATCH_SPAN: snippet does not match source coordinates');
+        patch.sourceRef = ref;
+      }
+      coverage.analyzedCount++;
+      if (allPatches.length > patchesBefore) coverage.analyzedWithPatchCount++;
+      else coverage.analyzedWithoutPatchCount++;
+    } catch (error) {
+      allPatches.length = patchesBefore;
+      coverage.omissions.length = omissionsBefore;
+      coverage.failedCount++;
+      coverage.diagnostics.push({ file: consumerPath, code: 'CONSUMER_ANALYSIS_FAILED', message: error instanceof Error ? error.message : String(error) });
     }
   }
 
@@ -693,7 +736,8 @@ export async function generatePatchPlan(options: PatchPlanOptions): Promise<Patc
     refactorType,
     oldName: cleanOld,
     newName: cleanNew,
-    totalConsumersAudited: consumerFiles.size,
+    totalConsumersAudited: coverage.analyzedCount,
+    coverage,
     totalPatches: allPatches.length,
     patches: allPatches,
     _meta: {
