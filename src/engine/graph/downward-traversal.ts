@@ -1,4 +1,5 @@
-import { readSourceFile } from '../source-file';
+import { readSourceSnapshot } from '../source-file';
+import { collectVueDynamicTreeInputs, inspectVueTreeInput } from './vue-tree-input';
 import { existsSync, promises as fs, statSync, readFileSync } from "node:fs";
 import { basename, dirname, extname, join, normalize, resolve } from "node:path";
 import { parse as parseDom, NodeTypes } from "@vue/compiler-dom";
@@ -342,6 +343,7 @@ async function getDownwardComponentTree(
   const catalog = await buildComponentCatalog(projectRoot);
 
   const allComponents = new Set<string>();
+  const diagnostics: NonNullable<ComponentTreeResult['diagnostics']> = [];
   let maxDepthReached = 0;
 
   const allProviders: ContextDependencyNode[] = [];
@@ -376,13 +378,43 @@ async function getDownwardComponentTree(
       children: [],
     };
 
-    if (depth >= maxDepth || !isInDomain) return node;
+    if (!isInDomain) {
+      diagnostics.push({ code: 'SCOPE_BOUNDARY', filePath: normPath, sourceHash: null, depth,
+        reason: 'Node was not expanded because it is outside the requested scope filter.' });
+      return node;
+    }
+    if (depth >= maxDepth) {
+      diagnostics.push({ code: 'MAX_DEPTH_REACHED', filePath: normPath, sourceHash: null, depth,
+        reason: `Node was not expanded because max depth ${maxDepth} was reached; further dependencies were not inspected.` });
+      return node;
+    }
 
     let content = '';
+    let sourceHash = '';
     try {
-      content = await readSourceFile(normPath);
-    } catch {
+      const source = await readSourceSnapshot(normPath);
+      content = source.content;
+      sourceHash = source.snapshot.sha256;
+    } catch (error) {
+      diagnostics.push({ code: 'SOURCE_READ_FAILED', filePath: normPath, sourceHash: null, depth,
+        reason: `Node source could not be captured: ${error instanceof Error ? error.message : String(error)}` });
       return node;
+    }
+
+    if (extname(normPath).toLowerCase() === '.vue') {
+      const issue = inspectVueTreeInput(content, normPath);
+      if (issue) {
+        diagnostics.push({ ...issue, filePath: normPath, sourceHash, depth });
+        return node;
+      }
+      for (const input of collectVueDynamicTreeInputs(content, normPath)) {
+        diagnostics.push({ code: 'VUE_DYNAMIC_COMPONENT', filePath: normPath, sourceHash, depth,
+          expression: input.expression, selectorKind: input.kind, argument: input.argument, resolution: 'candidate',
+          sourceRef: { sha256: sourceHash, startOffset: input.startOffset, endOffset: input.endOffset },
+          reason: input.kind === 'dynamic-argument' || input.kind === 'object-binding'
+            ? `Component ${input.kind} '${input.expression}' may supply the 'is' selector; its keys and runtime target are not resolved.`
+            : `Component ${input.kind} selector '${input.expression}' requires review; this inventory does not establish its runtime target.` });
+      }
     }
 
     const hasUseClient = /^\s*['"]use client['"]/m.test(content);
@@ -426,7 +458,17 @@ async function getDownwardComponentTree(
     // 1. Static and dynamic imports
     for (const imp of imports) {
       let resolved = resolveImportPath(normPath, imp.source, aliasConfig);
-      if (!resolved) continue;
+      if (!resolved) {
+        const identifier = imp.alias || imp.name;
+        if (isRenderedInContent(content, identifier)) {
+          diagnostics.push({
+            code: 'UNRESOLVED_RENDERED_IMPORT', filePath: normPath, sourceHash,
+            specifier: imp.source, identifier, resolution: 'unresolved',
+            reason: `Rendered binding '${identifier}' imports '${imp.source}', which the local resolver could not resolve.`,
+          });
+        }
+        continue;
+      }
 
       // If resolved is a barrel file, follow the re-export to the underlying component
       if (
@@ -468,6 +510,9 @@ async function getDownwardComponentTree(
 
         node.children.push(childNode);
       } else {
+        diagnostics.push({ code: 'CYCLE_TRUNCATED', filePath: normPath, sourceHash,
+          targetPath: childNorm, depth: depth + 1,
+          reason: `Traversal stopped at '${childNorm}' because this file already occurs in the current branch.` });
         const candidateNames = getCandidateNames(imp.alias || imp.name);
         const passedProps = extractPassedProps(content, candidateNames);
         node.children.push({
@@ -511,6 +556,9 @@ async function getDownwardComponentTree(
 
           node.children.push(childNode);
         } else {
+          diagnostics.push({ code: 'CYCLE_TRUNCATED', filePath: normPath, sourceHash,
+            targetPath: catalogTarget, depth: depth + 1,
+            reason: `Traversal stopped at '${catalogTarget}' because this file already occurs in the current branch.` });
           const candidateNames = getCandidateNames(tag);
           const passedProps = extractPassedProps(content, candidateNames);
           node.children.push({
@@ -576,6 +624,7 @@ async function getDownwardComponentTree(
     totalComponents: allComponents.size,
     maxDepthReached,
     direction: 'downward',
+    diagnostics,
     propsDrilling: detectPropsDrilling(rootNode),
     contextGraph,
   };
@@ -700,6 +749,13 @@ export function formatTreeAsText(result: ComponentTreeResult): string {
   const summaryType = isUpward ? 'consumers' : 'components';
   const summary = `\nSummary: ${result.totalComponents} ${summaryType} explored, max depth: ${result.maxDepthReached}`;
   let output = header + treeText + summary;
+
+  if (result.diagnostics?.length) {
+    output += '\n\nTraversal diagnostics (partial resolution):';
+    for (const diagnostic of result.diagnostics) {
+      output += `\n  ${diagnostic.code}: ${diagnostic.reason} (${diagnostic.filePath}; source SHA-256: ${diagnostic.sourceHash ?? 'not-captured'})`;
+    }
+  }
 
   if (result.propsDrilling && result.propsDrilling.length > 0) {
     output += `\n\nProps Drilling Diagnostics (${result.propsDrilling.length} detected):`;

@@ -1,4 +1,5 @@
-import { readSourceFile } from '../source-file';
+import { readSourceSnapshot } from '../source-file';
+import { inspectVueTreeInput } from './vue-tree-input';
 import { extractImports } from './path-helpers';
 import { existsSync, promises as fs, statSync, readFileSync } from "node:fs";
 import { basename, dirname, extname, join, normalize, resolve } from "node:path";
@@ -80,7 +81,8 @@ export async function getUpwardComponentTree(
 
   const maxDepth = options.maxDepth !== undefined ? options.maxDepth : 3;
   const projectRoot = options.targetPath ? normalize(resolve(options.targetPath)) : findProjectRoot(entryPath);
-  const allFiles = await collectFiles(projectRoot);
+  const allFiles = (await collectFiles(projectRoot)).sort();
+  const diagnostics: NonNullable<ComponentTreeResult['diagnostics']> = [];
 
   const autoDetectedAliases = await loadAliasConfig(entryPath);
   const explicitAliases = options.aliasMap
@@ -90,6 +92,7 @@ export async function getUpwardComponentTree(
 
   // Pre-load content of candidate consumer files
   const fileContents = new Map<string, string>();
+  const fileHashes = new Map<string, string>();
   for (const file of allFiles) {
     const ext = extname(file).toLowerCase();
     if (
@@ -101,10 +104,20 @@ export async function getUpwardComponentTree(
       ext === '.js'
     ) {
       try {
-        const content = await readSourceFile(file);
+        const { content, snapshot } = await readSourceSnapshot(file);
+        if (ext === '.vue') {
+          const issue = inspectVueTreeInput(content, file);
+          if (issue) {
+            diagnostics.push({ code: 'CONSUMER_INPUT_UNSUPPORTED', filePath: normalize(file),
+              sourceHash: snapshot.sha256, reason: `${issue.code}: Candidate consumer was excluded: ${issue.reason}` });
+            continue;
+          }
+        }
         fileContents.set(normalize(file), content);
-      } catch {
-        // ignore
+        fileHashes.set(normalize(file), snapshot.sha256);
+      } catch (error) {
+        diagnostics.push({ code: 'CONSUMER_SOURCE_READ_FAILED', filePath: normalize(file), sourceHash: null,
+          reason: `Candidate consumer source could not be captured during workspace discovery: ${error instanceof Error ? error.message : String(error)}` });
       }
     }
   }
@@ -217,12 +230,27 @@ export async function getUpwardComponentTree(
       children: [],
     };
 
-    if (depth >= maxDepth || !isInDomain) return node;
+    if (!isInDomain) {
+      diagnostics.push({ code: 'SCOPE_BOUNDARY', filePath: normPath, sourceHash: null, depth,
+        reason: 'Upward node was not expanded because it is outside the requested scope filter.' });
+      return node;
+    }
+    if (depth >= maxDepth) {
+      diagnostics.push({ code: 'MAX_DEPTH_REACHED', filePath: normPath, sourceHash: null, depth,
+        reason: `Upward node was not expanded because max depth ${maxDepth} was reached; further consumers were not inspected.` });
+      return node;
+    }
 
     for (const [sourceFile, sourceContent] of fileContents) {
-      if (visitedInBranch.has(sourceFile)) continue;
-
       if (fileConsumesTarget(sourceFile, sourceContent, normPath)) {
+        if (visitedInBranch.has(sourceFile)) {
+          diagnostics.push({ code: 'CYCLE_TRUNCATED', filePath: sourceFile, sourceHash: fileHashes.get(sourceFile)!,
+            targetPath: sourceFile, depth: depth + 1,
+            reason: `Upward traversal stopped at consumer '${sourceFile}' of '${normPath}' because this consumer already occurs in the current branch.` });
+          node.children.push({ component: getDisambiguatedComponentName(sourceFile, isPageFile(sourceFile)),
+            filePath: sourceFile, isPage: isPageFile(sourceFile), isCircular: true, depth: depth + 1, children: [] });
+          continue;
+        }
         const parentNode = await buildUpwardSubTree(
           sourceFile,
           depth + 1,
@@ -242,6 +270,7 @@ export async function getUpwardComponentTree(
     totalComponents: allConsumers.size,
     maxDepthReached,
     direction: 'upward',
+    diagnostics,
     propsDrilling: [],
   };
 }
