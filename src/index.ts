@@ -25,6 +25,7 @@ export * from './engine/slicer';
 export * from './engine/reactivity';
 export * from './engine/style-audit';
 export * from './engine/patch-plan';
+export * from './engine/patch-preconditions';
 export * from './engine/api-contract';
 export * from './engine/telemetry';
 export * from './engine/layout-extractor';

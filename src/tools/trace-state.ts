@@ -1,4 +1,7 @@
 import { TOOL_CATALOG } from './catalog';
+import { withRetrievalEvidence } from './retrieval-response';
+import { observeRetrievalIndex, indexedRetrievalEvidence } from '../engine/index-retrieval-evidence';
+import { formatRetrievalEvidence } from '../engine/retrieval-evidence';
 import fs from 'node:fs';
 import {
   queryStateImpact,
@@ -14,7 +17,7 @@ import {
 } from '../engine/path-resolver';
 import type { McpToolDefinition } from './types';
 
-export const traceStateTool: McpToolDefinition = {
+const traceStateToolDefinition: McpToolDefinition = {
   ...TOOL_CATALOG[3],
   handler: async (args: Record<string, any>) => {
     let identifier = (args.identifier || args.state || args.state_name || args.store || args.store_name || args.composable || args.name || args.symbol)
@@ -106,6 +109,10 @@ export const traceStateTool: McpToolDefinition = {
       const depth = parseSafePositiveInt(args.depth ?? args.max_depth ?? args.maxDepth, 1) ?? 1;
 
       const shouldMultiHop = depth > 1 || args.direction === 'dependencies' || args.direction === 'both';
+      const before = observeRetrievalIndex(targetPath);
+      const evidence = () => indexedRetrievalEvidence({ workspace: targetPath, scope: targetPath, policy: 'state-trace-v1', before,
+        query: { identifier, role, depth, direction: shouldMultiHop ? args.direction || 'both' : 'consumers' },
+        selectionReason: 'State consumers/dependencies selected by identifier, role and bounded traversal.' });
       if (shouldMultiHop) {
         const result = await traceStateChain(targetPath, {
           identifier,
@@ -113,22 +120,26 @@ export const traceStateTool: McpToolDefinition = {
           maxDepth: depth,
           role,
         });
+        const retrieval = evidence();
         return {
+          structuredContent: { retrieval },
           content: [
             {
               type: 'text',
-              text: isJson ? JSON.stringify(result, null, 2) : formatStateChainAsText(result),
+              text: isJson ? JSON.stringify({ ...result, retrieval }, null, 2) : `${formatStateChainAsText(result)}\n\n${formatRetrievalEvidence(retrieval)}`,
             },
           ],
         };
       }
 
       const result = await queryStateImpact(targetPath, identifier, role);
+      const retrieval = evidence();
       return {
+        structuredContent: { retrieval },
         content: [
           {
             type: 'text',
-            text: isJson ? JSON.stringify(result, null, 2) : formatStateImpactAsText(result),
+            text: isJson ? JSON.stringify({ ...result, retrieval }, null, 2) : `${formatStateImpactAsText(result)}\n\n${formatRetrievalEvidence(retrieval)}`,
           },
         ],
       };
@@ -141,3 +152,5 @@ export const traceStateTool: McpToolDefinition = {
     }
   },
 };
+
+export const traceStateTool: McpToolDefinition = withRetrievalEvidence(traceStateToolDefinition);

@@ -1,4 +1,5 @@
 import { TOOL_CATALOG } from './catalog';
+import { withRetrievalEvidence } from './retrieval-response';
 import fs from 'node:fs';
 import { basename, extname, relative, isAbsolute, resolve } from 'node:path';
 import { collectFiles } from '../engine/collector';
@@ -12,13 +13,14 @@ import {
 import { extractComponentContract, formatContractAsText } from '../engine/contract';
 import { extractComponentOutline, formatOutlineAsText } from '../engine/outline';
 import { resolveWorkspacePath, findProjectRoot, PROJECT_ROOT_MARKERS, parseSafePositiveInt } from '../engine/path-resolver';
-import { getSourceLineRange, readSourceFile, readSourceSnapshot, readSourceRef } from '../engine/source-file';
+import { getSourceLineRange, readSourceSnapshot, readSourceRef, sliceSourceSnapshot } from '../engine/source-file';
+import { sourceRetrievalEvidence, derivedRetrievalEvidence, formatRetrievalEvidence } from '../engine/retrieval-evidence';
 import { mapSourceFile } from '../engine/source-map';
 import { parseSfc } from '../engine/splitter';
 import { runCanonAudit } from '../engine/canon';
 import type { McpToolDefinition } from './types';
 
-export const inspectComponentTool: McpToolDefinition = {
+const inspectComponentToolDefinition: McpToolDefinition = {
   ...TOOL_CATALOG[1],
   handler: async (args: Record<string, any>) => {
     const rawTargetHint = args.root || args.project_root || args.target_path || args.targetPath;
@@ -100,13 +102,25 @@ export const inspectComponentTool: McpToolDefinition = {
 
     try {
       if (args.view === 'map') {
-        const result = await mapSourceFile(filePath, { maxRegions: parseSafePositiveInt(args.max_regions ?? args.maxRegions, 200) });
-        return { content: [{ type: 'text', text: isJson ? JSON.stringify(result, null, 2) : formatSourceMap(result) }] };
+        const maxRegions = Math.min(500, parseSafePositiveInt(args.max_regions ?? args.maxRegions, 200) ?? 200);
+        const result = await mapSourceFile(filePath, { maxRegions });
+        const retrieval = await sourceRetrievalEvidence({
+          workspace: targetPathHint ? resolveWorkspacePath(targetPathHint) : findProjectRoot(filePath), snapshot: result.snapshot,
+          policy: 'file-map-v1', query: { maxRegions },
+          complete: result.status === 'complete', selectionReason: 'Source regions of the explicitly requested file, bounded by max_regions and parser capability.',
+          omissions: [...result.diagnostics.map(d => ({ code: d.code, reason: d.message })), ...result.unsupported.map(reason => ({ code: 'UNSUPPORTED_CAPABILITY', reason }))],
+        });
+        return { structuredContent: { retrieval }, content: [{ type: 'text', text: isJson ? JSON.stringify({ ...result, retrieval }, null, 2) : `${formatSourceMap(result)}\n${formatRetrievalEvidence(retrieval)}` }] };
       }
 
       if (args.view === 'source' && args.source_ref) {
-        const source = await readSourceRef(filePath, args.source_ref);
-        return { content: [{ type: 'text', text: isJson ? JSON.stringify({ file: filePath, source_ref: args.source_ref, source }, null, 2) : source }] };
+        const { snapshot, content } = await readSourceSnapshot(filePath);
+        const source = sliceSourceSnapshot(snapshot, content, args.source_ref);
+        const retrieval = await sourceRetrievalEvidence({ workspace: targetPathHint ? resolveWorkspacePath(targetPathHint) : findProjectRoot(filePath), snapshot,
+          policy: 'exact-source-ref-v1', query: { source_ref: args.source_ref }, complete: true, selectionReason: 'Exact hash-bound source reference explicitly requested by the caller.' });
+        return { structuredContent: { retrieval }, content: isJson
+          ? [{ type: 'text', text: JSON.stringify({ file: filePath, source_ref: args.source_ref, source, retrieval }, null, 2) }]
+          : [{ type: 'text', text: source }, { type: 'text', text: formatRetrievalEvidence(retrieval) }] };
       }
       if (args.view === 'source') {
         return { isError: true, content: [{ type: 'text', text: "'view: source' requires a source_ref returned by 'view: map'." }] };
@@ -138,13 +152,17 @@ export const inspectComponentTool: McpToolDefinition = {
         }
         const selected = getSourceLineRange(snapshot, content, startLine, endLine);
         const source = await readSourceRef(filePath, selected.ref);
+        const retrieval = await sourceRetrievalEvidence({ workspace: targetPathHint ? resolveWorkspacePath(targetPathHint) : findProjectRoot(filePath), snapshot,
+          policy: 'inclusive-line-range-v1', query: { startLine, endLine, expectedHash: expectedHash ?? null }, complete: true,
+          selectionReason: 'Inclusive source line range explicitly requested by the caller.' });
         return {
           content: [{
             type: 'text',
             text: isJson
-              ? JSON.stringify({ file: filePath, startLine, endLine, source_ref: selected.ref, source }, null, 2)
+              ? JSON.stringify({ file: filePath, startLine, endLine, source_ref: selected.ref, source, retrieval }, null, 2)
               : source,
-          }],
+          }, ...(!isJson ? [{ type: 'text' as const, text: formatRetrievalEvidence(retrieval) }] : [])],
+          structuredContent: { retrieval },
         };
       }
 
@@ -152,7 +170,8 @@ export const inspectComponentTool: McpToolDefinition = {
         if (extname(filePath).toLowerCase() !== '.vue') {
           return { isError: true, content: [{ type: 'text', text: "'sfc_sections' is only available for .vue files." }] };
         }
-        const descriptor = parseSfc(await readSourceFile(filePath), filePath);
+        const primary = await readSourceSnapshot(filePath);
+        const descriptor = parseSfc(primary.content, filePath);
         const blocks = [descriptor.script, descriptor.scriptSetup, descriptor.template, ...descriptor.styles, ...descriptor.customBlocks]
           .filter((block): block is NonNullable<typeof block> => Boolean(block))
           .sort((a, b) => a.loc.start.offset - b.loc.start.offset)
@@ -167,29 +186,38 @@ export const inspectComponentTool: McpToolDefinition = {
             endColumn: block.loc.end.column,
             endIsExclusive: true,
           }));
+        const retrieval = await sourceRetrievalEvidence({ workspace: targetPathHint ? resolveWorkspacePath(targetPathHint) : findProjectRoot(filePath), snapshot: primary.snapshot,
+          policy: 'sfc-sections-v1', query: {}, complete: !descriptor.diagnostics?.length, selectionReason: 'All source block boundaries of the explicitly requested Vue SFC.',
+          omissions: descriptor.diagnostics?.map(d => ({ code: d.code, reason: d.message })) });
         return {
+          structuredContent: { retrieval },
           content: [{
             type: 'text',
             text: isJson
-              ? JSON.stringify({ file: filePath, blocks }, null, 2)
+              ? JSON.stringify({ file: filePath, blocks, retrieval }, null, 2)
               : [`Vue SFC blocks in ${filePath}:`, ...blocks.map(block =>
                   `- Block ${block.index} (${block.type}): lines ${block.sourceStartLine}-${block.sourceEndLine}; content starts at ${block.startLine}:${block.startColumn}, ends before ${block.endLine}:${block.endColumn}`),
-                'Use source_range with inclusive start_line/end_line to retrieve exact file lines.'].join('\n'),
+                'Use source_range with inclusive start_line/end_line to retrieve exact file lines.', formatRetrievalEvidence(retrieval)].join('\n'),
           }],
         };
       }
 
       // Sub-action A0: Component Symbol Outline with line ranges & callee mappings
       if (isOutline) {
+        const primary = await readSourceSnapshot(filePath);
         const outlineResult = await extractComponentOutline(filePath, {
           path: filePath,
           maxFunctionLines: args.max_function_lines ? Number(args.max_function_lines) : undefined,
         });
+        const retrieval = await derivedRetrievalEvidence({ workspace: targetPathHint ? resolveWorkspacePath(targetPathHint) : findProjectRoot(filePath), snapshot: primary.snapshot,
+          policy: 'component-outline-v1', query: { maxFunctionLines: args.max_function_lines ? Number(args.max_function_lines) : null }, complete: false,
+          selectionReason: 'Requested symbol outline and derived cross-file mappings; analyzer may read additional source versions.' });
         return {
+          structuredContent: { retrieval },
           content: [
             {
               type: 'text',
-              text: isJson ? JSON.stringify(outlineResult, null, 2) : formatOutlineAsText(outlineResult),
+              text: isJson ? JSON.stringify({ ...outlineResult, retrieval }, null, 2) : `${formatOutlineAsText(outlineResult)}\n\n${formatRetrievalEvidence(retrieval)}`,
             },
           ],
         };
@@ -197,26 +225,32 @@ export const inspectComponentTool: McpToolDefinition = {
 
       // Sub-action A: Symbol slicing
       if (symbolName) {
+        const primary = await readSourceSnapshot(filePath);
         const result = await sliceSymbol({
           path: filePath,
           symbolName: String(symbolName),
           includeBlastRadius: true,
         });
+        const retrieval = await derivedRetrievalEvidence({ workspace: targetPathHint ? resolveWorkspacePath(targetPathHint) : findProjectRoot(filePath), snapshot: primary.snapshot,
+          policy: 'symbol-slice-v1', query: { symbolName: String(symbolName), includeBlastRadius: true }, complete: false,
+          selectionReason: 'Requested named symbol and derived caller information; analyzer may read additional source versions.' });
         if (!result) {
           return {
+            structuredContent: { retrieval },
             content: [
               {
                 type: 'text',
-                text: `Symbol '${symbolName}' not found in '${filePath}'.`,
+                text: isJson ? JSON.stringify({ file: filePath, found: false, symbol: String(symbolName), retrieval }, null, 2) : `Symbol '${symbolName}' not found in '${filePath}'.\n${formatRetrievalEvidence(retrieval)}`,
               },
             ],
           };
         }
         return {
+          structuredContent: { retrieval },
           content: [
             {
               type: 'text',
-              text: isJson ? JSON.stringify(result, null, 2) : formatSymbolSliceAsText(result),
+              text: isJson ? JSON.stringify({ ...result, retrieval }, null, 2) : `${formatSymbolSliceAsText(result)}\n\n${formatRetrievalEvidence(retrieval)}`,
             },
           ],
         };
@@ -226,23 +260,32 @@ export const inspectComponentTool: McpToolDefinition = {
       const inferProps = args.infer_props !== false && args.inferProps !== false;
       const resolveGlobals = args.resolve_globals !== false && args.resolveGlobals !== false;
       const auditEvents = Boolean(args.audit_events || args.auditEvents);
-      const contract = await extractComponentContract(filePath, { inferProps, resolveGlobals });
+      const primary = await readSourceSnapshot(filePath);
+      const contract = await extractComponentContract(filePath, primary.content, { inferProps, resolveGlobals });
+      const omissions: Array<{ code: string; reason: string }> = [];
 
       // Detect Reactivity Smells directly as first-class diagnostics
       const reactivitySmells = await detectReactivitySmells({ path: filePath });
       contract.reactivitySmells = reactivitySmells;
 
       try {
-        const { snapshot, content } = await readSourceSnapshot(filePath);
-        contract.patternDiagnostics = await runCanonAudit(snapshot, content);
-      } catch {
-        // Source snapshot error safe fallback
+        contract.patternDiagnostics = await runCanonAudit(primary.snapshot, primary.content);
+      } catch (error) {
+        omissions.push({ code: 'PATTERN_AUDIT_FAILED', reason: error instanceof Error ? error.message : String(error) });
       }
+
+      const evidenceOptions = {
+        workspace: targetPathHint ? resolveWorkspacePath(targetPathHint) : findProjectRoot(filePath), snapshot: primary.snapshot,
+        policy: 'component-contract-v1', query: { inferProps, resolveGlobals, auditEvents }, complete: false,
+        selectionReason: 'Derived public component contract and diagnostics for the explicitly requested file.', omissions,
+      };
 
       if (auditEvents) {
         const auditResult = await auditEventHandlers({ path: filePath });
+        const retrieval = await derivedRetrievalEvidence(evidenceOptions);
         if (isJson) {
           return {
+            structuredContent: { retrieval },
             content: [
               {
                 type: 'text',
@@ -250,6 +293,7 @@ export const inspectComponentTool: McpToolDefinition = {
                   {
                     ...contract,
                     eventAudit: auditResult,
+                    retrieval,
                   },
                   null,
                   2
@@ -262,20 +306,23 @@ export const inspectComponentTool: McpToolDefinition = {
         const contractText = formatContractAsText(contract);
         const auditText = formatEventHandlerAuditAsText(auditResult);
         return {
+          structuredContent: { retrieval },
           content: [
             {
               type: 'text',
-              text: `${contractText}\n\n${auditText}`,
+              text: `${contractText}\n\n${auditText}\n\n${formatRetrievalEvidence(retrieval)}`,
             },
           ],
         };
       }
 
+      const retrieval = await derivedRetrievalEvidence(evidenceOptions);
       return {
+        structuredContent: { retrieval },
         content: [
           {
             type: 'text',
-            text: isJson ? JSON.stringify(contract, null, 2) : formatContractAsText(contract),
+            text: isJson ? JSON.stringify({ ...contract, retrieval }, null, 2) : `${formatContractAsText(contract)}\n\n${formatRetrievalEvidence(retrieval)}`,
           },
         ],
       };
@@ -288,6 +335,8 @@ export const inspectComponentTool: McpToolDefinition = {
     }
   },
 };
+
+export const inspectComponentTool: McpToolDefinition = withRetrievalEvidence(inspectComponentToolDefinition);
 
 function formatSourceMap(result: Awaited<ReturnType<typeof mapSourceFile>>): string {
   const lines = [`${result.framework} map: ${result.snapshot.file}`, `Status: ${result.status}`];

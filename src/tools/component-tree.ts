@@ -1,4 +1,7 @@
 import { TOOL_CATALOG } from './catalog';
+import { withRetrievalEvidence } from './retrieval-response';
+import { observeRetrievalIndex, indexedRetrievalEvidence } from '../engine/index-retrieval-evidence';
+import { formatRetrievalEvidence } from '../engine/retrieval-evidence';
 import fs from 'node:fs';
 import { resolve } from 'node:path';
 import { getComponentTree, formatTreeAsText } from '../engine/tree';
@@ -12,7 +15,7 @@ import {
 import type { ComponentTreeNode, ComponentTreeOptions } from '../types';
 import type { McpToolDefinition } from './types';
 
-export const componentTreeTool: McpToolDefinition = {
+const componentTreeToolDefinition: McpToolDefinition = {
   ...TOOL_CATALOG[2],
   handler: async (args: Record<string, any>) => {
     const routePath = (args.route || args.route_path) ? String(args.route || args.route_path) : undefined;
@@ -108,6 +111,7 @@ export const componentTreeTool: McpToolDefinition = {
       // Freshness preflight: ensure cached SQLite graph matches current disk state
       const { syncWorkspace } = await import('../engine/storage/delta-sync');
       await syncWorkspace(targetPath);
+      const before = observeRetrievalIndex(targetPath);
 
       const tree = await getComponentTree({
         entryPath,
@@ -128,11 +132,19 @@ export const componentTreeTool: McpToolDefinition = {
       }
 
       const isJson = args.output_format === 'json' || args.format === 'json';
+      const retrieval = indexedRetrievalEvidence({ workspace: targetPath, scope: scopeFilter ?? targetPath, policy: 'component-tree-v1', before,
+        query: { entryPath: entryPath ?? null, routePath: routePath ?? null, maxDepth: maxDepth ?? 3, direction: direction ?? 'downward', aliasMap: aliasMap ?? null, includeProps: args.include_props !== false && args.includeProps !== false },
+        selectionReason: 'Bounded component traversal selected by entrypoint, direction, depth and scope.' });
+      retrieval.omissions.push(...(tree.diagnostics ?? []).map(diagnostic => ({
+        code: diagnostic.code,
+        reason: `${diagnostic.reason} File: ${diagnostic.filePath}; source SHA-256: ${diagnostic.sourceHash ?? 'not-captured'}`,
+      })));
       return {
+        structuredContent: { retrieval },
         content: [
           {
             type: 'text',
-            text: isJson ? JSON.stringify(tree, null, 2) : formatTreeAsText(tree),
+            text: isJson ? JSON.stringify({ ...tree, retrieval }, null, 2) : `${formatTreeAsText(tree)}\n\n${formatRetrievalEvidence(retrieval)}`,
           },
         ],
       };
@@ -145,3 +157,5 @@ export const componentTreeTool: McpToolDefinition = {
     }
   },
 };
+
+export const componentTreeTool: McpToolDefinition = withRetrievalEvidence(componentTreeToolDefinition);

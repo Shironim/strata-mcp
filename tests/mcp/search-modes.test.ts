@@ -112,14 +112,14 @@ test('snippet text fallback announces literal search with source coordinates', a
   expect(r.isError).toBeUndefined();
   expect(r.content[0].text).toContain('[Notice: Invalid AST pattern; used exact literal line search.]');
   expect(r.content[0].text).toContain('<snippet>:1:4 - // resolves tsconfig compilerOptions.paths aliases');
-  expect(r.structuredContent).toEqual({ modeRequested: 'auto', modeUsed: 'literal', fallbackReason: 'invalid_ast_pattern' });
+  expect(r.structuredContent).toMatchObject({ modeRequested: 'auto', modeUsed: 'literal', fallbackReason: 'invalid_ast_pattern' });
 });
 
 test('snippet output defaults to text and reports zero matches without fallback', async () => {
   const r = await findCodeTool.handler({ code: 'const value = 1;', pattern: 'console.log($$$)', mode: 'auto' });
   expect(r.isError).toBeUndefined();
-  expect(r.content[0].text).toBe('No matches found.');
-  expect(r.structuredContent).toEqual({ modeRequested: 'auto', modeUsed: 'ast' });
+  expect(r.content[0].text).toContain('No matches found.');
+  expect(r.structuredContent).toMatchObject({ modeRequested: 'auto', modeUsed: 'ast' });
 });
 
 test('YAML snippets use result limits without pattern-mode metadata', async () => {
@@ -130,7 +130,7 @@ test('YAML snippets use result limits without pattern-mode metadata', async () =
   const defaults = await findCodeTool.handler(args);
   expect(defaults.isError).toBeUndefined();
   expect(JSON.parse(defaults.content[0].text).matchCount).toBe(200);
-  expect(defaults.structuredContent).toBeUndefined();
+  expect(defaults.structuredContent?.modeRequested).toBeUndefined();
   const limited = await findCodeTool.handler({ ...args, max_results: 2 });
   expect(JSON.parse(limited.content[0].text).matches).toHaveLength(2);
 });

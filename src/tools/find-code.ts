@@ -1,4 +1,7 @@
 import { TOOL_CATALOG } from './catalog';
+import { withRetrievalEvidence } from './retrieval-response';
+import { hashRetrievalIdentity } from '../engine/retrieval-evidence';
+import { findProjectRoot } from '../engine/path-resolver';
 import {
   findCode,
   findLiteralCode,
@@ -18,7 +21,7 @@ import {
 import type { McpToolDefinition } from './types';
 import { checkRuntimeVersion, getCachedRuntimeVersion } from '../utils/version-check';
 
-export const findCodeTool: McpToolDefinition = {
+const findCodeToolDefinition: McpToolDefinition = {
   ...TOOL_CATALOG[0],
   handler: async (args: Record<string, any>) => {
     const isJson = args.format === 'json' || args.output_format === 'json';
@@ -204,6 +207,25 @@ export const findCodeTool: McpToolDefinition = {
     }
   },
 };
+
+export const findCodeTool: McpToolDefinition = withRetrievalEvidence(findCodeToolDefinition, args => {
+  const snippet = (args.code || args.code_snippet) ? String(args.code || args.code_snippet) : undefined;
+  const rawPath = args.path || args.file_path || args.filePath || args.target_path || args.targetPath;
+  const scope = snippet ? null : rawPath ? resolveWorkspacePath(String(rawPath)) : resolveProjectRoot();
+  const pattern = args.pattern || args.query || args.search;
+  const component = args.component || args.component_name || args.componentName;
+  const action = args.action === 'map' ? 'map' : args.action === 'dump_ast' || (!rawPath && snippet && !pattern && !args.rule_yaml) ? 'dump_ast' : 'search';
+  return {
+    workspace: scope ? findProjectRoot(scope) : null, scope, policy: `find-code-${action}-v1`,
+    ...(snippet ? { inputHash: hashRetrievalIdentity({ encoding: 'utf-8', content: snippet }) } : {}),
+    query: { action, pattern: pattern ? String(pattern) : null, component: component ? String(component) : null,
+      rule: args.rule_yaml ? String(args.rule_yaml) : null, language: args.language ?? (snippet ? 'ts' : null),
+      mode: pattern ? args.mode ?? 'ast' : null, componentScope: component ? args.scope ?? 'both' : null,
+      limit: action === 'map' ? Math.min(500, parseSafePositiveInt(args.limit ?? args.max_results ?? args.maxResults, 100)!) : parseSafePositiveInt(args.max_results ?? args.maxResults, snippet ? 200 : undefined) ?? null,
+      offset: action === 'map' && Number.isSafeInteger(args.offset) && args.offset >= 0 ? args.offset : 0,
+      excludeDirs: parseStringList(args.exclude_dirs ?? args.excludeDirs) },
+  };
+});
 
 function formatFrontendMap(result: Awaited<ReturnType<typeof mapFrontendScope>>): string {
   return [

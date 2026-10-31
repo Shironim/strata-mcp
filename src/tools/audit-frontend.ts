@@ -1,4 +1,7 @@
 import { TOOL_CATALOG } from './catalog';
+import { withRetrievalEvidence } from './retrieval-response';
+import { observeRetrievalIndex, indexedRetrievalEvidence } from '../engine/index-retrieval-evidence';
+import { formatRetrievalEvidence } from '../engine/retrieval-evidence';
 import { scanRoutes, formatRoutesAsText } from '../engine/routes';
 import { findUnusedComponents, formatUnusedAsText } from '../engine/audit';
 import { findUnusedState, formatUnusedStateAsText } from '../engine/database';
@@ -28,7 +31,7 @@ import type { RouteFramework } from '../types';
 import type { McpToolDefinition } from './types';
 import { checkRuntimeVersion, getCachedRuntimeVersion } from '../utils/version-check';
 
-export const auditFrontendTool: McpToolDefinition = {
+const auditFrontendToolDefinition: McpToolDefinition = {
   ...TOOL_CATALOG[4],
   handler: async (args: Record<string, any>) => {
     try {
@@ -62,15 +65,20 @@ export const auditFrontendTool: McpToolDefinition = {
 
       const runtimeVersion = getCachedRuntimeVersion();
       void checkRuntimeVersion().catch(() => {});
+      const before = observeRetrievalIndex(targetPath);
       const formatAuditResponse = (payload: any, formattedText: string) => {
+        const retrieval = indexedRetrievalEvidence({ workspace: targetPath, scope: scopePath ?? targetPath, policy: 'frontend-audit-v1', before,
+          query: { target, excludeDirs, ignorePatterns, includePages, frameworkHint: frameworkHint ?? null, threshold: threshold ?? null, routeView, prefix: args.prefix ?? null, exemplarPath: args.exemplar_path ?? args.exemplarPath ?? null },
+          selectionReason: 'Requested audit target and filters; individual diagnostics retain their own evidence strength.' });
         const finalJson = isJson
-          ? JSON.stringify({ runtime_version: runtimeVersion, ...(typeof payload === 'object' && payload !== null ? payload : { data: payload }) }, null, 2)
+          ? JSON.stringify({ runtime_version: runtimeVersion, ...(typeof payload === 'object' && payload !== null ? payload : { data: payload }), retrieval }, null, 2)
           : undefined;
-        let finalText = isJson ? finalJson! : formattedText;
+        let finalText = isJson ? finalJson! : `${formattedText}\n\n${formatRetrievalEvidence(retrieval)}`;
         if (!isJson && runtimeVersion.update_available) {
           finalText = `[Notice: Update available: v${runtimeVersion.server_version} -> v${runtimeVersion.latest_version}. Run: ${runtimeVersion.upgrade_command}]\n\n` + finalText;
         }
         return {
+          structuredContent: { retrieval },
           content: [{ type: 'text' as const, text: finalText }],
           metadata: { runtime_version: runtimeVersion },
           runtime_version: runtimeVersion,
@@ -233,3 +241,5 @@ export const auditFrontendTool: McpToolDefinition = {
     }
   },
 };
+
+export const auditFrontendTool: McpToolDefinition = withRetrievalEvidence(auditFrontendToolDefinition);
