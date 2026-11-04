@@ -1,5 +1,5 @@
 import { readSourceFile } from './source-file';
-import { promises as fs } from 'node:fs';
+import { existsSync, promises as fs } from 'node:fs';
 import { basename, dirname, extname, isAbsolute, relative, resolve } from 'node:path';
 import { collectFiles } from './collector';
 import { extractRenderedCustomTags } from './tree';
@@ -96,18 +96,130 @@ export interface FindSimilarTemplatesOptions {
   scopePath?: string;
   threshold?: number;
   excludeDirs?: string[];
+  workspaceRoot?: string;
 }
 
 /**
  * Discovers structural template duplication and DRY abstraction opportunities.
+ * Supports directory-wide clustering (O(N²)) or 1-to-N lookup from a single component file (O(N)).
  */
 export async function findSimilarTemplates(
   options: FindSimilarTemplatesOptions
 ): Promise<TemplateSimilarityResult> {
   const startTime = performance.now();
-  const rootDir = resolve(options.targetPath);
-  const absScope = options.scopePath ? resolve(rootDir, options.scopePath) : undefined;
+  const resolvedTarget = resolve(options.targetPath);
   const threshold = options.threshold !== undefined ? options.threshold : 0.8;
+
+  // Single component file 1-to-N mode
+  const isFileTarget = existsSync(resolvedTarget) && !(await fs.stat(resolvedTarget)).isDirectory();
+  if (isFileTarget) {
+    const targetFile = resolvedTarget;
+    const targetExt = extname(targetFile).toLowerCase();
+    const searchRoot = options.scopePath
+      ? resolve(options.scopePath)
+      : options.workspaceRoot
+        ? resolve(options.workspaceRoot)
+        : dirname(targetFile);
+
+    let targetFp: TemplateFingerprint | null = null;
+    try {
+      const content = await readSourceFile(targetFile);
+      targetFp = extractFingerprint(targetFile, content, searchRoot);
+    } catch {
+      // unreadable
+    }
+
+    if (!targetFp || targetFp.tags.length < 2) {
+      return {
+        workspaceRoot: searchRoot,
+        clusters: [],
+        totalComponentsAudited: 1,
+      };
+    }
+
+    const allFiles = await collectFiles(searchRoot, {
+      excludeDirs: options.excludeDirs,
+    });
+
+    const otherCandidates = allFiles.filter((f) => {
+      if (resolve(f) === targetFile) return false;
+      const ext = extname(f).toLowerCase();
+      return ['.vue', '.astro', '.tsx', '.jsx'].includes(ext);
+    });
+
+    const matchedFingerprints: TemplateFingerprint[] = [];
+    let totalSim = 0;
+
+    for (const f of otherCandidates) {
+      try {
+        const content = await readSourceFile(f);
+        const fp = extractFingerprint(f, content, searchRoot);
+        if (fp && fp.tags.length >= 2) {
+          const sim = computeSimilarity(targetFp, fp);
+          if (sim >= threshold) {
+            matchedFingerprints.push(fp);
+            totalSim += sim;
+          }
+        }
+      } catch {
+        // ignore unreadable
+      }
+    }
+
+    const clusters: TemplateSimilarityCluster[] = [];
+    if (matchedFingerprints.length > 0) {
+      const group = [targetFp, ...matchedFingerprints];
+      const avgSim = Math.round((totalSim / matchedFingerprints.length) * 100) / 100;
+
+      const sharedTags = Array.from(targetFp.tagSet).filter((t) =>
+        group.every((g) => g.tagSet.has(t))
+      );
+
+      const sharedStructure: string[] = [];
+      if (sharedTags.length > 0) {
+        sharedStructure.push(`Components: <${sharedTags.join('>, <')}>`);
+      }
+      if (group.every((g) => g.hasVFor)) {
+        sharedStructure.push('Pattern: v-for data iteration / swipeable card list');
+      }
+      if (group.every((g) => g.hasDrawer || g.hasModal)) {
+        sharedStructure.push('Actions: drawer/modal filter and action sheet triggers');
+      }
+
+      const extCounts = new Map<string, number>();
+      for (const g of group) {
+        const ext = extname(g.filePath).toLowerCase();
+        extCounts.set(ext, (extCounts.get(ext) || 0) + 1);
+      }
+      let dominantExt = targetExt;
+      let maxCount = 0;
+      for (const [ext, count] of extCounts.entries()) {
+        if (count > maxCount) {
+          maxCount = count;
+          dominantExt = ext;
+        }
+      }
+
+      const baseName = basename(targetFile, extname(targetFile));
+      const recommendation = `Candidate for shared generic component, e.g. <${baseName}Shared${dominantExt}> (${Math.round(avgSim * 100)}% structural match)`;
+
+      clusters.push({
+        similarity: avgSim,
+        files: group.map((g) => g.filePath),
+        sharedStructure,
+        recommendation,
+      });
+    }
+
+    return {
+      workspaceRoot: searchRoot,
+      clusters,
+      totalComponentsAudited: otherCandidates.length + 1,
+    };
+  }
+
+  const rootDir = resolvedTarget;
+  const absScope = options.scopePath ? resolve(rootDir, options.scopePath) : undefined;
 
   const allFiles = await collectFiles(rootDir, {
     excludeDirs: options.excludeDirs,

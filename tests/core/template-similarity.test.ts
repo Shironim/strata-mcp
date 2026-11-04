@@ -102,4 +102,53 @@ describe('Template Similarity Engine Hardening', () => {
       await fs.rm(tempDir, { recursive: true, force: true });
     }
   });
+
+  it('Workstream 3: supports 1-to-N similarity lookup when targetPath is a single component file', async () => {
+    const tempDir = join(import.meta.dir, '../fixtures/mock-single-file-similarity');
+    await fs.mkdir(tempDir, { recursive: true });
+
+    const targetFile = join(tempDir, 'TargetCard.vue');
+    const siblingSimilar = join(tempDir, 'SiblingCard.vue');
+    const siblingDifferent = join(tempDir, 'DifferentThing.vue');
+
+    const cardContent = `
+      <template>
+        <div class="card">
+          <CardHeader />
+          <DataTable />
+          <PaginationControls />
+        </div>
+      </template>
+    `;
+
+    const differentContent = `
+      <template>
+        <nav>
+          <SidebarNav />
+          <UserAvatar />
+        </nav>
+      </template>
+    `;
+
+    await fs.writeFile(targetFile, cardContent);
+    await fs.writeFile(siblingSimilar, cardContent);
+    await fs.writeFile(siblingDifferent, differentContent);
+
+    try {
+      const result = await findSimilarTemplates({
+        targetPath: targetFile,
+        workspaceRoot: tempDir,
+        threshold: 0.8,
+      });
+
+      expect(result.clusters.length).toBe(1);
+      const cluster = result.clusters[0];
+      expect(cluster.files).toContain(targetFile);
+      expect(cluster.files).toContain(siblingSimilar);
+      expect(cluster.files).not.toContain(siblingDifferent);
+      expect(cluster.similarity).toBeGreaterThanOrEqual(0.8);
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
 });
