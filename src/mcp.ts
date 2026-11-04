@@ -139,11 +139,19 @@ export function coerceToolArguments(toolName: string, rawArgs: any): Record<stri
     }
   }
 
-  // 6. Canonical Entity Aliasing: component
+  // 6. Canonical Entity Aliasing: component & prop_name / prop_presence
   if (!args.component) {
     const compAlias = args.component_name || args.componentName;
     if (compAlias) {
       args.component = String(compAlias);
+    }
+  }
+  if (toolName === 'find_code') {
+    if (args.prop_name === undefined && (args.prop !== undefined || args.propName !== undefined)) {
+      args.prop_name = args.prop ?? args.propName;
+    }
+    if (args.prop_presence === undefined && args.propPresence !== undefined) {
+      args.prop_presence = args.propPresence;
     }
   }
 

@@ -323,7 +323,7 @@ async function configureGeminiHooks(projectRoot: string): Promise<HarnessConfigR
   config['strata-autosync'] = {
     PostToolUse: [
       {
-        matcher: 'replace_file_content|write_to_file',
+        matcher: 'edit_file|write_file|replace_file_content|write_to_file',
         hooks: [
           {
             type: 'command',
@@ -363,7 +363,7 @@ async function configureCodexHooks(projectRoot: string): Promise<HarnessConfigRe
   if (!hasStrataHook) {
     postToolHooks.push({
       type: 'command',
-      matcher: 'write|edit|replace_file_content|write_to_file',
+      matcher: 'write|edit|write_file|edit_file|replace_file_content|write_to_file',
       command: '.codex/hooks/strata-post-write.sh',
     });
     hooks.PostToolUse = postToolHooks;
@@ -430,7 +430,7 @@ async function configureAgentsHooks(projectRoot: string): Promise<HarnessConfigR
   if (!hasStrataHook) {
     hooks.push({
       event: 'post_tool_use',
-      matcher: 'write|edit|replace_file_content|write_to_file',
+      matcher: 'write|edit|write_file|edit_file|replace_file_content|write_to_file',
       command: '.agents/hooks/strata-post-write.sh',
     });
     config.hooks = hooks;

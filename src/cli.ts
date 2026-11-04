@@ -2,6 +2,7 @@
 import { getSourceLineRange, readSourceFile, readSourceRef, readSourceSnapshot } from './engine/source-file';
 import { mapSourceFile } from './engine/source-map';
 import { mapFrontendScope } from './engine/frontend-map';
+import { dumpSyntaxTree } from './engine/astgrep';
 import { extractComponentOutline, formatOutlineAsText } from './engine/outline';
 import { findCodeTool } from './tools/find-code';
 import { existsSync, promises as fs, statSync } from 'node:fs';
@@ -109,6 +110,7 @@ Options:
   --scope <scope>            Scope: template | script | both (default: both)
   --mode <mode>              Pattern mode: ast | auto | literal
   --map                      Return bounded frontend inventory (no source bodies)
+  --dump-ast                 Dump CST syntax tree for a code snippet (CLI developer debug)
   --limit <n>                Result/page size (default: 100 for map, 200 for search)
   --offset <n>               Zero-based inventory offset
   -p, --path <path>          Target directory or file (default: .)
@@ -281,6 +283,8 @@ export const BOOLEAN_FLAGS = new Set([
   'resolve-globals',
   'resolveGlobals',
   'map',
+  'dump-ast',
+  'dumpAst',
   'outline',
 ]);
 
@@ -445,6 +449,16 @@ export async function main(argv: string[] = process.argv.slice(2)) {
     }
 
     if (command === 'search' || command === 'find') {
+      if (flags['dump-ast'] || flags.dumpAst) {
+        const snippet = positional[1];
+        if (!snippet) {
+          console.error('Error: Code snippet is required with --dump-ast (e.g. strata find "const a = 1" --dump-ast).');
+          process.exit(1);
+        }
+        const tree = await dumpSyntaxTree(snippet, parseStringFlag(flags.lang) || 'ts');
+        console.log(isJson ? JSON.stringify({ tree }, null, 2) : tree);
+        return;
+      }
       if (flags.map) {
         const map = await mapFrontendScope((positional[1] && !positional[1].startsWith('-')) ? positional[1] : targetPath, {
           limit: parseSafePositiveInt(flags.limit, 100),
@@ -854,7 +868,7 @@ export async function main(argv: string[] = process.argv.slice(2)) {
       }
 
       if (target === 'all') {
-        const [routes, unusedComponents, unusedState, similarTemplates, designSystemAudit, bundleAudit, apiContracts] =
+        const [routes, unusedComponents, unusedState, designSystemAudit, bundleAudit, apiContracts] =
           await Promise.all([
             scanRoutes({
               targetPath: auditPath,
@@ -872,12 +886,6 @@ export async function main(argv: string[] = process.argv.slice(2)) {
               excludeDirs,
             }),
             findUnusedState(auditPath, { scopePath, excludeDirs }),
-            findSimilarTemplates({
-              targetPath: auditPath,
-              scopePath,
-              threshold: parseSafeFloat(flags.threshold),
-              excludeDirs,
-            }),
             auditDesignTokens({
               targetPath: auditPath,
               scopePath,
@@ -898,7 +906,7 @@ export async function main(argv: string[] = process.argv.slice(2)) {
         if (isJson) {
           console.log(
             JSON.stringify(
-              { routes, unusedComponents, unusedState, similarTemplates, designSystemAudit, bundleAudit, apiContracts },
+              { routes, unusedComponents, unusedState, designSystemAudit, bundleAudit, apiContracts },
               null,
               2
             )
@@ -912,8 +920,6 @@ export async function main(argv: string[] = process.argv.slice(2)) {
             formatUnusedAsText(unusedComponents),
             '\n---\n',
             formatUnusedStateAsText(unusedState),
-            '\n---\n',
-            formatSimilarTemplatesAsText(similarTemplates),
             '\n---\n',
             formatDesignAuditAsText(designSystemAudit),
             '\n---\n',

@@ -26,13 +26,15 @@ Prioritize using \`strata-mcp\` MCP tools over performing raw text searches (\`g
 | Auditing dead code, unused state, archetype drift, design tokens, or bundle | \`audit_frontend\` | Verifies architectural health and cleanliness (\`dead-components\`, \`dead-state\`, \`routes\`, \`similar-templates\`, \`design-tokens\`, \`bundle-health\`, \`api-contracts\`, \`archetype-drift\`, \`all\`). |
 | Refactoring props, events, models, or slots across discovered consumers | \`generate_patch_plan\` | Proposes supported static edits (\`rename_prop\`, \`remove_prop\`, \`rename_event\`, \`rename_model\`, \`rename_slot\`) with hashes; review coverage and preconditions, then verify the edited contract and run relevant application checks. |
 
-## 3. Protocol & Execution Principles
-- **Map First, Read Selectively:** Inventory scope using \`find_code(action: "map")\`, map selected files with \`inspect_component(view: "map")\`, then copy the returned \`source_ref\` for \`view: "source"\`. Never construct line numbers or byte offsets manually.
+## 3. Protocol & Execution Principles (Selective Context & Map First)
+- **Map First, Read Selectively:** Inventory scope using \`find_code(action: "map")\`, map selected files with \`inspect_component(view: "map")\` or \`outline: true\` to inspect coordinates without source bodies, then copy the returned \`source_ref\` for \`view: "source"\`. Never construct line numbers or byte offsets manually.
+- **Inspect Contracts Over Bodies:** When discovering component interfaces, prefer \`inspect_component(path)\` to examine public contracts (props, emits, slots, models, state dependencies, outbound APIs) rather than reading raw template files line-by-line.
+- **Targeted Slicing:** When specific logic needs inspection or editing, extract only the targeted function slice via \`inspect_component(path, symbol: "...")\` or exact verified lines via \`inspect_component(path, source_range: { start_line, end_line })\`. Reserve full-file reading only for broad multi-region refactoring where the whole file text is indispensable.
 - **Evidence Boundaries:** Maps and ranges indicate source locations, not quality or correctness. Treat framework and path hints as candidates/conventions; verify parser diagnostics, status, and coverage before concluding findings.
 - **No Blind Probing:** Never read component files from line 1 when you only need to inspect props, emits, or slots. Use \`inspect_component\`.
 - **Pre-Refactor Verification:** Always verify upstream consumers with \`get_component_tree(direction: "upward")\` or \`generate_patch_plan\` before modifying component props, emits, v-models, or slots.
+- **Responsible Budget & Truncation:** When a symbol slice exceeds 50 lines or results hit \`max_results\`, respect the context guard notice and use the exact suggested continuation hint (e.g. \`source_range\`) rather than dumping unbounded text.
 - **Layered Output:** Request \`response_detail: "summary"\` for counts and risk metadata, then repeat the request with \`response_detail: "full"\` for primary analysis. Exact source requires full; summary is not a continuation page.
-- **After Prop Edits:** For supported local Vue declarations, inspect with an explicit \`expectation\` (old prop absent, new prop present/type/requiredness). FAIL requires correction; UNKNOWN requires source/application checks and is not PASS. The check does not certify consumers or business behavior.
 `;
 
 export const STRATA_INSPECT_SKILL = `---
@@ -50,11 +52,12 @@ description: Deep frontend AST component inspection, component trees, reactivity
 
 1. **Exploring Unfamiliar Frontend Codebases & Feature Architectures:**
    - Instead of scanning directories blindly or reading full page files, use \`find_code(action: "map")\` to get a bounded inventory with domain classifications (Feature-Sliced Design layers, DDD bounded contexts, monorepo packages).
-   - Inspect public component contracts (props, emits, slots, exposed methods) via \`inspect_component\` in 15–30 lines instead of 500 lines of template markup.
+   - Inspect structural outlines without code bodies via \`inspect_component(path, outline: true)\` or \`view: "map"\`.
+   - Inspect public component contracts (props, emits, slots, exposed methods, outbound APIs) via \`inspect_component(path)\` in a high-density summary instead of dumping hundreds of lines of template markup.
 
 2. **Refactoring Component Interfaces (Props, Emits, Models, Slots):**
-   - Before renaming or removing a prop or event, inspect scoped consumer candidates using \`get_component_tree(direction: "upward")\`. For Vue props, request \`inspect_component(impact: "summary")\`; use \`impact: "full"\` for usage refs. Counts do not establish runtime completeness.
-   - Generate hash-bound proposals for discovered static consumer usages with \`generate_patch_plan(refactor_type: "rename_prop" | "remove_prop" | "rename_event" | "rename_model" | "rename_slot")\`. Review omissions and target declarations separately; verify after editing.
+   - Before renaming or removing a prop or event, inspect scoped consumer candidates using \`get_component_tree(direction: "upward")\`. For Vue and React/JSX props, request \`inspect_component(impact: "summary")\`; use \`impact: "full"\` for usage refs.
+   - Generate hash-bound proposals for discovered static consumer usages across Vue, Astro, React/JSX, and Svelte with \`generate_patch_plan(refactor_type: "rename_prop" | "remove_prop" | "rename_event" | "rename_model" | "rename_slot")\`. Dynamic prop spread omissions (\`DYNAMIC_PROP_SPREAD\`) are flagged for review.
 
 3. **Verifying Reactivity & State Blast Radius:**
    - Map dependencies and downstream consumers of global/modular stores (Pinia, Zustand, React Context) via \`trace_state\`.
@@ -62,16 +65,16 @@ description: Deep frontend AST component inspection, component trees, reactivity
 
 4. **Auditing Meta-Framework Route Hierarchies & Layout Topologies:**
    - Extract URL route trees, dynamic route parameters, route groups, and nested layouts across Next.js (App Router conventions), Nuxt 3, SvelteKit (\`+page\`, \`+layout\`), and Astro using \`audit_frontend(target: "routes")\`.
-   - Identify Page Archetype Drift (deviations from standard canonical layouts) using \`audit_frontend(target: "archetype-drift")\`.
+   - Identify Page Archetype Drift (deviations from sibling canonical layouts) using \`audit_frontend(target: "archetype-drift")\`.
 
 5. **Mapping Network Calls & Backend API Contracts:**
-   - Discover supported static client-side API expressions and backend controller hints via \`audit_frontend(target: "api-contracts")\`; dynamic endpoints and runtime calls may remain unresolved.
+   - Discover client-side API calls (Axios, fetch, Inertia form, TanStack Query) and 1-hop composable outbound endpoints with \`backendTargetHint\` via \`audit_frontend(target: "api-contracts")\` or \`inspect_component(path)\`.
 
 6. **Cleaning Dead Code, Duplicate Templates, & Bundle Health:**
-   - Detect unused components, unreferenced stores, duplicate template AST fragments, and rogue CSS design tokens using \`audit_frontend(target: "all")\` or specific targets (\`dead-components\`, \`dead-state\`, \`similar-templates\`, \`design-tokens\`, \`bundle-health\`).
+   - Detect unused components, unreferenced stores, duplicate template AST fragments, and rogue CSS design tokens using \`audit_frontend(target: "all")\` or specific targets (\`dead-components\`, \`dead-state\`, \`similar-templates\`, \`design-tokens\`, \`bundle-health\`). Note that \`similar-templates\` is an opt-in sub-audit that also supports 1-to-N component similarity checks.
 
 7. **Targeted Symbol Extraction (Precision Slicing):**
-   - Retrieve only the targeted function or method slice with verified line numbers and source hashes without reading the whole file using \`inspect_component(symbol: "...")\` or \`source_ref\`.
+   - Retrieve only the targeted function or method slice with verified line numbers, AST call chains, and caller verification without reading the whole file using \`inspect_component(symbol: "...")\` or exact line spans via \`source_range\`. Slices exceeding 50 lines include an exact continuation hint to prevent context bloat.
 
 ---
 
@@ -138,11 +141,13 @@ description: Deep frontend AST component inspection, component trees, reactivity
 
 ---
 
-## Execution Principles (Map First, Read Selectively)
+## Execution Principles (Selective Context & Token Efficiency)
 
-1. **Map First:** Always start broad inquiries with \`find_code(action: "map")\` or \`audit_frontend(target: "routes")\` to understand the architecture before inspecting individual files.
-2. **Never Blind-Probe:** Do not read raw component files from line 1 just to see their props or events. Call \`inspect_component\` for a clean public contract.
-3. **Verify Blast Radius Before Mutation:** Always run \`get_component_tree(direction: "upward")\` or \`generate_patch_plan\` before touching shared component contracts.
+1. **Map First, Read Selectively:** Start broad inquiries with \`find_code(action: "map")\` or \`inspect_component(path, view: "map")\` / \`inspect_component(path, outline: true)\` to view architecture and component coordinates without dumping source bodies.
+2. **Inspect Contracts Over Bodies:** Do not read raw component files from line 1 just to see their props or events. Call \`inspect_component\` for a clean public contract.
+3. **Targeted Slicing for Code Edits:** When modifying code, extract only the targeted function or line span via \`inspect_component(path, symbol: "...")\` or \`inspect_component(path, source_range: { start_line, end_line })\`. Never read whole files line-by-line via generic tools when only targeted logic is needed.
+4. **Verify Blast Radius Before Mutation:** Always run \`get_component_tree(direction: "upward")\` or \`generate_patch_plan\` before touching shared component contracts.
+5. **Responsible Budget & Truncation:** When a symbol slice exceeds 50 lines, respect the context guard notice and follow the suggested continuation hint (\`source_range\`) instead of dumping unbounded text.
 `;
 
 export const STRATA_POST_WRITE_HOOK = `#!/usr/bin/env bash
@@ -210,7 +215,7 @@ WORKSPACE_ROOT="\${STRATA_WORKSPACE_ROOT:-$(cd "$HOOK_DIR/../.." && pwd)}"
 
 # Check if file has frontend extension
 case "$FILE_PATH" in
-  *.vue|*.astro|*.tsx|*.jsx|*.ts|*.js)
+  *.vue|*.astro|*.svelte|*.tsx|*.jsx|*.ts|*.js)
     if command -v strata >/dev/null 2>&1; then
       strata sync "$WORKSPACE_ROOT" --json >/dev/null 2>&1 || true
     elif command -v bun >/dev/null 2>&1 && [ -f "$WORKSPACE_ROOT/node_modules/.bin/strata" ]; then
@@ -246,7 +251,7 @@ export const STRATA_GEMINI_HOOKS = JSON.stringify(
     'strata-autosync': {
       PostToolUse: [
         {
-          matcher: 'replace_file_content|write_to_file',
+          matcher: 'edit_file|write_file|replace_file_content|write_to_file',
           hooks: [
             {
               type: 'command',
