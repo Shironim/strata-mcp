@@ -13,7 +13,7 @@ import { collectFiles } from './collector';
 import { getCandidateNames } from './template';
 import { STRATA_VERSION } from '../version';
 import { escapeRegExp } from './patterns';
-import { collectVuePatchOmissions } from './patch-coverage';
+import { collectVuePatchOmissions, collectJsxPatchOmissions } from './patch-coverage';
 import type {
   ComponentPatchItem,
   PatchPlanOptions,
@@ -640,6 +640,52 @@ function scanAstroProps(
 }
 
 /**
+ * Scans Svelte files for component usage and props using AST parsing.
+ */
+function scanSvelteProps(
+  code: string,
+  targetTags: Set<string>,
+  refactorType: PatchRefactorType,
+  oldName: string,
+  newName: string | undefined,
+  filePath: string
+): ComponentPatchItem[] {
+  const patches: ComponentPatchItem[] = [];
+  const cleanOld = cleanIdentifier(oldName);
+  const cleanNew = newName ? cleanIdentifier(newName) : undefined;
+  const renames = refactorType.startsWith('rename_');
+
+  const sf = ts.createSourceFile(filePath, code, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+
+  function visit(node: ts.Node): void {
+    if (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) {
+      const tag = node.tagName.getText(sf);
+      if (targetTags.has(tag) || targetTags.has(toKebabCase(tag))) {
+        for (const attr of node.attributes.properties) {
+          if (!ts.isJsxAttribute(attr) || !matchVueProp(attr.name.getText(sf), cleanOld)) continue;
+          if (renames && !cleanNew) continue;
+          const target = renames ? attr.name : attr;
+          const position = sf.getLineAndCharacterOfPosition(target.getStart(sf));
+          patches.push({
+            file: filePath,
+            line: position.line + 1,
+            column: position.character + 1,
+            targetTag: tag,
+            oldSnippet: target.getText(sf),
+            newSnippet: renames ? (attr.name.getText(sf).includes('-') ? toKebabCase(cleanNew!) : toCamelCase(cleanNew!)) : '',
+            description: `${renames ? 'Rename' : 'Remove'} Svelte prop "${attr.name.getText(sf)}" on <${tag}>`,
+          });
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(sf);
+
+  return patches;
+}
+
+/**
  * Generates an automated, prescriptive AST patch plan across all upward consumers of a component.
  */
 export async function generatePatchPlan(options: PatchPlanOptions): Promise<PatchPlanResult> {
@@ -667,7 +713,7 @@ export async function generatePatchPlan(options: PatchPlanOptions): Promise<Patc
   const candidateToFileMap = new Map<string, string[]>();
   for (const file of allProjectFiles) {
     const ext = extname(file).toLowerCase();
-    if (ext === '.vue' || ext === '.astro' || ext === '.tsx' || ext === '.jsx') {
+    if (ext === '.vue' || ext === '.astro' || ext === '.svelte' || ext === '.tsx' || ext === '.jsx') {
       const base = basename(file, ext);
       for (const cand of getCandidateNames(base)) {
         const key = cand.toLowerCase();
@@ -738,7 +784,7 @@ export async function generatePatchPlan(options: PatchPlanOptions): Promise<Patc
     try {
       const { content, snapshot } = await readSourceSnapshot(consumerPath);
       const ext = extname(consumerPath).toLowerCase();
-      if (!['.vue', '.astro', '.tsx', '.jsx'].includes(ext)) {
+      if (!['.vue', '.astro', '.tsx', '.jsx', '.svelte'].includes(ext)) {
         coverage.unsupportedCount++;
         coverage.diagnostics.push({ file: consumerPath, code: 'UNSUPPORTED_CONSUMER', message: `Patch scanning is not supported for ${ext}.` });
         continue;
@@ -817,7 +863,7 @@ export async function generatePatchPlan(options: PatchPlanOptions): Promise<Patc
         );
         allPatches.push(...astroTemplatePatches);
       } else if (ext === '.tsx' || ext === '.jsx') {
-        coverage.omissions.push({ file: consumerPath, code: 'USAGE_COVERAGE_NOT_ENUMERATED', resolution: 'unsupported', message: 'JSX patches cover supported static usages; spread, forwarding and dynamic usages are not exhaustively inventoried.' });
+        coverage.omissions.push(...collectJsxPatchOmissions(content, consumerPath, snapshot.sha256, consumerTags));
         const jsxPatches = scanJsxProps(
           content,
           consumerTags,
@@ -827,6 +873,17 @@ export async function generatePatchPlan(options: PatchPlanOptions): Promise<Patc
           consumerPath
         );
         allPatches.push(...jsxPatches);
+      } else if (ext === '.svelte') {
+        coverage.omissions.push(...collectJsxPatchOmissions(content, consumerPath, snapshot.sha256, consumerTags));
+        const sveltePatches = scanSvelteProps(
+          content,
+          consumerTags,
+          refactorType,
+          cleanOld,
+          cleanNew,
+          consumerPath
+        );
+        allPatches.push(...sveltePatches);
       }
       for (const patch of allPatches.slice(patchesBefore)) {
         const lines = content.split('\n');

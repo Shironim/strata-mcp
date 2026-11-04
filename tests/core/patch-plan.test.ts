@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import { join } from 'node:path';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { generatePatchPlan } from '../../src/engine/patch-plan';
 import { extractStyleTokens } from '../../src/engine/contract';
 
@@ -122,6 +124,77 @@ describe('Patch Plan Engine — Automated Refactoring Plans', () => {
     expect(matchVueEvent('v-on:sort', 'sort')).toBe(true);
     expect(matchVueEvent('sort', 'sort')).toBe(true);
     expect(matchVueEvent('item-selected', 'itemSelected')).toBe(true);
+  });
+
+  it('generates patch plan for rename_prop and detects dynamic spread omissions on TSX consumers', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'strata-patch-tsx-'));
+    try {
+      const btnPath = join(root, 'Button.tsx');
+      const pagePath = join(root, 'Page.tsx');
+      await writeFile(btnPath, 'export interface ButtonProps { color: string; }\nexport const Button = (props: ButtonProps) => <button />;');
+      await writeFile(
+        pagePath,
+        `import { Button } from './Button';
+export const Page = (extra: any) => {
+  return (
+    <div>
+      <Button color="blue" />
+      <Button {...extra} />
+    </div>
+  );
+};`
+      );
+
+      const result = await generatePatchPlan({
+        componentPath: btnPath,
+        refactorType: 'rename_prop',
+        oldName: 'color',
+        newName: 'themeColor',
+        targetPath: root,
+      });
+
+      expect(result.totalConsumersAudited).toBeGreaterThanOrEqual(1);
+      expect(result.totalPatches).toBe(1);
+      expect(result.patches[0]?.file).toBe(pagePath);
+      expect(result.patches[0]?.oldSnippet).toBe('color');
+      expect(result.patches[0]?.newSnippet).toBe('themeColor');
+
+      const omissions = result.coverage.omissions.filter((o) => o.code === 'DYNAMIC_PROP_SPREAD');
+      expect(omissions.length).toBeGreaterThanOrEqual(1);
+      expect(omissions[0]?.file).toBe(pagePath);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('generates patch plan for rename_prop on Svelte consumers', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'strata-patch-svelte-'));
+    try {
+      const btnPath = join(root, 'Button.svelte');
+      const pagePath = join(root, 'Page.svelte');
+      await writeFile(btnPath, '<script>export let color = "red";</script><button>{color}</button>');
+      await writeFile(
+        pagePath,
+        `<script>import Button from './Button.svelte';</script>
+<Button color="blue" />`
+      );
+
+      const result = await generatePatchPlan({
+        componentPath: btnPath,
+        refactorType: 'rename_prop',
+        oldName: 'color',
+        newName: 'themeColor',
+        targetPath: root,
+      });
+
+      expect(result.totalConsumersAudited).toBeGreaterThanOrEqual(1);
+      expect(result.totalPatches).toBe(1);
+      expect(result.patches[0]?.file).toBe(pagePath);
+      expect(result.patches[0]?.oldSnippet).toBe('color');
+      expect(result.patches[0]?.newSnippet).toBe('themeColor');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it('handles missing file in inspect_component tool without double path concatenation (Issue #2)', async () => {

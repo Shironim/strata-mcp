@@ -1,4 +1,5 @@
 import { parse, NodeTypes, type ElementNode, type RootNode, type TemplateChildNode } from '@vue/compiler-dom';
+import ts from 'typescript';
 import type { PatchPlanResult } from '../types';
 
 type Omissions = PatchPlanResult['coverage']['omissions'];
@@ -37,5 +38,48 @@ export function collectVuePatchOmissions(
     }
   }
   walk(root, false);
+  return omissions;
+}
+
+/** Reports JSX/TSX unsupported syntax such as prop spread {...props} as omissions. */
+export function collectJsxPatchOmissions(
+  code: string,
+  file: string,
+  sha256: string,
+  targetTags: Set<string>
+): Omissions {
+  const omissions: Omissions = [];
+  const sf = ts.createSourceFile(file, code, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+
+  const matches = (tag: string) =>
+    targetTags.has(tag) ||
+    targetTags.has(tag.toLowerCase()) ||
+    targetTags.has(tag.replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase());
+
+  function visit(node: ts.Node) {
+    if (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) {
+      const tag = node.tagName.getText(sf);
+      if (matches(tag)) {
+        for (const prop of node.attributes.properties) {
+          if (ts.isJsxSpreadAttribute(prop)) {
+            omissions.push({
+              file,
+              code: 'DYNAMIC_PROP_SPREAD',
+              message: `JSX spread attribute on <${tag}> is not rewritten; check passed props manually.`,
+              resolution: 'unsupported',
+              sourceRef: {
+                sha256,
+                startOffset: prop.getStart(sf),
+                endOffset: prop.getEnd(),
+              },
+            });
+          }
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  }
+
+  visit(sf);
   return omissions;
 }
