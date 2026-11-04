@@ -4,6 +4,8 @@ import ts from "typescript";
 import { parseSfc } from "../splitter";
 import type { ContextDependencyNode } from "../../types";
 import { walkVueDom } from "./ast-helpers";
+import { reactBindings } from '../parsers/react-bindings';
+import { unwrapExpression } from '../parsers/ts-syntax';
 
 /**
  * Extracts provide/inject (Vue) and Context Provider/useContext (React) nodes from component code.
@@ -81,6 +83,7 @@ export function extractComponentContextNodes(
         true,
         ts.ScriptKind.TSX
       );
+      const bindings = reactBindings(sourceFile);
 
       function visit(node: ts.Node) {
         // Vue provide(...) or Vue.provide(...)
@@ -88,17 +91,20 @@ export function extractComponentContextNodes(
           let isProvide = false;
           let isInject = false;
           let isUseContext = false;
+          const reactApi = bindings.api(node.expression);
+          isUseContext = reactApi === 'useContext' || reactApi === 'use' && !!node.arguments[0]
+            && (bindings.isLocalContext(node.arguments[0]) || ts.isIdentifier(node.arguments[0])
+              && !!bindings.binding(node.arguments[0])?.source && /Context$/.test(node.arguments[0].text));
 
           if (ts.isIdentifier(node.expression)) {
             const fn = node.expression.text;
             if (fn === 'provide') isProvide = true;
             else if (fn === 'inject') isInject = true;
-            else if (fn === 'useContext') isUseContext = true;
+            else if (fn === 'useContext' && !bindings.binding(node.expression)) isUseContext = true;
           } else if (ts.isPropertyAccessExpression(node.expression)) {
             const fn = node.expression.name.text;
             if (fn === 'provide') isProvide = true;
             else if (fn === 'inject') isInject = true;
-            else if (fn === 'useContext') isUseContext = true;
           }
 
           const { line } = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
@@ -129,7 +135,8 @@ export function extractComponentContextNodes(
               });
             }
           } else if (isUseContext && node.arguments.length >= 1) {
-            const rawKey = extractArgText(node.arguments[0], sourceFile);
+            const argument = unwrapExpression(node.arguments[0]);
+            const rawKey = ts.isIdentifier(argument) || ts.isPropertyAccessExpression(argument) ? extractArgText(argument, sourceFile) : '';
             if (rawKey) {
               const key = rawKey.endsWith('Context') ? rawKey : `${rawKey}Context`;
               consumers.push({
@@ -138,6 +145,8 @@ export function extractComponentContextNodes(
                 component,
                 filePath,
                 line: calculatedLine,
+                evidence: { basis: 'derived', resolution: 'candidate', method: reactApi ? 'react-import-binding' : 'unbound-react-hook-name',
+                  reason: 'Context key is source syntax; provider object identity is not established.' },
               });
             }
           }
@@ -277,19 +286,6 @@ export function extractComponentContextNodes(
       });
     }
 
-    // React useContext(Context)
-    const reactUseContextRegex = /\buseContext\s*(?:<[^>]+>)?\s*\(\s*([A-Za-z0-9_$]+)\s*\)/g;
-    for (const m of content.matchAll(reactUseContextRegex)) {
-      const rawKey = m[1];
-      const key = rawKey.endsWith('Context') ? rawKey : `${rawKey}Context`;
-      consumers.push({
-        key,
-        type: 'react-use-context',
-        component,
-        filePath,
-        line: getLineFromOffset(m.index || 0),
-      });
-    }
   }
 
   return { providers, consumers };

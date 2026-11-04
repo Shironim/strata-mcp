@@ -149,3 +149,45 @@ test('scoped sync preserves incoming edges from outside callers', async () => {
   const edgeCountAfter = (db.query('SELECT count(*) as c FROM edges').get() as { c: number }).c;
   expect(edgeCountAfter).toBe(edgeCountBefore);
 });
+
+test('corrupted database file throws explicit actionable error without silent deletion', () => {
+  const r = root();
+  const dbPath = join(r, '.strata', 'graph.db');
+  writeFileSync(dbPath, 'NOT A VALID SQLITE DATABASE FILE - CORRUPTED BYTES');
+
+  expect(() => getWorkspaceDatabase(r, { enableWatcher: false })).toThrow(/SQLite database may be corrupt/);
+  // Verify that the corrupt file is preserved for manual recovery and not silently wiped
+  const content = Bun.file(dbPath).text();
+  expect(content).resolves.toContain('CORRUPTED BYTES');
+});
+
+test('concurrent sync publication detects generation mismatch and aborts atomically', async () => {
+  const r = root();
+  writeFileSync(join(r, 'App.vue'), '<template><div>App v1</div></template>');
+  const db = getWorkspaceDatabase(r, { enableWatcher: false });
+  await syncWorkspace(r);
+
+  const initialGeneration = (db.query("SELECT value FROM meta WHERE key = 'sync_generation'").get() as { value: string }).value;
+  expect(Number(initialGeneration)).toBeGreaterThan(0);
+
+  // Simulate a concurrent sync writer advancing generation while second sync is in flight
+  writeFileSync(join(r, 'App.vue'), '<template><div>App v2</div></template>');
+
+  const { stagedSync } = await import('../../src/engine/storage/staged-sync');
+  // Mutate meta mid-flight right before transaction commit by overriding query/run
+  const originalRun = db.run.bind(db);
+  let injected = false;
+  db.run = (sql: string, ...args: any[]) => {
+    if (sql.includes('temp.sync_preserved_edges') && !injected) {
+      injected = true;
+      originalRun("UPDATE meta SET value = '9999' WHERE key = 'sync_generation'");
+    }
+    return originalRun(sql, ...args);
+  };
+
+  try {
+    await expect(stagedSync(r, undefined, db)).rejects.toThrow(/WORKSPACE_CHANGED:/);
+  } finally {
+    db.run = originalRun;
+  }
+});

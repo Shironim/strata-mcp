@@ -35,7 +35,7 @@ export function queryUpwardBlastRadiusFromDb(
     SELECT DISTINCT f.path, f.framework, f.is_page, b.depth
     FROM blast_radius b
     JOIN files f ON b.file_id = f.id
-    ORDER BY b.depth ASC, f.is_page DESC;
+    ORDER BY b.depth ASC, f.is_page DESC, f.path ASC;
   `
     )
     .all(target.id, maxDepth) as Array<{
@@ -65,9 +65,9 @@ export function queryUnusedComponentsFromDb(
     SELECT c.name, f.path, f.framework
     FROM components c
     JOIN files f ON c.file_id = f.id
-    LEFT JOIN edges e ON c.file_id = e.child_file_id
+    LEFT JOIN edges e ON c.file_id = e.child_file_id AND (e.is_rendered = 1 OR e.import_type = 'dynamic')
     WHERE e.child_file_id IS NULL AND f.is_page = 0 AND f.is_layout = 0
-    ORDER BY c.name ASC;
+    ORDER BY c.name ASC, f.path ASC;
   `
     )
     .all() as Array<{ name: string; path: string; framework: string }>;

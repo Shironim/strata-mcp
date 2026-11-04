@@ -194,6 +194,14 @@ export function initSchema(db: Database): void {
       handlers_json TEXT,
       layout_chain_json TEXT
     );
+
+    CREATE TABLE IF NOT EXISTS file_dependencies (
+      file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+      dependency_path TEXT NOT NULL,
+      content_hash TEXT NOT NULL,
+      is_external INTEGER DEFAULT 0,
+      PRIMARY KEY (file_id, dependency_path)
+    );
   `);
 
   // Auto-migration: ensure existing databases get new columns before indexing
@@ -232,5 +240,6 @@ export function initSchema(db: Database): void {
     CREATE INDEX IF NOT EXISTS idx_state_deps_file ON state_deps(file_id);
     CREATE INDEX IF NOT EXISTS idx_state_deps_ident_mode ON state_deps(identifier, access_mode);
     CREATE INDEX IF NOT EXISTS idx_routes_file ON routes(file_id);
+    CREATE INDEX IF NOT EXISTS idx_file_deps_dep_path ON file_dependencies(dependency_path);
   `);
 }

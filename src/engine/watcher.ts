@@ -1,7 +1,7 @@
 import { watch, type FSWatcher } from 'node:fs';
 import { resolve, extname, basename } from 'node:path';
 import type { Database } from 'bun:sqlite';
-import { IGNORED_DIRS, INDEX_CONFIG_FILES, SUPPORTED_FRONTEND_EXTENSIONS } from './collector';
+import { IGNORED_DIRS, INDEX_CONFIG_FILES, isConfigFile, SUPPORTED_FRONTEND_EXTENSIONS } from './collector';
 
 const SUPPORTED_EXTENSIONS = SUPPORTED_FRONTEND_EXTENSIONS;
 const IGNORED_DIR_NAMES = new Set([...IGNORED_DIRS, '.strata', '.vue-ast']);
@@ -222,7 +222,7 @@ export class WorkspaceWatcher {
     const normalizedRel = normalizePath(relPath);
 
     const fileName = basename(normalizedRel);
-    const isConfig = INDEX_CONFIG_FILES.has(fileName) || /^(nuxt|next|astro|svelte)\.config\.(ts|js|mjs)$/.test(fileName);
+    const isConfig = isConfigFile(fileName);
     if (this.options.scopeSubdirs.length > 0 && !isConfig) {
       const inScope = this.options.scopeSubdirs.some(
         (dir) => normalizedRel === dir || normalizedRel.startsWith(`${dir}/`)

@@ -23,12 +23,19 @@ import type {
 export async function queryStateImpact(
   workspaceRoot: string,
   identifier: string,
-  roleFilter: 'all' | 'mutators' | 'readers' = 'all'
+  roleFilter: 'all' | 'mutators' | 'readers' = 'all',
+  options?: { skipSync?: boolean }
 ): Promise<StateImpactResult> {
   const startTime = performance.now();
   const absRoot = resolve(workspaceRoot);
-  const sync = await syncWorkspace(absRoot);
   const db = getWorkspaceDatabase(absRoot);
+  const sync = options?.skipSync
+    ? {
+        cacheHit: true,
+        syncGeneration: Number((db.query("SELECT value FROM meta WHERE key = 'sync_generation'").get() as { value?: string } | null)?.value || 0),
+        configFingerprint: (db.query("SELECT value FROM meta WHERE key = 'config_fingerprint'").get() as { value?: string } | null)?.value || '',
+      }
+    : await syncWorkspace(absRoot);
 
   const rows = db
     .query(
@@ -373,12 +380,18 @@ export function formatUnusedStateAsText(result: UnusedStateResult): string {
  */
 export async function traceStateChain(
   workspaceRoot: string,
-  options: TraceStateChainOptions
+  options: TraceStateChainOptions & { skipSync?: boolean }
 ): Promise<StateChainResult> {
   const startTime = performance.now();
   const absRoot = resolve(workspaceRoot);
-  const sync = await syncWorkspace(absRoot);
   const db = getWorkspaceDatabase(absRoot);
+  const sync = options?.skipSync
+    ? {
+        cacheHit: true,
+        syncGeneration: Number((db.query("SELECT value FROM meta WHERE key = 'sync_generation'").get() as { value?: string } | null)?.value || 0),
+        configFingerprint: (db.query("SELECT value FROM meta WHERE key = 'config_fingerprint'").get() as { value?: string } | null)?.value || '',
+      }
+    : await syncWorkspace(absRoot);
 
   const identifier = options.identifier;
   const maxDepth = options.maxDepth || 3;
@@ -448,7 +461,7 @@ export async function traceStateChain(
 
   // Step C: Scan all other files in files table for explicit export of identifier
   if (!declaringFile) {
-    const allFiles = db.query('SELECT id, path FROM files').all() as Array<{ id: number; path: string }>;
+    const allFiles = db.query('SELECT id, path FROM files ORDER BY path ASC').all() as Array<{ id: number; path: string }>;
     for (const c of allFiles) {
       if (await fileDeclaresIdentifier(c.path, identifier)) {
         declaringFile = c;
@@ -506,6 +519,7 @@ export async function traceStateChain(
       FROM edges e
       JOIN files f ON e.parent_file_id = f.id
       WHERE e.child_file_id = ?
+      ORDER BY f.path ASC
     `);
 
     // Traverse upwards along edges: who imports these current files?
@@ -542,6 +556,7 @@ export async function traceStateChain(
       SELECT DISTINCT s.identifier, s.kind
       FROM state_deps s
       WHERE s.file_id = ?
+      ORDER BY s.identifier ASC, s.kind ASC
     `);
 
     const findDepFileStmt = db.prepare(`
@@ -555,7 +570,8 @@ export async function traceStateChain(
           WHEN f.path LIKE '%/' || ? || '.%' THEN 1
           WHEN f.path LIKE '%/' || ? || '/index.%' THEN 2
           ELSE 3
-        END
+        END,
+        f.path ASC
       LIMIT 1;
     `);
 

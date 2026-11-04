@@ -31,6 +31,7 @@ import {
 import {
   normalizeScopeFilters,
   isPathInScope,
+  isRenderedInContent,
 } from "./downward-traversal";
 
 
@@ -142,8 +143,8 @@ export async function getUpwardComponentTree(
     sourceFile: string,
     sourceContent: string,
     targetPath: string
-  ): boolean {
-    if (sourceFile === targetPath) return false;
+  ): { consumes: boolean; isRendered: boolean; relationKind: 'render' | 'import' | 'type' } | null {
+    if (sourceFile === targetPath) return null;
 
     // Check 1: Static and dynamic imports in source
     const imports = extractImports(sourceContent, sourceFile);
@@ -162,7 +163,12 @@ export async function getUpwardComponentTree(
           if (barrelTarget) resolved = barrelTarget;
         }
         if (normalize(resolved) === targetPath) {
-          return true;
+          const isRendered = isRenderedInContent(sourceContent, imp.alias || imp.name);
+          return {
+            consumes: true,
+            isRendered,
+            relationKind: isRendered ? 'render' : 'import',
+          };
         }
       }
       const boundName = imp.alias || imp.name;
@@ -190,15 +196,16 @@ export async function getUpwardComponentTree(
         continue;
       }
 
-      const tagPattern = new RegExp(
-        `<(?:[A-Za-z0-9_$.]+\\.)?${escapeRegExp(cand)}[\\s/>]|:is=['"]${escapeRegExp(cand)}['"]`
-      );
-      if (tagPattern.test(sourceContent)) {
-        return true;
+      if (isRenderedInContent(sourceContent, cand)) {
+        return {
+          consumes: true,
+          isRendered: true,
+          relationKind: 'render',
+        };
       }
     }
 
-    return false;
+    return null;
   }
 
   const allConsumers = new Set<string>();
@@ -242,13 +249,15 @@ export async function getUpwardComponentTree(
     }
 
     for (const [sourceFile, sourceContent] of fileContents) {
-      if (fileConsumesTarget(sourceFile, sourceContent, normPath)) {
+      const consumption = fileConsumesTarget(sourceFile, sourceContent, normPath);
+      if (consumption) {
         if (visitedInBranch.has(sourceFile)) {
           diagnostics.push({ code: 'CYCLE_TRUNCATED', filePath: sourceFile, sourceHash: fileHashes.get(sourceFile)!,
             targetPath: sourceFile, depth: depth + 1,
             reason: `Upward traversal stopped at consumer '${sourceFile}' of '${normPath}' because this consumer already occurs in the current branch.` });
           node.children.push({ component: getDisambiguatedComponentName(sourceFile, isPageFile(sourceFile)),
-            filePath: sourceFile, isPage: isPageFile(sourceFile), isCircular: true, depth: depth + 1, children: [] });
+            filePath: sourceFile, isPage: isPageFile(sourceFile), isCircular: true, depth: depth + 1,
+            isRendered: consumption.isRendered, relationKind: consumption.relationKind, children: [] });
           continue;
         }
         const parentNode = await buildUpwardSubTree(
@@ -256,6 +265,8 @@ export async function getUpwardComponentTree(
           depth + 1,
           new Set(visitedInBranch)
         );
+        parentNode.isRendered = consumption.isRendered;
+        parentNode.relationKind = consumption.relationKind;
         node.children.push(parentNode);
       }
     }

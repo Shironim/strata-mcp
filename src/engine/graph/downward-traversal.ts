@@ -1,4 +1,5 @@
 import { readSourceSnapshot } from '../source-file';
+import { moduleDirective } from '../parsers/ts-syntax';
 import { collectVueDynamicTreeInputs, inspectVueTreeInput } from './vue-tree-input';
 import { existsSync, promises as fs, statSync, readFileSync } from "node:fs";
 import { basename, dirname, extname, join, normalize, resolve } from "node:path";
@@ -130,6 +131,21 @@ function resolveDynamicComponentTag(
   }
 }
 
+const HTML_COMMENT_RE = new RegExp('<' + '!--[\\s\\S]*?-->', 'g');
+const BLOCK_COMMENT_RE = /\/\*[\s\S]*?\*\//g;
+const LINE_COMMENT_RE = /\/\/[^\n]*/g;
+const DOUBLE_QUOTE_RE = /"[^"\\]*(?:\\.[^"\\]*)*"/g;
+const SINGLE_QUOTE_RE = /'[^'\\]*(?:\\.[^'\\]*)*'/g;
+
+function sanitizeTemplateContent(raw: string): string {
+  return raw
+    .replace(HTML_COMMENT_RE, '')
+    .replace(BLOCK_COMMENT_RE, '')
+    .replace(LINE_COMMENT_RE, '')
+    .replace(DOUBLE_QUOTE_RE, '')
+    .replace(SINGLE_QUOTE_RE, '');
+}
+
 /**
  * Traverses Vue/Nuxt SFC template AST, TSX JSX elements, and Astro component templates
  * to extract all rendered child custom component tags with 100% precision.
@@ -170,8 +186,8 @@ export function extractRenderedCustomTags(content: string): string[] {
         }
 
         if (
-          /^[A-Z][A-Za-z0-9_]*$/.test(el.tag) ||
-          /^[a-z][a-z0-9_]*-[a-z0-9_-]*$/.test(el.tag)
+          /^[A-Z][A-Za-z0-9_.]*$/.test(el.tag) ||
+          /^[a-z][a-z0-9_]*-[a-z0-9_.-]*$/.test(el.tag)
         ) {
           tags.add(el.tag);
         }
@@ -236,10 +252,13 @@ export function extractRenderedCustomTags(content: string): string[] {
     // Fallback if AST generation fails
   }
 
-  // 3. Resilient fallback for standalone raw fragments
-  const tagRegex = /<([A-Z][A-Za-z0-9_]*|[a-z][a-z0-9_]*-[a-z0-9_-]*)/g;
-  for (const match of content.matchAll(tagRegex)) {
-    tags.add(match[1]);
+  // 3. Resilient fallback for standalone raw fragments (only if no SFC template is present)
+  if (vueTemplate === null) {
+    const sanitized = sanitizeTemplateContent(content);
+    const tagRegex = /<([A-Z][A-Za-z0-9_]*|[a-z][a-z0-9_]*-[a-z0-9_-]*)/g;
+    for (const match of sanitized.matchAll(tagRegex)) {
+      tags.add(match[1]);
+    }
   }
 
   return Array.from(tags);
@@ -291,12 +310,20 @@ export function isCandidateRendered(content: string, candidate: string): boolean
     if (lastPart && isComponentNameMatch(lastPart, candidate)) return true;
   }
 
-  // Resilient fallback for direct literal tag or :is string literal
+  // If Vue template was present, AST traversal via @vue/compiler-dom is authoritative
+  const vueTemplate = extractVueTemplate(content);
+  if (vueTemplate !== null) {
+    return false;
+  }
+
+  // Resilient fallback for non-SFC / raw template fragments, but strip comments and strings first
+  const sanitized = sanitizeTemplateContent(content);
+
   const fastTagPattern = new RegExp(
     `<(?:[A-Za-z0-9_$.]+\\.)?${escapeRegExp(candidate)}[\\s/>]|:is=['"]${escapeRegExp(candidate)}['"]`,
     'i'
   );
-  return fastTagPattern.test(content);
+  return fastTagPattern.test(sanitized);
 }
 
 /**
@@ -417,7 +444,7 @@ async function getDownwardComponentTree(
       }
     }
 
-    const hasUseClient = /^\s*['"]use client['"]/m.test(content);
+    const hasUseClient = /\.[jt]sx?$/.test(normPath) && Boolean(moduleDirective(content, 'use client'));
     if (isClientParent && !hasUseClient) {
       node.transitiveBoundary = 'client-hydrated (inherited from parent)';
     }
@@ -729,6 +756,7 @@ export function formatTreeAsText(result: ComponentTreeResult): string {
       if (node.isDynamic && !node.warning) label += ` [dynamic/lazy]`;
       if (node.isAutoImported) label += ` [auto-imported]`;
       if (node.isPage) label += ` [Page]`;
+      if (node.isRendered === false || node.relationKind === 'import') label += ` [import-only]`;
       if (node.transitiveBoundary) label += ` [${node.transitiveBoundary}]`;
       if (node.isExternalScope) label += ` [external-domain/package]`;
       if (node.warning) label += ` ⚠️ ${node.warning}`;
