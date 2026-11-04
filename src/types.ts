@@ -984,13 +984,16 @@ export interface SymbolSliceResult {
   signature?: string;
   complexitySmell?: ComplexitySmell;
   blastRadius?: {
-    status?: 'verified' | 'unknown';
+    status?: 'resolved' | 'partial' | 'unknown' | 'verified';
     reason?: string;
     totalConsumers: number | null;
     callers: Array<{ filePath: string; line?: number }>;
+    confirmedCallers?: Array<{ filePath: string; line?: number }>;
+    candidateImporters?: Array<{ filePath: string; reason?: string }>;
     coveringTests?: string[];
     internalCalls?: string[];
     resolvedCalls?: ResolvedCalleeReference[];
+    resolvedCallees?: ResolvedCalleeReference[];
   };
   isTruncated?: boolean;
   _meta?: EngineMetadata;

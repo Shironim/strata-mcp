@@ -162,12 +162,12 @@ describe('Precision Symbol Slicer Engine', () => {
     expect(result!.isTruncated).toBe(true);
     expect(result!.endLine - result!.startLine + 1).toBe(80);
     expect(result!.code).toContain('TRUNCATED:');
-    expect(result!.code).toContain('Use view_file');
+    expect(result!.code).toContain('Use inspect_component');
 
     const formatted = formatSymbolSliceAsText(result!);
     expect(formatted).toContain('Context Guard Notice');
     expect(formatted).toContain('exceeds 50-line dump threshold');
-    expect(formatted).toContain('view_file');
+    expect(formatted).toContain('inspect_component');
 
     // Clean up
     await fs.rm(tempDir, { recursive: true, force: true });

@@ -1,3 +1,4 @@
+import * as ts from 'typescript';
 import { readSourceFile } from './source-file';
 import { promises as fs } from 'node:fs';
 import { dirname, extname, resolve } from 'node:path';
@@ -7,7 +8,8 @@ import { remapPosition } from './remapper';
 import { getWorkspaceDatabase } from './database';
 import { canonicalizePath, findProjectRoot } from './path-resolver';
 import { escapeRegExp } from './patterns';
-import type { RawMatch, SliceSymbolOptions, SymbolKind, SymbolSliceResult } from '../types';
+import { resolveModuleFilePath, extractImportedSymbols, resolveCalleesForCalls } from './symbol-resolver';
+import type { RawMatch, SliceSymbolOptions, SymbolKind, SymbolSliceResult, ResolvedCalleeReference } from '../types';
 
 /**
  * Builds an ast-grep rule YAML to locate the declaration of a specific symbol.
@@ -132,11 +134,11 @@ export function extractSignature(codeSnippet: string): string | undefined {
 }
 
 /**
- * Finds internal calls or identifiers used within a code slice.
+ * Finds internal calls or identifiers used within a code slice using TypeScript AST parser.
  * Supports direct calls (fn()) and namespace member calls (ns.fn()), capped at maxCalls (default: 30).
+ * Ignores comments and string literals.
  */
 export function extractInternalCalls(codeSnippet: string, selfSymbol: string, maxCalls: number = 30): string[] {
-  const callRegex = /(?:([A-Za-z0-9_$]+)\.)?([A-Za-z0-9_$]+)\s*\(/g;
   const calls = new Set<string>();
   const keywords = new Set([
     'if', 'for', 'while', 'switch', 'catch', 'import', 'export', 'return',
@@ -146,19 +148,261 @@ export function extractInternalCalls(codeSnippet: string, selfSymbol: string, ma
     'this', 'console', 'Math', 'JSON', 'Object', 'Array', 'Promise', 'Reflect', 'Symbol'
   ]);
 
-  let match: RegExpExecArray | null;
-  while ((match = callRegex.exec(codeSnippet)) !== null) {
-    const obj = match[1];
-    const fn = match[2];
+  try {
+    const sourceFile = ts.createSourceFile(
+      'snippet.tsx',
+      codeSnippet,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TSX
+    );
 
-    if (obj && !ignoredObjects.has(obj) && fn.length > 1) {
-      calls.add(`${obj}.${fn}`);
-    } else if (!keywords.has(fn) && fn.length > 1) {
-      calls.add(fn);
+    function visit(node: ts.Node) {
+      if (calls.size >= maxCalls) return;
+
+      if (ts.isCallExpression(node)) {
+        const expr = node.expression;
+        if (ts.isIdentifier(expr)) {
+          const fn = expr.text;
+          if (!keywords.has(fn) && fn.length > 1) {
+            calls.add(fn);
+          }
+        } else if (ts.isPropertyAccessExpression(expr)) {
+          if (ts.isIdentifier(expr.expression) && ts.isIdentifier(expr.name)) {
+            const obj = expr.expression.text;
+            const fn = expr.name.text;
+            if (obj && !ignoredObjects.has(obj) && fn.length > 1) {
+              calls.add(`${obj}.${fn}`);
+            }
+          }
+        }
+      }
+
+      ts.forEachChild(node, visit);
     }
+
+    visit(sourceFile);
+  } catch {
+    // Graceful fallback
   }
 
   return Array.from(calls).slice(0, maxCalls);
+}
+
+interface CandidateVerification {
+  isCaller: boolean;
+  isCandidate: boolean;
+  line?: number;
+  reason?: string;
+}
+
+async function verifyCandidateCaller(
+  candPath: string,
+  targetFile: string,
+  symbolName: string,
+  workspaceRoot: string
+): Promise<CandidateVerification> {
+  try {
+    const content = await readSourceFile(candPath);
+    const adapter = createDocumentAdapter(candPath, content);
+    const scriptBlocks = adapter.getScriptBlocks();
+    const templateBlock = adapter.getTemplateBlock();
+    const ext = extname(candPath).toLowerCase();
+    const isJsx = ext === '.tsx' || ext === '.jsx' || adapter.isJsx();
+
+    let importsTarget = false;
+    let localAlias: string | null = null;
+    let isNamespace = false;
+    let nsName = '';
+    let isReExport = false;
+
+    // 1. Check imports across script blocks
+    for (const block of scriptBlocks) {
+      const sourceFile = ts.createSourceFile(
+        candPath,
+        block.content,
+        ts.ScriptTarget.Latest,
+        true,
+        isJsx ? ts.ScriptKind.TSX : ts.ScriptKind.TS
+      );
+
+      for (const stmt of sourceFile.statements) {
+        if (ts.isImportDeclaration(stmt) && stmt.moduleSpecifier && ts.isStringLiteral(stmt.moduleSpecifier)) {
+          const spec = stmt.moduleSpecifier.text;
+          const resolved = resolveModuleFilePath(candPath, spec, workspaceRoot);
+          if (resolved && canonicalizePath(resolved) === canonicalizePath(targetFile)) {
+            importsTarget = true;
+            const clause = stmt.importClause;
+            if (clause) {
+              if (clause.name && (symbolName === 'default' || symbolName === clause.name.text)) {
+                localAlias = clause.name.text;
+              }
+              if (clause.namedBindings) {
+                if (ts.isNamedImports(clause.namedBindings)) {
+                  for (const el of clause.namedBindings.elements) {
+                    const orig = el.propertyName ? el.propertyName.text : el.name.text;
+                    if (orig === symbolName) {
+                      localAlias = el.name.text;
+                      break;
+                    }
+                  }
+                } else if (ts.isNamespaceImport(clause.namedBindings)) {
+                  isNamespace = true;
+                  nsName = clause.namedBindings.name.text;
+                }
+              }
+            }
+          }
+        } else if (ts.isExportDeclaration(stmt) && stmt.moduleSpecifier && ts.isStringLiteral(stmt.moduleSpecifier)) {
+          const spec = stmt.moduleSpecifier.text;
+          const resolved = resolveModuleFilePath(candPath, spec, workspaceRoot);
+          if (resolved && canonicalizePath(resolved) === canonicalizePath(targetFile)) {
+            importsTarget = true;
+            if (stmt.exportClause && ts.isNamedExports(stmt.exportClause)) {
+              for (const el of stmt.exportClause.elements) {
+                const orig = el.propertyName ? el.propertyName.text : el.name.text;
+                if (orig === symbolName) {
+                  isReExport = true;
+                  break;
+                }
+              }
+            } else if (!stmt.exportClause) {
+              isReExport = true;
+            }
+          }
+        }
+      }
+    }
+
+    if (!importsTarget) {
+      // Could be state dep without direct import edge
+      // Check if symbolName is used in script or template
+      for (const block of scriptBlocks) {
+        const sourceFile = ts.createSourceFile(
+          candPath,
+          block.content,
+          ts.ScriptTarget.Latest,
+          true,
+          isJsx ? ts.ScriptKind.TSX : ts.ScriptKind.TS
+        );
+        let foundLine: number | undefined;
+        function findSym(node: ts.Node) {
+          if (foundLine !== undefined) return;
+          if (ts.isIdentifier(node) && node.text === symbolName) {
+            const pos = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
+            const remapped = remapPosition(pos.line + 1, pos.character + 1, block.loc.start);
+            foundLine = remapped.line;
+            return;
+          }
+          ts.forEachChild(node, findSym);
+        }
+        findSym(sourceFile);
+        if (foundLine !== undefined) {
+          return { isCaller: true, isCandidate: false, line: foundLine };
+        }
+      }
+      return { isCaller: false, isCandidate: false };
+    }
+
+    // Re-export without local call
+    if (isReExport && !localAlias && !isNamespace) {
+      return { isCaller: false, isCandidate: true, reason: 're-exported symbol' };
+    }
+
+    // If localAlias was found, search for usages
+    if (localAlias) {
+      for (const block of scriptBlocks) {
+        const sourceFile = ts.createSourceFile(
+          candPath,
+          block.content,
+          ts.ScriptTarget.Latest,
+          true,
+          isJsx ? ts.ScriptKind.TSX : ts.ScriptKind.TS
+        );
+        let foundLine: number | undefined;
+
+        function findUsage(node: ts.Node) {
+          if (foundLine !== undefined) return;
+          // Ignore the import declaration itself
+          if (ts.isImportSpecifier(node) || ts.isImportClause(node)) return;
+
+          if (ts.isIdentifier(node) && node.text === localAlias) {
+            const pos = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
+            const remapped = remapPosition(pos.line + 1, pos.character + 1, block.loc.start);
+            foundLine = remapped.line;
+            return;
+          }
+          ts.forEachChild(node, findUsage);
+        }
+
+        findUsage(sourceFile);
+        if (foundLine !== undefined) {
+          return { isCaller: true, isCandidate: false, line: foundLine };
+        }
+      }
+
+      // Check template block (e.g. Vue template)
+      if (templateBlock) {
+        const lines = templateBlock.content.split('\n');
+        const pattern = new RegExp(`\\b${escapeRegExp(localAlias)}\\b`);
+        for (let i = 0; i < lines.length; i++) {
+          if (pattern.test(lines[i])) {
+            const remapped = remapPosition(i + 1, 1, templateBlock.loc.start);
+            return { isCaller: true, isCandidate: false, line: remapped.line };
+          }
+        }
+      }
+
+      // If imported in <script setup>, it is exposed to template or scope
+      const isScriptSetup = scriptBlocks.some((b) => Boolean(b.attrs?.['setup']));
+      if (isScriptSetup) {
+        return { isCaller: true, isCandidate: false, line: scriptBlocks[0]?.loc?.start?.line };
+      }
+
+      return { isCaller: false, isCandidate: true, reason: 'symbol imported but no static call site found' };
+    }
+
+    if (isNamespace) {
+      // Search for ns.symbolName
+      for (const block of scriptBlocks) {
+        const sourceFile = ts.createSourceFile(
+          candPath,
+          block.content,
+          ts.ScriptTarget.Latest,
+          true,
+          isJsx ? ts.ScriptKind.TSX : ts.ScriptKind.TS
+        );
+        let foundLine: number | undefined;
+
+        function findNsUsage(node: ts.Node) {
+          if (foundLine !== undefined) return;
+          if (
+            ts.isPropertyAccessExpression(node) &&
+            ts.isIdentifier(node.expression) &&
+            node.expression.text === nsName &&
+            node.name.text === symbolName
+          ) {
+            const pos = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
+            const remapped = remapPosition(pos.line + 1, pos.character + 1, block.loc.start);
+            foundLine = remapped.line;
+            return;
+          }
+          ts.forEachChild(node, findNsUsage);
+        }
+
+        findNsUsage(sourceFile);
+        if (foundLine !== undefined) {
+          return { isCaller: true, isCandidate: false, line: foundLine };
+        }
+      }
+
+      return { isCaller: false, isCandidate: true, reason: 'namespace import without static member call' };
+    }
+
+    return { isCaller: false, isCandidate: false };
+  } catch {
+    return { isCaller: false, isCandidate: false };
+  }
 }
 
 /**
@@ -225,10 +469,24 @@ export async function sliceSymbol(options: SliceSymbolOptions): Promise<SymbolSl
     const signature = extractSignature(bestMatch.text);
     const internalCalls = extractInternalCalls(rawCode, options.symbolName);
 
+    // 1-hop cross-file callee resolution
+    const workspaceRoot = options.workspaceRoot || findProjectRoot(targetFile) || dirname(targetFile);
+    let resolvedCallees: ResolvedCalleeReference[] = [];
+    try {
+      const importedSymbols = extractImportedSymbols(targetFile, fileContent);
+      resolvedCallees = await resolveCalleesForCalls(
+        internalCalls,
+        targetFile,
+        importedSymbols,
+        workspaceRoot
+      );
+    } catch {
+      // Graceful fallback
+    }
+
     // Blast radius resolution
     let blastRadius: SymbolSliceResult['blastRadius'];
     if (options.includeBlastRadius !== false) {
-      const workspaceRoot = options.workspaceRoot || findProjectRoot(targetFile) || dirname(targetFile);
       try {
         const { isWorkspaceIndexed } = await import('./storage/schema');
         if (!isWorkspaceIndexed(workspaceRoot)) throw new Error('Workspace is not indexed');
@@ -236,7 +494,7 @@ export async function sliceSymbol(options: SliceSymbolOptions): Promise<SymbolSl
         await syncWorkspace(workspaceRoot);
 
         const db = getWorkspaceDatabase(workspaceRoot);
-        const callersList: Array<{ filePath: string; line?: number }> = [];
+        const rawCandidateFiles: string[] = [];
 
         // Check if callers imported this state/symbol via state_deps
         const stateRows = db
@@ -244,8 +502,8 @@ export async function sliceSymbol(options: SliceSymbolOptions): Promise<SymbolSl
           .all(options.symbolName) as Array<{ path: string }>;
 
         for (const row of stateRows) {
-          if (row.path !== targetFile && !callersList.some(c => c.filePath === row.path)) {
-            callersList.push({ filePath: row.path });
+          if (row.path !== targetFile && !rawCandidateFiles.includes(row.path)) {
+            rawCandidateFiles.push(row.path);
           }
         }
 
@@ -260,8 +518,8 @@ export async function sliceSymbol(options: SliceSymbolOptions): Promise<SymbolSl
           .all(targetFile) as Array<{ path: string }>;
 
         for (const row of edgeRows) {
-          if (row.path !== targetFile && !callersList.some(c => c.filePath === row.path)) {
-            callersList.push({ filePath: row.path });
+          if (row.path !== targetFile && !rawCandidateFiles.includes(row.path)) {
+            rawCandidateFiles.push(row.path);
           }
         }
 
@@ -275,17 +533,40 @@ export async function sliceSymbol(options: SliceSymbolOptions): Promise<SymbolSl
           );
         };
 
-        const productionCallers = callersList.filter((c) => !isTestFile(c.filePath));
-        const coveringTests = callersList
+        const confirmedCallers: Array<{ filePath: string; line?: number }> = [];
+        const candidateImporters: Array<{ filePath: string; reason?: string }> = [];
+
+        for (const candFile of rawCandidateFiles) {
+          const verification = await verifyCandidateCaller(
+            candFile,
+            targetFile,
+            options.symbolName,
+            workspaceRoot
+          );
+          if (verification.isCaller) {
+            confirmedCallers.push({ filePath: candFile, line: verification.line });
+          } else if (verification.isCandidate) {
+            candidateImporters.push({ filePath: candFile, reason: verification.reason });
+          }
+        }
+
+        const productionCallers = confirmedCallers.filter((c) => !isTestFile(c.filePath));
+        const coveringTests = confirmedCallers
           .filter((c) => isTestFile(c.filePath))
           .map((c) => c.filePath);
 
+        const status = candidateImporters.length > 0 ? 'partial' : 'resolved';
+
         blastRadius = {
-          status: 'verified',
+          status,
           totalConsumers: productionCallers.length,
           callers: productionCallers,
+          confirmedCallers: productionCallers,
+          candidateImporters,
           coveringTests,
           internalCalls,
+          resolvedCalls: resolvedCallees,
+          resolvedCallees,
         };
       } catch (error) {
         blastRadius = {
@@ -293,8 +574,12 @@ export async function sliceSymbol(options: SliceSymbolOptions): Promise<SymbolSl
           reason: error instanceof Error ? error.message : String(error),
           totalConsumers: null,
           callers: [],
+          confirmedCallers: [],
+          candidateImporters: [],
           coveringTests: [],
           internalCalls,
+          resolvedCalls: resolvedCallees,
+          resolvedCallees,
         };
       }
     }
@@ -311,7 +596,7 @@ export async function sliceSymbol(options: SliceSymbolOptions): Promise<SymbolSl
       finalCode = [
         ...head,
         `  // ... [TRUNCATED: ${lineCount - 15} lines omitted to prevent context bloat] ...`,
-        `  // Use view_file(StartLine: ${startLine}, EndLine: ${endLine}) to read targeted lines`,
+        `  // Use inspect_component(path: "${targetFile}", source_range: { start_line: ${startLine}, end_line: ${endLine} }) to read targeted lines`,
         ...tail,
       ].join('\n');
     }
@@ -362,7 +647,7 @@ export function formatSymbolSliceAsText(result: SymbolSliceResult): string {
   if (result.isTruncated) {
     const lineCount = result.endLine - result.startLine + 1;
     lines.push(`\n⚠️ **Context Guard Notice:** Symbol spans ${lineCount} lines (exceeds 50-line dump threshold). Truncated to preview.`);
-    lines.push(`> [!TIP] Gunakan \`view_file\` dengan parameter \`StartLine: ${result.startLine}\` dan \`EndLine: ${result.endLine}\` untuk membaca bagian yang diperlukan secara presisi tanpa context rot.\n`);
+    lines.push(`> [!TIP] Gunakan \`inspect_component\` dengan parameter \`path: "${result.filePath}"\`, \`source_range: { start_line: ${result.startLine}, end_line: ${result.endLine} }\` untuk membaca bagian yang diperlukan secara presisi tanpa context rot.\n`);
   }
 
   lines.push('\n```typescript');
@@ -376,7 +661,8 @@ export function formatSymbolSliceAsText(result: SymbolSliceResult): string {
     } else if (result.blastRadius.callers.length > 0) {
       lines.push(`- Consumers (${result.blastRadius.totalConsumers} files):`);
       for (const caller of result.blastRadius.callers.slice(0, 10)) {
-        lines.push(`  - \`${caller.filePath}\``);
+        const lineSuffix = caller.line ? `:${caller.line}` : '';
+        lines.push(`  - \`${caller.filePath}${lineSuffix}\``);
       }
       if (result.blastRadius.callers.length > 10) {
         lines.push(`  - ... and ${result.blastRadius.callers.length - 10} more files`);
@@ -392,8 +678,21 @@ export function formatSymbolSliceAsText(result: SymbolSliceResult): string {
         lines.push('- Covering tests: ⚠️ no covering tests found');
       }
     }
+    if (result.blastRadius.candidateImporters && result.blastRadius.candidateImporters.length > 0) {
+      lines.push(`- Candidate importers (${result.blastRadius.candidateImporters.length} files):`);
+      for (const cand of result.blastRadius.candidateImporters.slice(0, 5)) {
+        lines.push(`  - \`${cand.filePath}\`${cand.reason ? ` (${cand.reason})` : ''}`);
+      }
+    }
     if (result.blastRadius.internalCalls && result.blastRadius.internalCalls.length > 0) {
       lines.push(`- Internal calls: \`${result.blastRadius.internalCalls.join('`, `')}\``);
+    }
+    if (result.blastRadius.resolvedCallees && result.blastRadius.resolvedCallees.length > 0) {
+      lines.push('- Resolved callees (1-hop):');
+      for (const callee of result.blastRadius.resolvedCallees.slice(0, 10)) {
+        const range = callee.targetRange ? `:${callee.targetRange.startLine}-${callee.targetRange.endLine}` : '';
+        lines.push(`  - \`${callee.symbol}\` -> \`${callee.targetFilePath || callee.sourceModule}${range}\``);
+      }
     }
   }
 

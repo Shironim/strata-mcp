@@ -3,6 +3,9 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { clearTsConfigCache, extractComponentOutline, formatOutlineAsText } from '../../src/engine/outline';
+import { sliceSymbol } from '../../src/engine/slicer';
+import { getWorkspaceDatabase, closeWorkspaceDatabase } from '../../src/engine/database';
+import { syncWorkspace } from '../../src/engine/storage/delta-sync';
 
 describe('extractComponentOutline', () => {
   let tmpDir: string;
@@ -236,6 +239,86 @@ function doAdd() {
     expect(call?.isResolved).toBe(true);
     expect(call?.targetFilePath).toBe(mathFile);
     expect(call?.targetRange?.startLine).toBe(1);
+  });
+
+  it('Workstream 1: excludes unrelated callers and resolves cross-file callees with exact line bounds', async () => {
+    const wsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'strata-ws1-test-'));
+    try {
+      const serviceFile = path.join(wsDir, 'service.ts');
+      const helperFile = path.join(wsDir, 'helper.ts');
+      const callerA = path.join(wsDir, 'CallerTarget.vue');
+      const callerB = path.join(wsDir, 'CallerOther.vue');
+
+      fs.writeFileSync(
+        helperFile,
+        'export function computeScore(x: number): number {\n  return x * 10;\n}\n'
+      );
+
+      fs.writeFileSync(
+        serviceFile,
+        `import { computeScore } from './helper';
+
+export function targetFn(val: number) {
+  return computeScore(val);
+}
+
+export function otherFn(val: number) {
+  return val - 1;
+}
+`
+      );
+
+      fs.writeFileSync(
+        callerA,
+        `<script setup lang="ts">
+import { targetFn } from './service';
+const res = targetFn(42);
+</script>
+<template><div>{{ res }}</div></template>`
+      );
+
+      fs.writeFileSync(
+        callerB,
+        `<script setup lang="ts">
+import { otherFn } from './service';
+const other = otherFn(10);
+</script>
+<template><div>{{ other }}</div></template>`
+      );
+
+      getWorkspaceDatabase(wsDir, { create: true });
+      await syncWorkspace(wsDir);
+
+      const slice = await sliceSymbol({
+        path: serviceFile,
+        symbolName: 'targetFn',
+        workspaceRoot: wsDir,
+        includeBlastRadius: true,
+      });
+
+      expect(slice).not.toBeNull();
+      expect(slice?.symbolName).toBe('targetFn');
+      expect(slice?.blastRadius).toBeDefined();
+
+      // (a) Caller verification: callerA is confirmed, callerB is NOT confirmed caller
+      const confirmedPaths = slice?.blastRadius?.confirmedCallers?.map((c) => c.filePath) || [];
+      expect(confirmedPaths).toContain(callerA);
+      expect(confirmedPaths).not.toContain(callerB);
+      expect(slice?.blastRadius?.status).toBe('resolved');
+
+      // (b) Callee resolution: sliceSymbol returns resolvedCallees across files with line range
+      expect(slice?.blastRadius?.resolvedCallees).toBeDefined();
+      expect(slice?.blastRadius?.resolvedCallees?.length).toBeGreaterThanOrEqual(1);
+      const callee = slice?.blastRadius?.resolvedCallees?.find((c) => c.symbol === 'computeScore');
+      expect(callee).toBeDefined();
+      expect(callee?.isResolved).toBe(true);
+      expect(callee?.targetFilePath).toBe(helperFile);
+      expect(callee?.targetRange?.startLine).toBe(1);
+      expect(callee?.targetRange?.endLine).toBe(3);
+    } finally {
+      closeWorkspaceDatabase(wsDir);
+      fs.rmSync(wsDir, { recursive: true, force: true });
+    }
   });
 });
 
