@@ -1408,6 +1408,9 @@ export interface ArchetypeAuditResult {
   targetArchetype: PageArchetype;
   exemplarArchetype: PageArchetype;
   violations: ArchetypeDriftViolation[];
+  status?: 'conclusive' | 'inconclusive';
+  reason?: string;
+  exemplarSelection?: 'explicit' | 'sibling-heuristic';
   _meta?: EngineMetadata;
 }
 

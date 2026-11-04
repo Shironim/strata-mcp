@@ -206,6 +206,8 @@ describe('Live Page Archetype & Structural Drift Engine', () => {
       });
       expect(autoResult.exemplarFile).toContain('products/index.vue');
       expect(autoResult.conforms).toBe(false);
+      expect(autoResult.status).toBe('conclusive');
+      expect(autoResult.exemplarSelection).toBe('sibling-heuristic');
 
       // 2. inspect_component contract includes layoutStructure.sections
       const contract = await extractComponentContract(exemplarPath);
@@ -308,6 +310,30 @@ export const ComplexOrdersPage = ({ items, isLoading }: any) => {
       'page-header',
       'data-content',
     ]);
+  });
+
+  test('Workstream 3: returns inconclusive when target has no sibling and no explicit exemplar is given', async () => {
+    const tmpRoot = mkdtempSync(join(tmpdir(), 'strata-archetype-inconclusive-'));
+    try {
+      const solitaryDir = join(tmpRoot, 'pages', 'isolated', 'sub');
+      mkdirSync(solitaryDir, { recursive: true });
+      const targetPath = join(solitaryDir, 'Solitary.vue');
+      writeFileSync(targetPath, GOLDEN_VUE_PAGE, 'utf8');
+
+      const result = await auditPageArchetypeDrift({
+        targetPath,
+        workspaceRoot: tmpRoot,
+      });
+
+      expect(result.status).toBe('inconclusive');
+      expect(result.reason).toContain('No sibling exemplar page found');
+      expect(result.exemplarSelection).toBe('sibling-heuristic');
+
+      const text = formatArchetypeAuditAsText(result);
+      expect(text).toContain('[INCONCLUSIVE]');
+    } finally {
+      rmSync(tmpRoot, { recursive: true, force: true });
+    }
   });
 });
 

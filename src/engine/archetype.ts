@@ -895,11 +895,19 @@ export function diffPageArchetypes(
  */
 export function formatArchetypeAuditAsText(result: ArchetypeAuditResult): string {
   const lines: string[] = [];
+
+  if (result.status === 'inconclusive') {
+    lines.push('### Page Archetype & Structural Drift Audit [INCONCLUSIVE]');
+    lines.push(`- **Target Page:** \`${result.targetFile}\``);
+    lines.push(`- **Notice:** ${result.reason || 'No sibling exemplar page found.'}`);
+    return lines.join('\n');
+  }
+
   const statusIcon = result.conforms ? 'PASS' : 'DRIFT DETECTED';
 
   lines.push(`### Page Archetype & Structural Drift Audit [${statusIcon} — Score: ${result.score}/100]`);
   lines.push(`- **Target Page:** \`${result.targetFile}\` (${result.targetArchetype.sections.length} sections)`);
-  lines.push(`- **Exemplar Page:** \`${result.exemplarFile}\` (${result.exemplarArchetype.sections.length} sections)`);
+  lines.push(`- **Exemplar Page:** \`${result.exemplarFile}\` (${result.exemplarArchetype.sections.length} sections) [Selection: ${result.exemplarSelection || 'explicit'}]`);
   lines.push('');
 
   lines.push('#### Section Hierarchy Comparison');
@@ -935,26 +943,38 @@ export function formatArchetypeAuditAsText(result: ArchetypeAuditResult): string
 /**
  * Imperative Shell: Auto-discovers the richest sibling page in the same or parent route directory
  * when no explicit exemplarPath is provided.
+ * Scoped strictly to targetDir or sibling route group. Does NOT fallback to entire workspaceRoot.
  */
 export async function discoverBestSiblingExemplar(
-  targetFile: string,
-  workspaceRoot?: string
+  targetFile: string
 ): Promise<string | null> {
   const absTarget = resolve(targetFile);
   const ext = extname(absTarget).toLowerCase();
   const targetDir = dirname(absTarget);
   const parentDir = dirname(targetDir);
 
-  const searchRoot = workspaceRoot
-    ? resolve(workspaceRoot)
-    : existsSync(parentDir)
-      ? parentDir
-      : targetDir;
+  // 1. First look strictly in targetDir
+  let candidates: string[] = [];
+  try {
+    const dirFiles = await collectFiles(targetDir);
+    candidates = dirFiles.filter(
+      (f) => resolve(f) !== absTarget && extname(f).toLowerCase() === ext
+    );
+  } catch {
+    // targetDir error
+  }
 
-  const allFiles = await collectFiles(searchRoot);
-  const candidates = allFiles.filter(
-    (f) => resolve(f) !== absTarget && extname(f).toLowerCase() === ext
-  );
+  // 2. If no siblings in targetDir, check immediate parentDir (route group / sibling route dir)
+  if (candidates.length === 0 && existsSync(parentDir)) {
+    try {
+      const parentFiles = await collectFiles(parentDir);
+      candidates = parentFiles.filter(
+        (f) => resolve(f) !== absTarget && extname(f).toLowerCase() === ext
+      );
+    } catch {
+      // parentDir error
+    }
+  }
 
   if (candidates.length === 0) return null;
 
@@ -1004,29 +1024,48 @@ export async function auditPageArchetypeDrift(
     );
   }
 
+  const targetDir = dirname(absTarget);
+  const exemplarSelection: 'explicit' | 'sibling-heuristic' = options.exemplarPath
+    ? 'explicit'
+    : 'sibling-heuristic';
+
   let absExemplar = options.exemplarPath ? resolve(options.exemplarPath) : null;
   if (!absExemplar) {
-    absExemplar = await discoverBestSiblingExemplar(absTarget, options.workspaceRoot);
+    absExemplar = await discoverBestSiblingExemplar(absTarget);
   }
-
-  if (!absExemplar || !existsSync(absExemplar)) {
-    throw new Error(
-      `No exemplar page found for '${absTarget}'. Provide 'exemplar_path' explicitly or ensure a sibling page exists in the route directory.`
-    );
-  }
-
-  const [targetContent, exemplarContent] = await Promise.all([
-    readSourceFile(absTarget),
-    readSourceFile(absExemplar),
-  ]);
 
   const rootDir = options.workspaceRoot ? resolve(options.workspaceRoot) : dirname(dirname(absTarget));
   const relTarget = relative(rootDir, absTarget).replace(/\\/g, '/') || basename(absTarget);
-  const relExemplar = relative(rootDir, absExemplar).replace(/\\/g, '/') || basename(absExemplar);
-
+  const targetContent = await readSourceFile(absTarget);
   const targetArchetype = extractPageArchetypeFromSource(relTarget, targetContent);
+
+  if (!absExemplar || !existsSync(absExemplar)) {
+    if (options.exemplarPath) {
+      throw new Error(`Explicit exemplar page file not found: ${absExemplar}`);
+    }
+    return {
+      status: 'inconclusive',
+      reason: `No sibling exemplar page found in '${targetDir}' or sibling route directory. Provide 'exemplar_path' explicitly to audit against a specific blueprint page.`,
+      targetFile: relTarget,
+      exemplarFile: '',
+      conforms: true,
+      score: 100,
+      targetArchetype,
+      exemplarArchetype: { filePath: '', framework: 'unknown', sections: [] },
+      violations: [],
+      exemplarSelection: 'sibling-heuristic',
+    };
+  }
+
+  const exemplarContent = await readSourceFile(absExemplar);
+  const relExemplar = relative(rootDir, absExemplar).replace(/\\/g, '/') || basename(absExemplar);
   const exemplarArchetype = extractPageArchetypeFromSource(relExemplar, exemplarContent);
 
-  return diffPageArchetypes(targetArchetype, exemplarArchetype);
+  const diff = diffPageArchetypes(targetArchetype, exemplarArchetype);
+  return {
+    ...diff,
+    status: 'conclusive',
+    exemplarSelection,
+  };
 }
 
