@@ -6,8 +6,10 @@ import { isOwnedNextAppFile } from './project-ownership';
 import { runCanonAudit } from './canon';
 import { extractNuxtPageMeta, extractNextSegmentConfig } from './routes';
 import { existsSync, promises as fs, readFileSync } from 'node:fs';
-import { basename, extname, join, resolve } from 'node:path';
-import { findProjectRoot } from './path-resolver';
+import { basename, extname, join, resolve, dirname } from 'node:path';
+import { createHash } from 'node:crypto';
+import { findProjectRoot, canonicalizePath } from './path-resolver';
+import { resolveModuleFilePath, extractImportedSymbols } from './symbol-resolver';
 import ts from 'typescript';
 import { parse as parseDom, NodeTypes } from '@vue/compiler-dom';
 import { executeAstGrep, isBinaryExecutionError } from './astgrep';
@@ -986,7 +988,9 @@ export function extractBoundaryContracts(
     const method = (m[2]?.toUpperCase() || 'GET') as BoundaryMethod;
     const line = getLineFromOffset(content, m.index || 0);
 
-    const alreadyCaptured = boundaries.some((b) => b.loc?.line === line);
+    const alreadyCaptured = boundaries.some(
+      (b) => b.loc?.line === line || (b.targetEndpoint === targetEndpoint && b.boundaryType === 'tanstack-query')
+    );
     if (!alreadyCaptured) {
       boundaries.push({
         boundaryType: 'native-fetch',
@@ -994,6 +998,28 @@ export function extractBoundaryContracts(
         targetEndpoint,
         endpointSource: targetEndpoint.includes('${') ? 'template-literal' : 'literal',
         loc: { line }
+      });
+    }
+  }
+
+  // 5b. Axios calls: axios.get(...), axios.post(...)
+  const axiosRegex = /\baxios\.(get|post|put|patch|delete)\s*\(\s*['"`]([^'"`]+)['"`]/g;
+  for (const m of content.matchAll(axiosRegex)) {
+    const method = m[1].toUpperCase() as BoundaryMethod;
+    const targetEndpoint = m[2].trim();
+    const line = getLineFromOffset(content, m.index || 0);
+    const alreadyCaptured = boundaries.some(
+      (b) => b.loc?.line === line || (b.targetEndpoint === targetEndpoint && b.boundaryType === 'tanstack-query')
+    );
+    if (!alreadyCaptured) {
+      const endpointSource = targetEndpoint.includes('${') ? 'template-literal' : 'literal';
+      boundaries.push({
+        boundaryType: 'axios',
+        method,
+        targetEndpoint,
+        endpointSource,
+        loc: { line },
+        backendTargetHint: synthesizeBackendTargetHint(method, targetEndpoint),
       });
     }
   }
@@ -1159,6 +1185,47 @@ export async function extractComponentContract(
   const variants = extractComponentVariants(content, baseContract.props);
 
   const boundaryContracts = extractBoundaryContracts(content, framework);
+  for (const b of boundaryContracts) {
+    if (!b.source) b.source = 'inline';
+  }
+
+  const dependencies = new Map((baseContract.dependencies ?? []).map(input => [input.path, input]));
+
+  // 1-Hop outbound API resolution from local composables / hooks
+  const workspaceRoot = options?.workspaceRoot || findProjectRoot(resolvedPath) || dirname(resolvedPath);
+  try {
+    const importedSymbols = extractImportedSymbols(resolvedPath, content);
+    for (const [localName, importInfo] of importedSymbols.entries()) {
+      if (localName.startsWith('use') || importInfo.importedName.startsWith('use')) {
+        const composablePath = resolveModuleFilePath(resolvedPath, importInfo.sourceModule, workspaceRoot);
+        if (composablePath && existsSync(composablePath) && composablePath !== resolvedPath) {
+          const compContent = await readSourceFile(composablePath);
+          const compExt = extname(composablePath).toLowerCase();
+          const compFramework = compExt === '.vue' ? 'vue' : compExt === '.svelte' ? 'svelte' : compExt === '.astro' ? 'astro' : 'ts';
+          const compBoundaries = extractBoundaryContracts(compContent, compFramework);
+          if (compBoundaries.length > 0) {
+            for (const cb of compBoundaries) {
+              boundaryContracts.push({
+                ...cb,
+                source: 'imported-composable',
+                viaComposable: localName,
+              });
+            }
+            const compHash = createHash('sha256').update(compContent).digest('hex');
+            const canonCompPath = canonicalizePath(composablePath);
+            dependencies.set(canonCompPath, {
+              path: canonCompPath,
+              hash: compHash,
+              isExternal: false,
+            });
+          }
+        }
+      }
+    }
+  } catch {
+    // Graceful fallback
+  }
+
   const formContracts = extractFormContracts(content);
   const layoutStructure = extractLayoutStructure(resolvedPath, content, framework);
   const transportContract = analyzeBidirectionalTransport(
@@ -1198,7 +1265,6 @@ export async function extractComponentContract(
   const nextSegmentConfig = (framework === 'react' || framework === 'next')
     ? extractNextSegmentConfig(content)
     : undefined;
-  const dependencies = new Map((baseContract.dependencies ?? []).map(input => [input.path, input]));
   for (const input of detection.projectContext?.dependencies ?? []) {
     if (dependencies.has(input.path) && dependencies.get(input.path)!.hash !== input.hash) {
       detection.projectContext!.diagnostics.push({ code: 'DEPENDENCY_CHANGED', reason: `${input.path}: ownership and contract reads observed different input hashes.` });

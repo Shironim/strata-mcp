@@ -1138,6 +1138,8 @@ export interface BoundaryContract {
   optimisticUpdate?: boolean;
   loc?: { line: number; column?: number };
   backendTargetHint?: BackendTargetHint;
+  source?: 'inline' | 'imported-composable';
+  viaComposable?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -1328,6 +1330,8 @@ export interface ApiContractItem {
   payloadParams?: string[];
   callerFunction?: string;
   backendTargetHint?: BackendTargetHint;
+  source?: 'inline' | 'imported-composable';
+  viaComposable?: string;
 }
 
 export interface ApiContractResult {

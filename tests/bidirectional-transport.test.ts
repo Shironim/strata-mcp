@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'bun:test';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import {
   detectKeyCasing,
   analyzeEgressTransport,
@@ -236,5 +239,55 @@ describe('Bidirectional Data Transportation Contract & Risk Engine', () => {
     expect(graphB.invalidations.length).toBe(0);
     expect(graphB.hasDanglingMutation).toBe(true);
     expect(graphB.danglingMutations).toContain('[POST] /api/v1/comments');
+  });
+
+  it('Workstream 2: resolves 1-hop outbound API from local composable and tracks dependency hash', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'strata-ws2-composable-'));
+    try {
+      const composableFile = path.join(tmpDir, 'useUserData.ts');
+      const componentFile = path.join(tmpDir, 'UserCard.vue');
+
+      fs.writeFileSync(
+        composableFile,
+        `import axios from 'axios';
+export function useUserData() {
+  const fetchUser = () => axios.get('/api/v1/user/details');
+  return { fetchUser };
+}
+`
+      );
+
+      const componentCode = `<template>
+  <div>User Card</div>
+</template>
+<script setup lang="ts">
+import { useUserData } from './useUserData';
+const { fetchUser } = useUserData();
+</script>`;
+
+      fs.writeFileSync(componentFile, componentCode);
+
+      const contract = await extractComponentContract(componentFile, componentCode, {
+        workspaceRoot: tmpDir,
+      });
+
+      expect(contract.boundaryContracts).toBeDefined();
+      const importedBoundary = contract.boundaryContracts?.find(
+        (b) => b.targetEndpoint === '/api/v1/user/details'
+      );
+      expect(importedBoundary).toBeDefined();
+      expect(importedBoundary?.source).toBe('imported-composable');
+      expect(importedBoundary?.viaComposable).toBe('useUserData');
+
+      // Check dependency tracking
+      const composableDep = contract.dependencies?.find(
+        (d) => d.path.replace(/\\/g, '/') === composableFile.replace(/\\/g, '/')
+      );
+      expect(composableDep).toBeDefined();
+      expect(composableDep?.hash).toBeDefined();
+      expect(composableDep?.hash.length).toBe(64); // SHA-256
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 });
