@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
-import type { RetrievalEvidence, SourceSnapshot } from '../types';
-import { readSourceSnapshot } from './source-file';
-import { STRATA_VERSION } from '../version';
+import { existsSync } from 'node:fs';
+import type { InputDependency, RetrievalEvidence, SourceSnapshot } from '../types';
+import { readSourceFile, readSourceSnapshot } from './source-file';
+import { FULL_ENGINE_REVISION } from '../version';
 
 function canonical(value: unknown): string {
   if (Array.isArray(value)) return '[' + value.map(canonical).join(',') + ']';
@@ -37,12 +38,12 @@ export async function sourceRetrievalEvidence(options: {
   return {
     version: 1, workspace: options.workspace, scope: options.snapshot.file,
     queryId,
-    retrievalId: createHash('sha256').update(canonical({ queryId, source: options.snapshot.sha256, engineRevision: STRATA_VERSION })).digest('hex'),
-    policy: options.policy, engineRevision: STRATA_VERSION, index: null,
+    retrievalId: createHash('sha256').update(canonical({ queryId, source: options.snapshot.sha256, engineRevision: FULL_ENGINE_REVISION })).digest('hex'),
+    policy: options.policy, engineRevision: FULL_ENGINE_REVISION, index: null,
     config: { applicability: 'not-used', reason: 'Direct file map/source selection does not consult the workspace graph or resolver configuration.' },
     source: options.snapshot, freshness, freshnessBoundary: 'source-rechecked-after-selection',
     completeness: options.complete ? 'complete' : 'partial', basis: 'source', selectionReason: options.selectionReason,
-    omissions, limitations: ['Completeness covers only the declared file selection policy and parser capabilities.', 'Freshness is checked at read time; this is not an atomic workspace snapshot or a dependency freshness guarantee.', 'Engine revision is the package version; it does not uniquely identify unversioned local source edits.'],
+    omissions, limitations: ['Completeness covers only the declared file selection policy and parser capabilities.', 'Freshness is checked at read time; this is not an atomic workspace snapshot or a dependency freshness guarantee.', `Engine revision is hash-bound to runtime package and compiler dependencies (${FULL_ENGINE_REVISION}).`],
   };
 }
 
@@ -51,20 +52,123 @@ export function formatRetrievalEvidence(evidence: RetrievalEvidence): string {
     ...(evidence.sourceFreshness ? [`Primary source freshness: ${evidence.sourceFreshness}; dependency freshness: ${evidence.dependencies?.status ?? 'not-applicable'}`] : []),
     `Source SHA-256: ${evidence.source?.sha256 ?? 'not-captured'}; query: ${evidence.queryId}`,
     ...(evidence.index ? [`Index: generation=${evidence.index.generation}; consistency=${evidence.index.consistency}; manifest=${evidence.index.manifestHash}`] : []),
+    ...(evidence.budget ? [`Budget: max_bytes=${evidence.budget.maxBytes ?? 'unbounded'}; estimated_bytes=${evidence.budget.estimatedBytes}; truncated=${evidence.budget.isTruncated}${evidence.budget.continuationToken ? `; continuation=${evidence.budget.continuationToken}` : ''}`] : []),
     `Selected because: ${evidence.selectionReason}`,
     ...evidence.omissions.map(item => `Omission ${item.code}: ${item.reason}`),
     ...evidence.limitations.map(reason => `Limitation: ${reason}`)].join('\n');
 }
 
 /** Until a dependency manifest is captured, primary-file freshness cannot verify derived results. */
-export async function derivedRetrievalEvidence(options: Parameters<typeof sourceRetrievalEvidence>[0]): Promise<RetrievalEvidence> {
+export async function derivedRetrievalEvidence(options: Parameters<typeof sourceRetrievalEvidence>[0] & {
+  dependencies?: InputDependency[];
+  configFingerprint?: string;
+}): Promise<RetrievalEvidence> {
   const source = await sourceRetrievalEvidence({ ...options, complete: false });
+  const omissions = [...source.omissions];
+
+  let dependenciesStatus: 'unverified' | 'current' | 'stale' = 'unverified';
+  let dependenciesReason = 'Imported types, resolver inputs and secondary analysis reads are not captured in a single dependency snapshot.';
+  let overallFreshness: 'current' | 'stale' | 'unavailable' = source.freshness === 'stale' ? 'stale' : 'unavailable';
+
+  if (options.dependencies && options.dependencies.length > 0) {
+    let staleCount = 0;
+    for (const dep of options.dependencies) {
+      try {
+        if (!existsSync(dep.path)) {
+          staleCount++;
+        } else {
+          const currentContent = await readSourceFile(dep.path);
+          const currentHash = createHash('sha256').update(currentContent).digest('hex');
+          if (currentHash !== dep.hash) {
+            staleCount++;
+          }
+        }
+      } catch {
+        staleCount++;
+      }
+    }
+
+    if (staleCount > 0) {
+      dependenciesStatus = 'stale';
+      dependenciesReason = `One or more secondary dependencies changed on disk (${staleCount}/${options.dependencies.length}).`;
+      overallFreshness = 'stale';
+      omissions.push({ code: 'DEPENDENCY_CHANGED', reason: dependenciesReason });
+    } else {
+      dependenciesStatus = 'current';
+      dependenciesReason = `All ${options.dependencies.length} tracked dependencies verified against disk.`;
+      overallFreshness = source.freshness === 'current' ? 'current' : source.freshness;
+    }
+  } else {
+    omissions.push({ code: 'DERIVED_INPUTS_UNVERIFIED', reason: 'Primary source identity does not verify all inputs used by derived analysis.' });
+  }
+
+  const configFingerprint = options.configFingerprint;
+  const config = configFingerprint
+    ? {
+        applicability: 'indexed' as const,
+        fingerprint: configFingerprint,
+        reason: 'Effective resolver and compiler configuration hash-bound to this derived retrieval.',
+      }
+    : {
+        applicability: 'unverified' as const,
+        reason: 'Resolver/framework configuration used by derived analysis is not captured in a hash-bound manifest.',
+      };
+
   return {
-    ...source, basis: 'derived', sourceFreshness: source.freshness,
-    freshness: source.freshness === 'stale' ? 'stale' : 'unavailable',
-    config: { applicability: 'unverified', reason: 'Resolver/framework configuration used by derived analysis is not captured in a hash-bound manifest.' },
-    dependencies: { status: 'unverified', reason: 'Imported types, resolver inputs and secondary analysis reads are not captured in a single dependency snapshot.' },
-    omissions: [...source.omissions, { code: 'DERIVED_INPUTS_UNVERIFIED', reason: 'Primary source identity does not verify all inputs used by derived analysis.' }],
+    ...source,
+    basis: 'derived',
+    sourceFreshness: source.freshness,
+    freshness: overallFreshness,
+    config,
+    dependencies: {
+      status: dependenciesStatus,
+      reason: dependenciesReason,
+      count: options.dependencies?.length,
+    },
+    omissions,
     limitations: [...source.limitations, 'Retrieval identity binds the query and primary source only; it is not a reproducibility identity for the derived dependency closure.'],
+  };
+}
+
+export function filesystemAuditRetrievalEvidence(options: {
+  workspace: string;
+  scope?: string;
+  policy?: string;
+  query: Record<string, unknown>;
+  selectionReason: string;
+}): RetrievalEvidence {
+  const policy = options.policy ?? 'filesystem-audit-v1';
+  const queryId = hashRetrievalIdentity({ workspace: options.workspace, scope: options.scope ?? options.workspace, policy, query: options.query });
+  return {
+    version: 1,
+    workspace: options.workspace,
+    scope: options.scope ?? options.workspace,
+    queryId,
+    retrievalId: createHash('sha256').update(canonical({ queryId, engineRevision: FULL_ENGINE_REVISION })).digest('hex'),
+    policy,
+    engineRevision: FULL_ENGINE_REVISION,
+    index: null,
+    config: {
+      applicability: 'not-used',
+      reason: 'Direct filesystem audit inspects source files directly without consulting the SQLite graph index.',
+    },
+    freshness: 'unavailable',
+    freshnessBoundary: 'not-verified',
+    completeness: 'partial',
+    basis: 'derived',
+    dependencies: {
+      status: 'unverified',
+      reason: 'Direct filesystem audit reads files on-demand; no atomic dependency snapshot is captured.',
+    },
+    selectionReason: options.selectionReason,
+    omissions: [{
+      code: 'DIRECT_FILESYSTEM_SCAN',
+      reason: 'Audit was performed directly via filesystem/AST inspection rather than SQLite index snapshot.',
+    }],
+    limitations: [
+      'Completeness is limited by directory traversal and parser capabilities.',
+      'Analysis reads files directly from disk without atomic workspace locking.',
+      `Engine revision is hash-bound to runtime package and compiler dependencies (${FULL_ENGINE_REVISION}).`,
+    ],
   };
 }

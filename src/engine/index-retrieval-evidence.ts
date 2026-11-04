@@ -2,7 +2,7 @@ import { Database } from 'bun:sqlite';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import type { RetrievalEvidence } from '../types';
-import { STRATA_VERSION } from '../version';
+import { FULL_ENGINE_REVISION } from '../version';
 import { hashRetrievalIdentity } from './retrieval-evidence';
 
 export interface IndexObservation {
@@ -47,8 +47,8 @@ export function indexedRetrievalEvidence(options: {
   const queryId = hashRetrievalIdentity({ workspace: options.workspace, scope: options.scope, policy: options.policy, query: options.query });
   return {
     version: 1, workspace: options.workspace, scope: options.scope, policy: options.policy, queryId,
-    retrievalId: createHash('sha256').update(JSON.stringify({ queryId, index: options.before, engineRevision: STRATA_VERSION })).digest('hex'),
-    engineRevision: STRATA_VERSION,
+    retrievalId: createHash('sha256').update(JSON.stringify({ queryId, index: options.before, engineRevision: FULL_ENGINE_REVISION })).digest('hex'),
+    engineRevision: FULL_ENGINE_REVISION,
     index: options.before ? { ...options.before, consistency: stable ? 'observed-stable' : changed ? 'changed' : 'unavailable' } : null,
     config: { applicability: options.before ? 'indexed' : 'unverified', fingerprint: options.before?.configFingerprint,
       reason: 'Fingerprint is an index observation, not proof that the analysis used that configuration or a fresh hash of all resolver inputs on disk.' },
@@ -58,6 +58,6 @@ export function indexedRetrievalEvidence(options: {
     selectionReason: options.selectionReason,
     omissions: [{ code: changed ? 'INDEX_CHANGED' : stable ? 'DISK_FRESHNESS_UNVERIFIED' : 'INDEX_OBSERVATION_UNAVAILABLE',
       reason: changed ? 'Index identity changed during analysis; repeat retrieval.' : stable ? 'Index identity was stable, but source/dependency reads are not atomically bound to it.' : 'Index identity could not be observed consistently before and after analysis.' }],
-    limitations: ['Completeness is limited by graph discovery, traversal bounds and parser capabilities.', 'Index identity is observed around analysis; it is not proof that every analysis branch consumed this index.', 'Index manifest hashes indexed file identities only; it does not validate current disk bytes.', 'Engine revision is the package version, not a unique executable/compiler fingerprint.'],
+    limitations: ['Completeness is limited by graph discovery, traversal bounds and parser capabilities.', 'Index identity is observed around analysis; it is not proof that every analysis branch consumed this index.', 'Index manifest hashes indexed file identities only; it does not validate current disk bytes.', `Engine revision is hash-bound to runtime package and compiler dependencies (${FULL_ENGINE_REVISION}).`],
   };
 }

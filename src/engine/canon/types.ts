@@ -7,10 +7,13 @@ import type {
   SourceRef,
   SourceSnapshot,
   SourceSpan,
+  ProjectOwnershipInfo,
 } from '../../types';
 import { getSourcePosition } from '../source-file';
 
 export interface CanonAuditOptions {
+  projectContext?: ProjectOwnershipInfo;
+  projectRoot?: string;
   category?: PatternCategory;
   severity?: 'error' | 'warning' | 'info';
   maxDiagnostics?: number;

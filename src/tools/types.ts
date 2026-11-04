@@ -22,6 +22,7 @@ export interface McpToolDefinition {
   name: string;
   description: string;
   inputSchema: Tool['inputSchema'];
+  annotations?: Tool['annotations'];
   handler: (args: Record<string, any>) => Promise<ToolCallResponse>;
 }
 

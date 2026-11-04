@@ -54,10 +54,33 @@ export interface RetrievalEvidence {
   completeness: 'complete' | 'partial';
   basis: 'source' | 'derived';
   sourceFreshness?: 'current' | 'stale' | 'unavailable';
-  dependencies?: { status: 'unverified'; reason: string };
+  dependencies?: { status: 'unverified' | 'current' | 'stale'; reason: string; count?: number };
   selectionReason: string;
   omissions: Array<{ code: string; reason: string }>;
   limitations: string[];
+  budget?: {
+    maxBytes?: number;
+    estimatedBytes: number;
+    isTruncated: boolean;
+    continuationToken?: string;
+    /** Output selection equality only; not proof of a complete input snapshot. */
+    consistency?: 'selection-bound';
+  };
+}
+
+export interface ContinuationTokenPayload {
+  version: 1;
+  tool: string;
+  queryId: string;
+  sourceHash?: string;
+  indexGeneration?: string | null;
+  configFingerprint?: string | null;
+  /** Hash of the entire selected collection, not a workspace input snapshot. */
+  selectionHash?: string;
+  engineRevision: string;
+  offset: number;
+  totalItems: number;
+  issuedAt: number;
 }
 
 export interface SourceLineRange {
@@ -230,8 +253,26 @@ export interface ResolvedMatch {
   endLine?: number;
   endColumn?: number;
   blockType?: SfcBlockType;
+  usageKind?: 'import' | 'render';
   snippet: string;
   clientDirective?: string;
+}
+
+export interface InputDependency {
+  path: string;
+  hash: string;
+  isExternal: boolean;
+}
+
+export interface ProjectOwnershipInfo {
+  scopeRoot: string | null;
+  ownerRoot: string | null;
+  status: 'owned' | 'unverified' | 'conflict' | 'outside-scope';
+  applicationFramework: 'next' | 'nuxt' | 'astro' | 'svelte' | null;
+  appRoot: string | null;
+  configFiles: string[];
+  dependencies: InputDependency[];
+  diagnostics: Array<{ code: string; reason: string }>;
 }
 
 export interface ComponentPropContract {
@@ -289,6 +330,7 @@ export interface StateDependencyItem {
   accessMode: StateAccessMode;
   lineNumber?: number;
   usageSnippet?: string;
+  evidence?: Evidence;
 }
 
 export interface StateDependencyInfo {
@@ -296,6 +338,7 @@ export interface StateDependencyInfo {
   contexts: string[];
   composables: string[];
   items?: StateDependencyItem[];
+  diagnostics?: Array<{ code: string; reason: string }>;
 }
 
 export interface DataDependencyInfo {
@@ -440,6 +483,12 @@ export interface BidirectionalTransportContract {
   transportRisks: string[];
 }
 
+export interface UnresolvedMetadataField {
+  field: string;
+  expression: string;
+  reason: string;
+}
+
 export interface NuxtPageMetaContract {
   layout?: string | false;
   middleware?: string[];
@@ -447,6 +496,7 @@ export interface NuxtPageMetaContract {
   keepalive?: boolean;
   pageTransition?: boolean;
   customMetaKeys: string[];
+  unresolvedFields?: UnresolvedMetadataField[];
 }
 
 export interface NextSegmentConfigContract {
@@ -459,13 +509,66 @@ export interface NextSegmentConfigContract {
   maxDuration?: number;
   hasGenerateMetadata?: boolean;
   hasGenerateStaticParams?: boolean;
+  unresolvedFields?: UnresolvedMetadataField[];
+}
+
+export interface NextEffectiveSegmentConfig {
+  scope: 'observed-segment-config';
+  config: Pick<NextSegmentConfigContract, 'revalidate' | 'runtime' | 'preferredRegion' | 'maxDuration'>;
+  sources: InputDependency[];
+  freshness: 'current' | 'stale';
+  unresolvedFields: UnresolvedMetadataField[];
+  limitations: string[];
+}
+
+export interface UnresolvedTypeInfo {
+  name: string;
+  kind: 'props' | 'emits';
+  reason: string;
+}
+
+export interface PropUsage {
+  file: string;
+  tag: string;
+  kind: 'attribute' | 'binding' | 'model' | 'possible-binding';
+  resolution: 'resolved' | 'candidate';
+  reason: string;
+  sourceRef: SourceRef;
+}
+
+export interface PropImpactResult {
+  status: 'partial' | 'unsupported';
+  target: string;
+  scope: string;
+  freshness: 'unverified' | 'stale';
+  inputIdentity: string;
+  renderConsumerCount: number;
+  unknownConsumerCount: null;
+  props: Array<{
+    name: string;
+    confirmedConsumerCount: number;
+    confirmedUsageCount: number;
+    candidateConsumerCount: number;
+    candidateUsageCount: number;
+    omittedRenderCount: number;
+    omittedConsumerCount: number;
+    indeterminateRenderCount: number;
+    omissions?: Array<{ file: string; sourceRef: SourceRef }>;
+    risk: { renameOrRemove: 'affected' | 'unknown'; reasons: string[] };
+    usages?: PropUsage[];
+  }>;
+  diagnostics: Array<{ file: string; code: string; reason: string }>;
+  limitations: string[];
 }
 
 export interface ComponentContract {
+  projectContext?: ProjectOwnershipInfo;
   component: string;
   framework: FrontendFramework | 'vue-composable' | string;
   filePath: string;
   props: ComponentPropContract[];
+  /** Optional workspace enrichment; counts remain scoped and incomplete. */
+  propImpact?: PropImpactResult;
   emits: ComponentEmitContract[];
   slots: string[];
   slotDetails?: ComponentSlotDetail[];
@@ -488,13 +591,16 @@ export interface ComponentContract {
   nuxtPageMeta?: NuxtPageMetaContract;
   nextSegmentConfig?: NextSegmentConfigContract;
   islands?: AstroIslandContract[];
+  dependencies?: InputDependency[];
+  unresolvedTypes?: UnresolvedTypeInfo[];
 }
 
 export interface ContractOptions {
-  path: string;
+  path?: string;
   inferProps?: boolean;
   resolveGlobals?: boolean;
   outputFormat?: 'text' | 'json';
+  workspaceRoot?: string;
 }
 
 export interface PassedPropInfo {
@@ -511,6 +617,8 @@ export interface ComponentTreeNode {
   isCircular?: boolean;
   isPage?: boolean;
   isExternalScope?: boolean;
+  isRendered?: boolean;
+  relationKind?: 'render' | 'import' | 'type';
   warning?: string;
   depth: number;
   passedProps?: PassedPropInfo[];
@@ -698,9 +806,12 @@ export interface RouteInfo {
   parallelSlot?: string;
   intercepting?: string;
   nextSegmentConfig?: NextSegmentConfigContract;
+  redirect?: string;
+  nextEffectiveSegmentConfig?: NextEffectiveSegmentConfig;
 }
 
 export interface RouteManifestResult {
+  projectContext?: ProjectOwnershipInfo;
   framework: RouteFramework;
   baseDirectory: string;
   totalRoutes: number;
@@ -851,6 +962,7 @@ export interface ComponentSymbolOutline {
   totalFunctions: number;
   highComplexityCount: number;
   functions: FunctionOutlineItem[];
+  dependencies?: InputDependency[];
   _meta?: EngineMetadata;
 }
 
@@ -916,6 +1028,8 @@ export interface EventHandlerAuditResult {
   brokenHandlers: EventHandlerInfo[];
   inlineExpressions: EventHandlerInfo[];
   candidateHandlers?: EventHandlerInfo[];
+  autoImportUnresolved?: string[];
+  autoImportDependencies?: InputDependency[];
   deadScriptHandlers: DeadHandlerInfo[];
   _meta?: EngineMetadata;
 }
@@ -971,9 +1085,13 @@ export interface ArbitraryTokenViolation {
 export interface A11yViolation {
   file: string;
   line: number;
+  column?: number;
   element: string;
   issue: string;
   recommendation: string;
+  ruleId?: string;
+  certainty?: 'confirmed' | 'candidate';
+  severity?: 'error' | 'warning';
 }
 
 export interface DesignSystemAuditResult {
@@ -1048,6 +1166,7 @@ export interface ContextDependencyNode {
   filePath: string;
   line: number;
   valueSnippet?: string;
+  evidence?: Evidence;
 }
 
 export interface ContextDependencyRelation {
@@ -1162,6 +1281,7 @@ export interface PatchPlanResult {
   };
   totalPatches: number;
   patches: ComponentPatchItem[];
+  preconditionsValidated?: boolean;
   _meta?: EngineMetadata;
 }
 
