@@ -120,3 +120,60 @@ test('real inspect handler exposes opt-in impact in text/JSON without changing d
   for (const extra of [{ impact: true }, { impact: 'full', view: 'map' }, { impact: 'full', symbol: 'x' }])
     expect((await inspectComponentTool.handler({ ...base, ...extra })).isError).toBe(true);
 }));
+
+test('Workstream 4: analyzes prop impact on React TSX files with explicit, spread, and omitted renders', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'strata-prop-impact-tsx-'));
+  try {
+    const target = join(root, 'Button.tsx');
+    await writeFile(
+      target,
+      'import React from "react";\nexport interface ButtonProps { label: string; disabled?: boolean; }\nexport function Button({ label, disabled }: ButtonProps) { return <button disabled={disabled}>{label}</button>; }\n'
+    );
+
+    const consumer = join(root, 'App.tsx');
+    const consumerContent = `
+import React from 'react';
+import { Button } from './Button';
+
+export function App(props: any) {
+  return (
+    <div>
+      <Button label="Click Me" />
+      <Button label="Submit" disabled={true} />
+      <Button {...props} />
+      <Button />
+    </div>
+  );
+}
+`;
+    await writeFile(consumer, consumerContent);
+
+    const result = await analyzePropImpact({
+      target,
+      workspace: root,
+      props: [
+        { name: 'label', type: 'string', required: true },
+        { name: 'disabled', type: 'boolean', required: false },
+      ],
+      detail: 'full',
+    });
+
+    expect(result.status).toBe('partial');
+    const labelProp = result.props.find((p) => p.name === 'label')!;
+    expect(labelProp).toBeDefined();
+
+    // 2 explicit renders: <Button label="Click Me" />, <Button label="Submit" />
+    expect(labelProp.confirmedUsageCount).toBe(2);
+    expect(labelProp.confirmedConsumerCount).toBe(1);
+
+    // 1 spread render: <Button {...props} /> -> candidate usage + indeterminate supply
+    expect(labelProp.candidateUsageCount).toBe(1);
+    expect(labelProp.indeterminateRenderCount).toBe(1);
+
+    // 1 omitted render: <Button /> without label or spread
+    expect(labelProp.omittedRenderCount).toBe(1);
+    expect(labelProp.omissions?.length).toBe(1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
