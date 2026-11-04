@@ -83,7 +83,7 @@ export async function buildComponentCatalog(rootDir: string): Promise<Map<string
 
   for (const file of files) {
     const ext = extname(file).toLowerCase();
-    if (ext === '.vue' || ext === '.astro' || ext === '.tsx' || ext === '.jsx') {
+    if (ext === '.vue' || ext === '.astro' || ext === '.svelte' || ext === '.tsx' || ext === '.jsx') {
       const base = basename(file, ext);
       const candidates = getCandidateNames(base);
       for (const cand of candidates) {

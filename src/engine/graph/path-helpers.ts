@@ -57,7 +57,7 @@ export function resolveImportPath(
     target = resolve(dir, importPath);
   }
 
-  const extensions = ['', '.vue', '.tsx', '.jsx', '.astro', '.ts', '.js'];
+  const extensions = ['', '.vue', '.tsx', '.jsx', '.astro', '.svelte', '.ts', '.js'];
   for (const ext of extensions) {
     const candidate = target + ext;
     if (existsSync(candidate)) {
@@ -70,7 +70,7 @@ export function resolveImportPath(
   }
 
   // Check directory index files
-  for (const ext of ['.vue', '.tsx', '.jsx', '.astro', '.ts', '.js']) {
+  for (const ext of ['.vue', '.tsx', '.jsx', '.astro', '.svelte', '.ts', '.js']) {
     const indexCandidate = resolve(target, 'index' + ext);
     if (existsSync(indexCandidate)) {
       try {

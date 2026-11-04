@@ -99,6 +99,7 @@ export async function getUpwardComponentTree(
     if (
       ext === '.vue' ||
       ext === '.astro' ||
+      ext === '.svelte' ||
       ext === '.tsx' ||
       ext === '.jsx' ||
       ext === '.ts' ||
@@ -127,7 +128,7 @@ export async function getUpwardComponentTree(
   const candidateToFileMap = new Map<string, string[]>();
   for (const file of allFiles) {
     const ext = extname(file).toLowerCase();
-    if (ext === '.vue' || ext === '.astro' || ext === '.tsx' || ext === '.jsx') {
+    if (ext === '.vue' || ext === '.astro' || ext === '.svelte' || ext === '.tsx' || ext === '.jsx') {
       const base = basename(file, ext);
       for (const cand of getCandidateNames(base)) {
         const key = cand.toLowerCase();
