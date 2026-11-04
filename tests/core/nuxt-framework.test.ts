@@ -456,6 +456,8 @@ const { data: queryList } = await useFetch('/api/items', { query: { page } });
       const filePath = join(testDir, 'pages', 'Home.vue');
       try {
         await fs.mkdir(join(testDir, 'pages'), { recursive: true });
+        await fs.mkdir(join(testDir, 'composables'), { recursive: true });
+        await fs.writeFile(join(testDir, 'composables', 'http.ts'), 'export function useHTTPClient() {}');
         await fs.writeFile(
           join(testDir, 'nuxt.config.ts'),
           'export default defineNuxtConfig({});',

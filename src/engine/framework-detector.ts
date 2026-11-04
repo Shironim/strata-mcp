@@ -1,7 +1,10 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { basename, extname, join, resolve } from 'node:path';
-import type { Evidence, FrontendFramework } from '../types';
-import { findProjectRoot } from './path-resolver';
+import type { Evidence, FrontendFramework, ProjectOwnershipInfo } from '../types';
+import { resolveProjectOwnership } from './project-ownership';
+import { moduleDirective } from './parsers/ts-syntax';
+import ts from 'typescript';
+import { reactBindings } from './parsers/react-bindings';
 
 export interface FrameworkVersionInfo {
   rawVersion: string;
@@ -30,6 +33,7 @@ export interface ProjectEcosystem {
 }
 
 export interface FrameworkDetectionResult {
+  projectContext?: ProjectOwnershipInfo;
   framework: FrontendFramework;
   version?: string;
   majorVersion?: number;
@@ -159,18 +163,17 @@ export function detectFrameworkWithEvidence(
   explicitContent?: string,
   explicitRootDir?: string
 ): FrameworkDetectionResult {
+  const projectContext = resolveProjectOwnership(filePath, explicitRootDir);
+  return { ...detectFrameworkInProject(filePath, explicitContent, projectContext), projectContext };
+}
+
+function detectFrameworkInProject(filePath: string, explicitContent: string | undefined, context: ProjectOwnershipInfo): FrameworkDetectionResult {
   const ext = extname(filePath).toLowerCase();
-
-  let rootDir = explicitRootDir;
-  if (!rootDir) {
-    try {
-      rootDir = findProjectRoot(filePath);
-    } catch {
-      rootDir = process.cwd();
-    }
+  const eco = context.ownerRoot ? getProjectEcosystem(context.ownerRoot) : undefined;
+  if (eco) {
+    eco.hasNext = context.applicationFramework === 'next';
+    eco.hasNuxt = context.applicationFramework === 'nuxt';
   }
-
-  const eco = rootDir ? getProjectEcosystem(rootDir) : undefined;
 
   // --- Tier 1: File Extension ---
   if (ext === '.svelte') {
@@ -235,40 +238,51 @@ export function detectFrameworkWithEvidence(
 
   // --- Tier 2: Explicit AST Imports & Macros ---
   if (content) {
+    const sf = ts.createSourceFile(filePath, content, ts.ScriptTarget.Latest, true,
+      /\.[jt]sx$/i.test(filePath) ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
+    const modules = new Set<string>();
+    for (const statement of sf.statements) {
+      if (ts.isImportDeclaration(statement) && ts.isStringLiteral(statement.moduleSpecifier)) {
+        const clause = statement.importClause;
+        const valueImport = !clause || (!clause.isTypeOnly && (clause.name || !clause.namedBindings
+          || ts.isNamespaceImport(clause.namedBindings) || clause.namedBindings.elements.some(item => !item.isTypeOnly)));
+        if (valueImport) modules.add(statement.moduleSpecifier.text);
+      }
+    }
+    const bindings = reactBindings(sf);
+    const calls = new Set<string>();
+    function visit(node: ts.Node): void {
+      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && !bindings.binding(node.expression)) calls.add(node.expression.text);
+      ts.forEachChild(node, visit);
+    }
+    visit(sf);
+    const imports = (pattern: RegExp) => [...modules].some(name => pattern.test(name));
+    const unboundCall = (names: string[]) => names.some(name => calls.has(name));
     // 2a. SolidJS check (Prohibit misclassifying Solid as React)
-    const hasSolidImports =
-      /\bfrom\s+['"](?:solid-js|solid-js\/(?:web|store|html))['"]/.test(content);
-    const hasSolidPragma =
-      /\/\*[\s*]*@jsxImportSource\s+solid-js/.test(content);
-    const hasSolidSignals =
-      /\b(?:createSignal|createEffect|createMemo|createResource|createStore)\s*\(/.test(content);
+    const hasSolidImports = imports(/^solid-js(?:\/(?:web|store|html))?$/);
+    const hasSolidPragma = (ts.getLeadingCommentRanges(content, 0) ?? [])
+      .some(range => /@jsxImportSource\s+solid-js\b/.test(content.slice(range.pos, range.end)));
+    const hasSolidSignals = unboundCall(['createSignal', 'createEffect', 'createMemo', 'createResource', 'createStore']);
 
     // 2b. Next.js check
-    const hasNextDirective =
-      /^(?:['"]use client['"]|['"]use server['"])/m.test(content);
-    const hasNextImports =
-      /\bfrom\s+['"](?:next\/[^'"]+|@next\/[^'"]+)['"]/.test(content);
+    const hasReactDirective = /\.[jt]sx?$/.test(filePath) && Boolean(
+      moduleDirective(content, 'use client') || moduleDirective(content, 'use server'));
+    const hasNextImports = imports(/^(?:next\/|@next\/)/);
 
     // 2c. Nuxt check
-    const hasNuxtImports =
-      /\bfrom\s+['"](?:#app|#imports|#components|nuxt\/[^'"]+)['"]/.test(content);
-    const hasNuxtMacros =
-      /\b(?:definePageMeta|useAsyncData|useFetch|defineNuxtComponent|defineNuxtRouteMiddleware)\s*\(/.test(content);
+    const hasNuxtImports = imports(/^(?:#app|#imports|#components|nuxt\/.+)$/);
+    const hasNuxtMacros = unboundCall(['definePageMeta', 'useAsyncData', 'useFetch', 'defineNuxtComponent', 'defineNuxtRouteMiddleware']);
 
     // 2d. React check
-    const hasReactImports =
-      /\bfrom\s+['"](?:react|react-dom|react\/[^'"]+|@tanstack\/react-query)['"]/.test(content);
-    const hasReactHooks =
-      /\b(?:useState|useEffect|useCallback|useMemo|useRef|useContext|useReducer|useTransition|useId)\s*\(/.test(content);
+    const hasReactImports = imports(/^(?:react|react-dom|react\/.+|@tanstack\/react-query)$/);
+    const hasReactHooks = unboundCall(['useState', 'useEffect', 'useCallback', 'useMemo', 'useRef', 'useContext', 'useReducer', 'useTransition', 'useId']);
 
     // 2e. Vue check
-    const hasVueImports =
-      /\bfrom\s+['"](?:vue|@vue\/[^'"]+|@vueuse\/[^'"]+|pinia|@inertiajs\/vue3|vue-router)['"]/.test(content);
-    const hasVueReactivity =
-      /\b(?:ref|reactive|computed|watch|watchEffect|shallowRef|toRef|toRefs|inject|provide)\s*\(/.test(content);
+    const hasVueImports = imports(/^(?:vue|@vue\/.+|@vueuse\/.+|pinia|@inertiajs\/vue3|vue-router)$/);
+    const hasVueReactivity = unboundCall(['ref', 'reactive', 'computed', 'watch', 'watchEffect', 'shallowRef', 'toRef', 'toRefs', 'inject', 'provide']);
 
     // Evaluation precedence:
-    if (hasSolidImports || hasSolidPragma || (hasSolidSignals && !hasReactImports && !hasReactHooks)) {
+    if (hasSolidImports || hasSolidPragma || (hasSolidSignals && !hasReactImports && !hasReactHooks && !hasVueImports && !hasNextImports && !hasNuxtImports)) {
       const solidInfo = eco?.frameworks.solid;
       return {
         framework: 'solid',
@@ -284,7 +298,7 @@ export function detectFrameworkWithEvidence(
       };
     }
 
-    if (hasNextDirective || hasNextImports) {
+    if (hasNextImports) {
       const nextInfo = eco?.frameworks.next;
       return {
         framework: 'next',
@@ -295,12 +309,12 @@ export function detectFrameworkWithEvidence(
           basis: 'source',
           resolution: 'resolved',
           method: 'ast-import-signature',
-          reason: hasNextDirective ? 'Next.js directive ("use client" / "use server")' : 'Import from next/*',
+          reason: 'Value import from next/* or @next/*',
         },
       };
     }
 
-    if (hasNuxtImports || hasNuxtMacros) {
+    if (hasNuxtImports || (hasNuxtMacros && !hasReactImports && !hasVueImports && !eco?.hasNext)) {
       const nuxtInfo = eco?.frameworks.nuxt;
       return {
         framework: 'nuxt',
@@ -308,15 +322,15 @@ export function detectFrameworkWithEvidence(
         majorVersion: nuxtInfo?.major,
         minorVersion: nuxtInfo?.minor,
         evidence: {
-          basis: 'source',
-          resolution: 'resolved',
-          method: 'ast-import-signature',
+          basis: hasNuxtImports ? 'source' : 'heuristic',
+          resolution: hasNuxtImports ? 'resolved' : 'candidate',
+          method: hasNuxtImports ? 'ast-import-signature' : 'unbound-call-convention',
           reason: hasNuxtImports ? 'Nuxt virtual alias import (#app/#imports)' : 'Nuxt compiler macro (e.g. definePageMeta)',
         },
       };
     }
 
-    if (hasReactImports || hasReactHooks) {
+    if (hasReactImports || hasReactHooks || hasReactDirective) {
       const isNextProject = eco?.hasNext;
       const fw: FrontendFramework = isNextProject ? 'next' : 'react';
       const info = isNextProject ? eco?.frameworks.next : eco?.frameworks.react;
@@ -326,10 +340,10 @@ export function detectFrameworkWithEvidence(
         majorVersion: info?.major,
         minorVersion: info?.minor,
         evidence: {
-          basis: 'source',
-          resolution: 'resolved',
-          method: 'ast-import-signature',
-          reason: 'React module import or standard hook call',
+          basis: hasReactImports || isNextProject ? 'source' : 'heuristic',
+          resolution: hasReactImports || isNextProject ? 'resolved' : 'candidate',
+          method: hasReactImports ? 'ast-import-signature' : isNextProject ? 'project-manifest' : hasReactDirective ? 'react-directive-convention' : 'unbound-call-convention',
+          reason: hasReactImports ? 'React value import' : isNextProject ? 'Next project ecosystem with React syntax' : hasReactDirective ? 'React RSC directive; does not identify Next.js or prove bundler support' : 'Unbound conventional React hook call',
         },
       };
     }
@@ -344,10 +358,10 @@ export function detectFrameworkWithEvidence(
         majorVersion: info?.major,
         minorVersion: info?.minor,
         evidence: {
-          basis: 'source',
-          resolution: 'resolved',
-          method: 'ast-import-signature',
-          reason: 'Vue module import or Composition API reactivity call',
+          basis: hasVueImports || isNuxt ? 'source' : 'heuristic',
+          resolution: hasVueImports || isNuxt ? 'resolved' : 'candidate',
+          method: hasVueImports ? 'ast-import-signature' : isNuxt ? 'project-manifest' : 'unbound-call-convention',
+          reason: hasVueImports ? 'Vue value import' : isNuxt ? 'Nuxt project ecosystem with Vue syntax' : 'Unbound conventional Vue reactivity call',
         },
       };
     }
@@ -479,17 +493,23 @@ export function detectFrameworkWithEvidence(
  */
 export function detectFramework(
   filePath: string,
-  explicitContent?: string
+  explicitContent?: string,
+  explicitRootDir?: string
 ): FrontendFramework | 'vue-composable' {
-  const result = detectFrameworkWithEvidence(filePath, explicitContent);
+  const result = detectFrameworkWithEvidence(filePath, explicitContent, explicitRootDir);
+  return componentFramework(filePath, result.framework);
+}
+
+export function componentFramework(filePath: string, framework: FrontendFramework): FrontendFramework | 'vue-composable' {
   const normPath = filePath.replace(/\\/g, '/');
   const base = basename(filePath, extname(filePath));
   const isComposableName = /^use[A-Z0-9_]/.test(base);
 
-  if ((result.framework === 'vue' || result.framework === 'nuxt') && (isComposableName || normPath.includes('/composables/'))) {
+  const isScriptModule = ['.ts', '.js', '.mts', '.mjs', '.cts', '.cjs'].includes(extname(filePath).toLowerCase());
+  if (isScriptModule && (framework === 'vue' || framework === 'nuxt') && (isComposableName || normPath.includes('/composables/'))) {
     return 'vue-composable';
   }
 
-  return result.framework;
+  return framework;
 }
 

@@ -448,6 +448,7 @@ describe('Next.js Framework Support (Milestone 4)', () => {
       const testDir = join(baseTestDir, 'nx02-contract');
       const appDir = join(testDir, 'app', 'settings');
       mkdirSync(appDir, { recursive: true });
+      writeFileSync(join(testDir, 'package.json'), '{"dependencies":{"next":"15.0.0"}}');
 
       const pageFile = join(appDir, 'page.tsx');
       const content = `
@@ -460,6 +461,7 @@ describe('Next.js Framework Support (Milestone 4)', () => {
       writeFileSync(pageFile, content);
 
       const contract = await extractComponentContract(pageFile);
+      expect(contract.framework).toBe('next');
       expect(contract.renderBoundary).toBeDefined();
       expect(contract.renderBoundary!.boundary).toBe('server-component');
       expect(contract.renderBoundary!.isClientHydrated).toBe(false);
@@ -475,12 +477,14 @@ describe('Next.js Framework Support (Milestone 4)', () => {
       const testDir = join(baseTestDir, 'nx02-client-contract');
       const compDir = join(testDir, 'components');
       mkdirSync(compDir, { recursive: true });
+      writeFileSync(join(testDir, 'package.json'), '{"dependencies":{"next":"15.0.0"}}');
 
       const compFile = join(compDir, 'Button.tsx');
       const content = `'use client';\nexport default function Button() { return <button>Click</button>; }`;
       writeFileSync(compFile, content);
 
       const contract = await extractComponentContract(compFile);
+      expect(contract.framework).toBe('next');
       expect(contract.renderBoundary).toBeDefined();
       expect(contract.renderBoundary!.boundary).toBe('client-component');
       expect(contract.renderBoundary!.isClientHydrated).toBe(true);

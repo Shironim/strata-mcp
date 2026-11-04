@@ -1,6 +1,6 @@
-import { readSourceFile } from './source-file';
+import { readSourceFile, readSourceFileSync } from './source-file';
 import { statSync, promises as fs } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 
 /** User-supplied alias map: `{ "@/*": "resources/js/*", "@/": "src/" }`. */
 export type AliasMap = Record<string, string>;
@@ -140,65 +140,292 @@ export function mergeAliasConfigs(
  */
 export function stripJsonComments(text: string): string {
   return text
-    .replace(/\/\*[\s\S]*?\*\/|([^:]|^)\/\/.*$/gm, '$1')
+    .replace(/("(?:[^"\\]|\\.)*")|\/\*[\s\S]*?\*\/|([^:]|^)\/\/.*$/gm, (match, str, prefix) => {
+      if (str) return str;
+      if (prefix) return prefix;
+      return '';
+    })
     .replace(/,\s*([\]}])/g, '$1');
 }
 
-/**
- * Discovers the nearest `jsconfig.json` or `tsconfig.json` walking up from a file
- * and builds an alias resolver from its `compilerOptions.paths` + `baseUrl`.
- */
-export async function loadAliasConfig(fromPath: string): Promise<AliasConfig | null> {
-  let dir = dirname(resolve(fromPath));
+function resolveExtendsTarget(fromConfigFile: string, extendsTarget: string): string | null {
+  const fromDir = dirname(fromConfigFile);
 
-  while (true) {
-    for (const name of ['jsconfig.json', 'tsconfig.json']) {
-      const candidate = join(dir, name);
-
+  if (extendsTarget.startsWith('.') || isAbsolute(extendsTarget)) {
+    const candidateBase = isAbsolute(extendsTarget) ? extendsTarget : resolve(fromDir, extendsTarget);
+    const candidates = [
+      candidateBase,
+      candidateBase.endsWith('.json') ? candidateBase : candidateBase + '.json',
+      join(candidateBase, 'tsconfig.json'),
+      join(candidateBase, 'jsconfig.json'),
+    ];
+    for (const c of candidates) {
       try {
-        const raw = await readSourceFile(candidate);
-        const config = JSON.parse(stripJsonComments(raw)) as {
-          compilerOptions?: { baseUrl?: string; paths?: Record<string, string[]> };
-        };
+        if (statSync(c).isFile()) return c;
+      } catch {}
+    }
+    return null;
+  }
 
-        const baseUrl = config.compilerOptions?.baseUrl;
-        const paths = config.compilerOptions?.paths;
-
-        if (paths && typeof paths === 'object') {
-          return buildAliasConfigFromTsconfigPaths(dir, baseUrl, paths);
-        }
-      } catch {
-        // No config or invalid config at this level — keep walking up.
-      }
+  // Bare package specifier (e.g. '@vue/tsconfig/tsconfig.dom.json' or '@tsconfig/node18/tsconfig.json')
+  let cur = fromDir;
+  while (true) {
+    const nodeModulesDir = join(cur, 'node_modules');
+    const targetInModules = join(nodeModulesDir, extendsTarget);
+    const candidates = [
+      targetInModules,
+      targetInModules.endsWith('.json') ? targetInModules : targetInModules + '.json',
+      join(targetInModules, 'tsconfig.json'),
+      join(targetInModules, 'jsconfig.json'),
+    ];
+    for (const c of candidates) {
+      try {
+        if (statSync(c).isFile()) return c;
+      } catch {}
     }
 
-    const parent = dirname(dir);
-    if (parent === dir) break;
-    dir = parent;
+    try {
+      const pkgPath = join(targetInModules, 'package.json');
+      if (statSync(pkgPath).isFile()) {
+        const pkgRaw = readSourceFileSync(pkgPath);
+        const pkg = JSON.parse(pkgRaw) as { tsconfig?: string };
+        if (pkg.tsconfig) {
+          const direct = resolve(targetInModules, pkg.tsconfig);
+          if (statSync(direct).isFile()) return direct;
+        }
+      }
+    } catch {}
+
+    const parent = dirname(cur);
+    if (parent === cur) break;
+    cur = parent;
   }
 
   return null;
 }
 
-function buildAliasConfigFromTsconfigPaths(
-  configDir: string,
-  baseUrl: string | undefined,
-  paths: Record<string, string[]>
-): AliasConfig {
-  const baseDir = baseUrl ? resolve(configDir, baseUrl) : configDir;
+export interface TsConfigHierarchyResult {
+  paths: Record<string, string[]>;
+  baseDirForPath: Record<string, string>;
+  configFiles: string[];
+}
 
-  const entries = Object.entries(paths)
-    .filter(([, targets]) => Array.isArray(targets) && targets.length > 0)
-    .map(([alias, targets]) => targets.map(target => buildAliasEntry(alias, String(target))))
-    .sort((a, b) => Number(b[0].matchKind === 'exact') - Number(a[0].matchKind === 'exact') || b[0].aliasBefore.length - a[0].aliasBefore.length);
+export async function loadTsConfigHierarchy(configFile: string): Promise<TsConfigHierarchyResult> {
+  const visited = new Set<string>();
+  const configFiles: string[] = [];
+  const mergedPaths: Record<string, { targets: string[]; baseDir: string }> = {};
+
+  async function loadRecursive(file: string): Promise<void> {
+    const canonical = resolve(file);
+    if (visited.has(canonical)) return;
+    visited.add(canonical);
+    configFiles.push(canonical);
+
+    let raw: string;
+    try {
+      raw = await readSourceFile(canonical);
+    } catch {
+      return;
+    }
+
+    let parsed: any;
+    try {
+      parsed = JSON.parse(stripJsonComments(raw));
+    } catch {
+      return;
+    }
+
+    if (!parsed || typeof parsed !== 'object') return;
+
+    // 1. Process "extends" first (base configs load before child configs)
+    if (parsed.extends) {
+      const extendsList = Array.isArray(parsed.extends)
+        ? parsed.extends
+        : typeof parsed.extends === 'string'
+        ? [parsed.extends]
+        : [];
+
+      for (const extTarget of extendsList) {
+        if (typeof extTarget === 'string' && extTarget.trim()) {
+          const resolved = resolveExtendsTarget(canonical, extTarget.trim());
+          if (resolved) {
+            await loadRecursive(resolved);
+          }
+        }
+      }
+    }
+
+    // 2. Process "references" if present and local paths are not defined
+    if (Array.isArray(parsed.references)) {
+      for (const ref of parsed.references) {
+        if (ref && typeof ref.path === 'string' && ref.path.trim()) {
+          const resolved = resolveExtendsTarget(canonical, ref.path.trim());
+          if (resolved) {
+            await loadRecursive(resolved);
+          }
+        }
+      }
+    }
+
+    // 3. Apply this config's compilerOptions.paths (overriding base)
+    const currentDir = dirname(canonical);
+    const baseUrl = parsed.compilerOptions?.baseUrl;
+    const effectiveBaseDir = baseUrl ? resolve(currentDir, baseUrl) : currentDir;
+    const localPaths = parsed.compilerOptions?.paths;
+
+    if (localPaths && typeof localPaths === 'object') {
+      for (const [alias, targets] of Object.entries(localPaths)) {
+        if (Array.isArray(targets) && targets.length > 0) {
+          mergedPaths[alias] = {
+            targets: targets.map(String),
+            baseDir: effectiveBaseDir,
+          };
+        }
+      }
+    }
+  }
+
+  await loadRecursive(configFile);
+
+  const paths: Record<string, string[]> = {};
+  const baseDirForPath: Record<string, string> = {};
+  for (const [alias, info] of Object.entries(mergedPaths)) {
+    paths[alias] = info.targets;
+    baseDirForPath[alias] = info.baseDir;
+  }
+
+  return { paths, baseDirForPath, configFiles };
+}
+
+export function loadTsConfigHierarchySync(configFile: string): TsConfigHierarchyResult {
+  const visited = new Set<string>();
+  const configFiles: string[] = [];
+  const mergedPaths: Record<string, { targets: string[]; baseDir: string }> = {};
+
+  function loadRecursive(file: string): void {
+    const canonical = resolve(file);
+    if (visited.has(canonical)) return;
+    visited.add(canonical);
+    configFiles.push(canonical);
+
+    let raw: string;
+    try {
+      raw = readSourceFileSync(canonical);
+    } catch {
+      return;
+    }
+
+    let parsed: any;
+    try {
+      parsed = JSON.parse(stripJsonComments(raw));
+    } catch {
+      return;
+    }
+
+    if (!parsed || typeof parsed !== 'object') return;
+
+    if (parsed.extends) {
+      const extendsList = Array.isArray(parsed.extends)
+        ? parsed.extends
+        : typeof parsed.extends === 'string'
+        ? [parsed.extends]
+        : [];
+
+      for (const extTarget of extendsList) {
+        if (typeof extTarget === 'string' && extTarget.trim()) {
+          const resolved = resolveExtendsTarget(canonical, extTarget.trim());
+          if (resolved) {
+            loadRecursive(resolved);
+          }
+        }
+      }
+    }
+
+    if (Array.isArray(parsed.references)) {
+      for (const ref of parsed.references) {
+        if (ref && typeof ref.path === 'string' && ref.path.trim()) {
+          const resolved = resolveExtendsTarget(canonical, ref.path.trim());
+          if (resolved) {
+            loadRecursive(resolved);
+          }
+        }
+      }
+    }
+
+    const currentDir = dirname(canonical);
+    const baseUrl = parsed.compilerOptions?.baseUrl;
+    const effectiveBaseDir = baseUrl ? resolve(currentDir, baseUrl) : currentDir;
+    const localPaths = parsed.compilerOptions?.paths;
+
+    if (localPaths && typeof localPaths === 'object') {
+      for (const [alias, targets] of Object.entries(localPaths)) {
+        if (Array.isArray(targets) && targets.length > 0) {
+          mergedPaths[alias] = {
+            targets: targets.map(String),
+            baseDir: effectiveBaseDir,
+          };
+        }
+      }
+    }
+  }
+
+  loadRecursive(configFile);
+
+  const paths: Record<string, string[]> = {};
+  const baseDirForPath: Record<string, string> = {};
+  for (const [alias, info] of Object.entries(mergedPaths)) {
+    paths[alias] = info.targets;
+    baseDirForPath[alias] = info.baseDir;
+  }
+
+  return { paths, baseDirForPath, configFiles };
+}
+
+interface PathEntryWithBaseDir {
+  entry: AliasEntry;
+  baseDir: string;
+}
+
+interface GroupedAliasEntry {
+  alias: string;
+  targets: PathEntryWithBaseDir[];
+  matchKind: AliasMatchKind;
+  aliasBefore: string;
+}
+
+function buildAliasConfigFromResolvedHierarchy(hierarchy: TsConfigHierarchyResult): AliasConfig {
+  const groups: GroupedAliasEntry[] = [];
+
+  for (const [alias, targets] of Object.entries(hierarchy.paths)) {
+    const baseDir = hierarchy.baseDirForPath[alias] || process.cwd();
+    const entryItems: PathEntryWithBaseDir[] = targets.map(target => ({
+      entry: buildAliasEntry(alias, target),
+      baseDir,
+    }));
+    if (entryItems.length === 0) continue;
+
+    groups.push({
+      alias,
+      targets: entryItems,
+      matchKind: entryItems[0].entry.matchKind,
+      aliasBefore: entryItems[0].entry.aliasBefore,
+    });
+  }
+
+  groups.sort((a, b) =>
+    Number(b.matchKind === 'exact') - Number(a.matchKind === 'exact') ||
+    b.aliasBefore.length - a.aliasBefore.length
+  );
 
   return {
-    isAlias: specifier => entries.some(group => matchAliasEntry(group[0], specifier) !== null),
+    isAlias: specifier => groups.some(group => matchAliasEntry(group.targets[0].entry, specifier) !== null),
     resolve(specifier) {
-      for (const group of entries) {
-        const remainder = matchAliasEntry(group[0], specifier);
+      for (const group of groups) {
+        const remainder = matchAliasEntry(group.targets[0].entry, specifier);
         if (remainder === null) continue;
-        const candidates = group.map(entry => resolve(baseDir, entry.targetBefore + remainder + entry.targetAfter));
+        const candidates = group.targets.map(item =>
+          resolve(item.baseDir, item.entry.targetBefore + remainder + item.entry.targetAfter)
+        );
         for (const candidate of candidates) {
           if (candidate.endsWith('.js') || candidate.endsWith('.jsx')) {
             const jsx = candidate.endsWith('.jsx');
@@ -219,4 +446,67 @@ function buildAliasConfigFromTsconfigPaths(
       return null;
     },
   };
+}
+
+export function buildAliasConfigFromTsconfigPaths(
+  configDir: string,
+  baseUrl: string | undefined,
+  paths: Record<string, string[]>
+): AliasConfig {
+  const baseDir = baseUrl ? resolve(configDir, baseUrl) : configDir;
+  const baseDirForPath: Record<string, string> = {};
+  for (const k of Object.keys(paths)) {
+    baseDirForPath[k] = baseDir;
+  }
+  return buildAliasConfigFromResolvedHierarchy({
+    paths,
+    baseDirForPath,
+    configFiles: [configDir],
+  });
+}
+
+/**
+ * Discovers the nearest `jsconfig.json` or `tsconfig.json` walking up from a file
+ * and builds an alias resolver from its full inheritance hierarchy (`extends`).
+ * Also returns all config files involved in the hierarchy.
+ */
+export async function loadAliasConfigWithDependencies(
+  fromPath: string
+): Promise<{ config: AliasConfig | null; configFiles: string[] }> {
+  let dir = dirname(resolve(fromPath));
+
+  while (true) {
+    for (const name of ['jsconfig.json', 'tsconfig.json']) {
+      const candidate = join(dir, name);
+
+      try {
+        if (statSync(candidate).isFile()) {
+          const hierarchy = await loadTsConfigHierarchy(candidate);
+          if (Object.keys(hierarchy.paths).length > 0) {
+            return {
+              config: buildAliasConfigFromResolvedHierarchy(hierarchy),
+              configFiles: hierarchy.configFiles,
+            };
+          }
+        }
+      } catch {
+        // No config or invalid config at this level — keep walking up.
+      }
+    }
+
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+
+  return { config: null, configFiles: [] };
+}
+
+/**
+ * Discovers the nearest `jsconfig.json` or `tsconfig.json` walking up from a file
+ * and builds an alias resolver from its full inheritance hierarchy (`extends`).
+ */
+export async function loadAliasConfig(fromPath: string): Promise<AliasConfig | null> {
+  const { config } = await loadAliasConfigWithDependencies(fromPath);
+  return config;
 }

@@ -2,8 +2,11 @@ import { readSourceFile } from './source-file';
 import { existsSync, promises as fs } from 'node:fs';
 import { basename, dirname, extname, isAbsolute, join, normalize, relative, resolve } from 'node:path';
 import ts from 'typescript';
+import { unwrapExpression, staticPropertyName } from './parsers/ts-syntax';
 import { parseSfc } from './splitter';
 import { collectFiles } from './collector';
+import { deriveNextEffectiveConfig } from './next-effective-config';
+import { resolveProjectOwnership } from './project-ownership';
 import type {
   NextSegmentConfigContract,
   NuxtPageMetaContract,
@@ -42,6 +45,14 @@ export function extractRouteParams(routePath: string): RouteParam[] {
       params.push({ name: dynamic[1], type: 'dynamic' });
       continue;
     }
+
+    // 4. Vue router colon parameters (:param, :pathMatch(.*)*, etc.)
+    const colonParam = seg.match(/^:([A-Za-z0-9_$]+)(\(.*?\))?(\*|\+)?$/);
+    if (colonParam) {
+      const isCatchAll = colonParam[3] === '*' || colonParam[3] === '+';
+      params.push({ name: colonParam[1], type: isCatchAll ? 'catch-all' : 'dynamic' });
+      continue;
+    }
   }
 
   return params;
@@ -53,16 +64,22 @@ export function extractRouteParams(routePath: string): RouteParam[] {
 export async function extractApiHandlers(filePath: string): Promise<string[]> {
   try {
     const content = await readSourceFile(filePath);
-    const handlers: string[] = [];
+    const methods = new Set<string>();
     const httpMethods = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS'];
-    for (const method of httpMethods) {
-      const regex = new RegExp(
-        `export\\s+(?:async\\s+)?(?:function\\s+${method}\\b|const\\s+${method}\\b)`
-      );
-      if (regex.test(content)) {
-        handlers.push(method);
+    const sf = ts.createSourceFile(filePath, content, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+    for (const statement of sf.statements) {
+      if (ts.isExportDeclaration(statement) && !statement.isTypeOnly && statement.exportClause && ts.isNamedExports(statement.exportClause)) {
+        for (const entry of statement.exportClause.elements) if (!entry.isTypeOnly) methods.add(entry.name.text);
+      } else if ((ts.isFunctionDeclaration(statement) || ts.isVariableStatement(statement))
+        && statement.modifiers?.some(modifier => modifier.kind === ts.SyntaxKind.ExportKeyword)
+        && !statement.modifiers?.some(modifier => modifier.kind === ts.SyntaxKind.DefaultKeyword)) {
+        if (ts.isFunctionDeclaration(statement) && statement.name) methods.add(statement.name.text);
+        if (ts.isVariableStatement(statement)) for (const declaration of statement.declarationList.declarations) {
+          if (ts.isIdentifier(declaration.name)) methods.add(declaration.name.text);
+        }
       }
     }
+    const handlers = httpMethods.filter(method => methods.has(method));
     return handlers.length > 0 ? handlers : ['ALL'];
   } catch {
     return [];
@@ -76,6 +93,27 @@ export async function detectRouteFramework(
   targetPath: string
 ): Promise<{ framework: RouteFramework; baseDir: string }> {
   const normTarget = resolve(targetPath);
+  const ownership = resolveProjectOwnership(join(normTarget, '__strata_route_probe__.ts'));
+  const application = ownership.applicationFramework;
+  if (ownership.status === 'conflict' || ownership.status === 'unverified' && ownership.ownerRoot) {
+    return { framework: 'unknown', baseDir: normTarget };
+  }
+  const choose = (framework: RouteFramework, candidates: string[]) => {
+    const baseDir = candidates.find(path => existsSync(path));
+    return baseDir ? { framework, baseDir } : { framework: 'unknown' as const, baseDir: normTarget };
+  };
+  if (application === 'next') {
+    const rel = ownership.appRoot ? relative(normTarget, ownership.appRoot) : '..';
+    if (ownership.appRoot && !rel.startsWith('..') && !isAbsolute(rel)) return { framework: 'next-app', baseDir: ownership.appRoot };
+    if (ownership.appRoot && (normTarget === ownership.appRoot || normTarget.startsWith(ownership.appRoot + '/'))) return { framework: 'next-app', baseDir: normTarget };
+    return choose('next-pages', [join(normTarget,'pages'), join(normTarget,'src','pages')]);
+  }
+  if (application === 'nuxt') {
+    const found = choose('nuxt', [join(normTarget,'app','pages'),join(normTarget,'src','app','pages'),join(normTarget,'pages'),join(normTarget,'src','pages')]);
+    return found.framework === 'unknown' ? {framework:'nuxt',baseDir:normTarget} : found;
+  }
+  if (application === 'astro') return choose('astro',[join(normTarget,'src','pages'),join(normTarget,'pages')]);
+  if (application === 'svelte') return choose('sveltekit',[join(normTarget,'src','routes'),join(normTarget,'routes')]);
 
   const hasNuxtConfig =
     existsSync(join(normTarget, 'nuxt.config.ts')) ||
@@ -110,7 +148,7 @@ export async function detectRouteFramework(
   }
 
   // 1. Nuxt 3 & 4 (if nuxt config or app.vue is present)
-  if (hasNuxtConfig) {
+  if (hasNuxtConfig && !ownership.ownerRoot) {
     for (const candidate of [
       join(normTarget, 'app', 'pages'),
       join(normTarget, 'src', 'app', 'pages'),
@@ -141,7 +179,7 @@ export async function detectRouteFramework(
   }
 
   // 3. Next.js App Router
-  for (const candidate of [join(normTarget, 'app'), join(normTarget, 'src', 'app')]) {
+  for (const candidate of ownership.ownerRoot ? [] : [join(normTarget, 'app'), join(normTarget, 'src', 'app')]) {
     if (existsSync(candidate)) {
       const files = await collectFiles(candidate);
       const hasAppRouterFile = files.some(
@@ -166,8 +204,32 @@ export async function detectRouteFramework(
     }
   }
 
-  // 5. Nuxt fallback (check for .vue files in pages directory)
-  if (!hasNextConfig) {
+  // 5. Vue Router with explicit router config (src/router or router)
+  const routerConfigFiles = [
+    join(normTarget, 'src', 'router', 'index.ts'),
+    join(normTarget, 'src', 'router', 'index.js'),
+    join(normTarget, 'src', 'router.ts'),
+    join(normTarget, 'src', 'router.js'),
+    join(normTarget, 'router', 'index.ts'),
+    join(normTarget, 'router', 'index.js'),
+  ];
+  const routerConfigFile = routerConfigFiles.find((f) => existsSync(f));
+  if (routerConfigFile) {
+    for (const candidate of [
+      join(normTarget, 'src', 'views'),
+      join(normTarget, 'views'),
+      join(normTarget, 'src', 'pages'),
+      join(normTarget, 'pages'),
+    ]) {
+      if (existsSync(candidate)) {
+        return { framework: 'vue-router', baseDir: candidate };
+      }
+    }
+    return { framework: 'vue-router', baseDir: dirname(routerConfigFile) };
+  }
+
+  // 6. Nuxt fallback (check for .vue files in pages directory)
+  if (!ownership.ownerRoot && !hasNextConfig && !hasNuxtConfig) {
     for (const candidate of [
       join(normTarget, 'app', 'pages'),
       join(normTarget, 'src', 'app', 'pages'),
@@ -184,7 +246,7 @@ export async function detectRouteFramework(
     }
   }
 
-  // 6. Astro fallback
+  // 7. Astro fallback
   for (const candidate of [join(normTarget, 'src', 'pages'), join(normTarget, 'pages')]) {
     if (existsSync(candidate)) {
       const files = await collectFiles(candidate);
@@ -195,42 +257,19 @@ export async function detectRouteFramework(
     }
   }
 
-  // 7. Next.js Pages Router
-  for (const candidate of [join(normTarget, 'pages'), join(normTarget, 'src', 'pages')]) {
+  // 8. Next.js Pages Router
+  for (const candidate of ownership.ownerRoot ? [] : [join(normTarget, 'pages'), join(normTarget, 'src', 'pages')]) {
     if (existsSync(candidate)) {
       return { framework: 'next-pages', baseDir: candidate };
     }
   }
 
-  // 8. Vue Router SPA (src/views or views convention)
+  // 9. Vue Router SPA (src/views or views convention)
   for (const candidate of [join(normTarget, 'src', 'views'), join(normTarget, 'views')]) {
     if (existsSync(candidate)) {
       const files = await collectFiles(candidate);
       const hasVueFiles = files.some((f) => f.endsWith('.vue'));
       if (hasVueFiles) {
-        return { framework: 'vue-router', baseDir: candidate };
-      }
-    }
-  }
-
-  // 9. Vue Router with explicit router config (src/router or router)
-  const hasRouterConfig = [
-    join(normTarget, 'src', 'router', 'index.ts'),
-    join(normTarget, 'src', 'router', 'index.js'),
-    join(normTarget, 'src', 'router.ts'),
-    join(normTarget, 'src', 'router.js'),
-    join(normTarget, 'router', 'index.ts'),
-    join(normTarget, 'router', 'index.js'),
-  ].some((f) => existsSync(f));
-
-  if (hasRouterConfig) {
-    for (const candidate of [
-      join(normTarget, 'src', 'views'),
-      join(normTarget, 'views'),
-      join(normTarget, 'src', 'pages'),
-      join(normTarget, 'pages'),
-    ]) {
-      if (existsSync(candidate)) {
         return { framework: 'vue-router', baseDir: candidate };
       }
     }
@@ -244,8 +283,8 @@ export async function detectRouteFramework(
 
   // 11. Direct folder check if user targeted a specific routes/pages directory
   const baseName = basename(normTarget).toLowerCase();
-  if (baseName === 'app') return { framework: 'next-app', baseDir: normTarget };
-  if (baseName === 'pages') return { framework: 'next-pages', baseDir: normTarget };
+  if (!ownership.ownerRoot && baseName === 'app') return { framework: 'next-app', baseDir: normTarget };
+  if (!ownership.ownerRoot && baseName === 'pages') return { framework: 'next-pages', baseDir: normTarget };
   if (baseName === 'views') return { framework: 'vue-router', baseDir: normTarget };
   if (baseName === 'routes') return { framework: 'sveltekit', baseDir: normTarget };
 
@@ -265,7 +304,8 @@ export function extractNextSegmentConfig(content: string): NextSegmentConfigCont
     !content.includes('fetchCache') &&
     !content.includes('maxDuration') &&
     !content.includes('generateMetadata') &&
-    !content.includes('generateStaticParams')
+    !content.includes('generateStaticParams') &&
+    !content.includes('export')
   ) {
     return undefined;
   }
@@ -286,8 +326,16 @@ export function extractNextSegmentConfig(content: string): NextSegmentConfigCont
   let maxDuration: number | undefined;
   let hasGenerateMetadata = false;
   let hasGenerateStaticParams = false;
+  const unresolvedFields: NonNullable<NextSegmentConfigContract['unresolvedFields']> = [];
 
   for (const statement of sourceFile.statements) {
+    if (ts.isExportDeclaration(statement) && !statement.isTypeOnly) {
+      const configNames = new Set(['dynamic', 'dynamicParams', 'revalidate', 'fetchCache', 'runtime', 'preferredRegion', 'maxDuration']);
+      if (!statement.exportClause) unresolvedFields.push({ field: '*', expression: statement.getText(sourceFile), reason: 'Export-star segment config requires dependency resolution.' });
+      else if (ts.isNamedExports(statement.exportClause)) for (const binding of statement.exportClause.elements) {
+        if (!binding.isTypeOnly && configNames.has(binding.name.text)) unresolvedFields.push({ field: binding.name.text, expression: statement.getText(sourceFile), reason: 'Aliased or re-exported segment config is not established by a local exported literal declaration.' });
+      }
+    }
     if (ts.isFunctionDeclaration(statement)) {
       const isExported = statement.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword);
       if (isExported && statement.name) {
@@ -301,9 +349,28 @@ export function extractNextSegmentConfig(content: string): NextSegmentConfigCont
       if (!isExported) continue;
 
       for (const decl of statement.declarationList.declarations) {
-        if (!ts.isIdentifier(decl.name) || !decl.initializer) continue;
+        if (!ts.isIdentifier(decl.name) || !decl.initializer) {
+          const names: string[] = [];
+          function binding(name: ts.BindingName): void {
+            if (ts.isIdentifier(name)) names.push(name.text);
+            else for (const element of name.elements) if (ts.isBindingElement(element)) binding(element.name);
+          }
+          binding(decl.name);
+          for (const name of names) if (['dynamic', 'dynamicParams', 'revalidate', 'fetchCache', 'runtime', 'preferredRegion', 'maxDuration'].includes(name)) {
+            unresolvedFields.push({ field: name, expression: decl.getText(sourceFile), reason: 'Segment config needs a local named literal initializer; destructured or uninitialized exports are unresolved.' });
+          }
+          continue;
+        }
         const name = decl.name.text;
-        const init = decl.initializer;
+        const init = unwrapExpression(decl.initializer);
+        const configNames = ['dynamic', 'dynamicParams', 'revalidate', 'fetchCache', 'runtime', 'preferredRegion', 'maxDuration'];
+        if (configNames.includes(name)) {
+          const literal = ['dynamic', 'fetchCache', 'runtime'].includes(name) ? ts.isStringLiteral(init)
+            : name === 'dynamicParams' ? [ts.SyntaxKind.TrueKeyword, ts.SyntaxKind.FalseKeyword].includes(init.kind)
+            : name === 'preferredRegion' ? ts.isStringLiteral(init) || (ts.isArrayLiteralExpression(init) && init.elements.every(ts.isStringLiteral))
+            : ts.isNumericLiteral(init) || (name === 'revalidate' && init.kind === ts.SyntaxKind.FalseKeyword);
+          if (!literal) unresolvedFields.push({ field: name, expression: decl.initializer.getText(sourceFile), reason: 'Segment config requires a supported literal; computed values are not evaluated.' });
+        }
 
         if (name === 'generateMetadata') hasGenerateMetadata = true;
         if (name === 'generateStaticParams') hasGenerateStaticParams = true;
@@ -326,7 +393,7 @@ export function extractNextSegmentConfig(content: string): NextSegmentConfigCont
         } else if (name === 'preferredRegion') {
           if (ts.isStringLiteral(init)) {
             preferredRegion = init.text;
-          } else if (ts.isArrayLiteralExpression(init)) {
+          } else if (ts.isArrayLiteralExpression(init) && init.elements.every(ts.isStringLiteral)) {
             preferredRegion = init.elements
               .filter(ts.isStringLiteral)
               .map((el) => el.text);
@@ -347,7 +414,7 @@ export function extractNextSegmentConfig(content: string): NextSegmentConfigCont
     preferredRegion !== undefined ||
     maxDuration !== undefined ||
     hasGenerateMetadata ||
-    hasGenerateStaticParams;
+    hasGenerateStaticParams || unresolvedFields.length > 0;
 
   if (!hasAny) return undefined;
 
@@ -361,6 +428,7 @@ export function extractNextSegmentConfig(content: string): NextSegmentConfigCont
     ...(maxDuration !== undefined ? { maxDuration } : {}),
     ...(hasGenerateMetadata ? { hasGenerateMetadata } : {}),
     ...(hasGenerateStaticParams ? { hasGenerateStaticParams } : {}),
+    ...(unresolvedFields.length ? { unresolvedFields } : {}),
   };
 }
 
@@ -460,18 +528,23 @@ async function scanNextAppRouter(baseDir: string): Promise<RouteInfo[]> {
       // Ignore read errors
     }
 
+    const layouts = getLayoutChain(fileDir);
+    const effective = ['page', 'layout', 'api'].includes(routeType)
+      ? await deriveNextEffectiveConfig(routeType === 'api' ? [file] : [...layouts, file], extractNextSegmentConfig)
+      : undefined;
     routes.push({
       path: normalizedPath,
       filePath: normalize(file),
       type: routeType,
       framework: 'next-app',
       params: extractRouteParams(normalizedPath),
-      layouts: getLayoutChain(fileDir),
+      layouts,
       ...(handlers ? { handlers } : {}),
       ...(routeGroups.length > 0 ? { routeGroups } : {}),
       ...(parallelSlot ? { parallelSlot } : {}),
       ...(intercepting ? { intercepting } : {}),
       ...(segmentConfig ? { nextSegmentConfig: segmentConfig } : {}),
+      ...(effective ? { nextEffectiveSegmentConfig: effective } : {}),
     });
   }
 
@@ -483,93 +556,53 @@ async function scanNextAppRouter(baseDir: string): Promise<RouteInfo[]> {
  */
 export function extractNuxtPageMeta(content: string): NuxtPageMetaContract | undefined {
   if (!content.includes('definePageMeta')) return undefined;
-
-  let scriptCode = content;
-  if (content.includes('<script')) {
-    try {
-      const parsed = parseSfc(content);
-      scriptCode = parsed.scriptSetup?.content || parsed.script?.content || content;
-    } catch {
-      scriptCode = content;
-    }
-  }
-
-  const sourceFile = ts.createSourceFile('page.ts', scriptCode, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-
-  let metaObjNode: ts.ObjectLiteralExpression | undefined;
-
-  function findMeta(node: ts.Node) {
-    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'definePageMeta') {
-      const arg = node.arguments[0];
-      if (arg && ts.isObjectLiteralExpression(arg)) {
-        metaObjNode = arg;
-        return;
+  const script = content.includes('<script') ? parseSfc(content).scriptSetup?.content : content;
+  if (!script) return undefined;
+  const sf = ts.createSourceFile('page.ts', script, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const calls = sf.statements.filter(ts.isExpressionStatement).map(stmt => unwrapExpression(stmt.expression))
+    .filter((expr): expr is ts.CallExpression => ts.isCallExpression(expr) && ts.isIdentifier(expr.expression) && expr.expression.text === 'definePageMeta');
+  if (!calls.length) return undefined;
+  const result: NuxtPageMetaContract = { customMetaKeys: [] };
+  const unresolved: NonNullable<NuxtPageMetaContract['unresolvedFields']> = [];
+  const unknown = (field: string, node: ts.Node, reason: string) => unresolved.push({ field, expression: node.getText(sf), reason });
+  if (calls.length !== 1) {
+    unknown('*', sf, 'Multiple definePageMeta calls cannot establish a single metadata object.');
+  } else {
+    const argument = calls[0].arguments[0];
+    const object = argument && unwrapExpression(argument);
+    if (!object || !ts.isObjectLiteralExpression(object)) unknown('*', calls[0], 'Metadata argument is not a local object literal.');
+    else for (const prop of object.properties) {
+      if (ts.isSpreadAssignment(prop)) {
+        // A later spread can override any field already observed.
+        for (const field of ['layout', 'middleware', 'alias', 'keepalive', 'pageTransition'] as const) delete result[field];
+        unknown('*', prop, 'Spread metadata keys and overrides are unresolved.');
+        continue;
       }
-    }
-    if (!metaObjNode) {
-      ts.forEachChild(node, findMeta);
-    }
-  }
-
-  findMeta(sourceFile);
-  if (!metaObjNode) return undefined;
-
-  const customMetaKeys: string[] = [];
-  let layout: string | false | undefined = undefined;
-  let middleware: string[] | undefined = undefined;
-  let alias: string[] | undefined = undefined;
-  let keepalive: boolean | undefined = undefined;
-  let pageTransition: boolean | undefined = undefined;
-
-  for (const prop of metaObjNode.properties) {
-    if (!ts.isPropertyAssignment(prop) && !ts.isShorthandPropertyAssignment(prop)) continue;
-    const name = prop.name.getText(sourceFile);
-    if (!customMetaKeys.includes(name)) {
-      customMetaKeys.push(name);
-    }
-
-    if (ts.isPropertyAssignment(prop)) {
-      const init = prop.initializer;
-      if (name === 'layout') {
-        if (init.kind === ts.SyntaxKind.FalseKeyword) {
-          layout = false;
-        } else if (ts.isStringLiteral(init)) {
-          layout = init.text;
-        }
-      } else if (name === 'middleware') {
-        if (ts.isStringLiteral(init)) {
-          middleware = [init.text];
-        } else if (ts.isArrayLiteralExpression(init)) {
-          middleware = init.elements
-            .filter((el): el is ts.StringLiteral => ts.isStringLiteral(el))
-            .map((el) => el.text);
-        }
-      } else if (name === 'alias') {
-        if (ts.isStringLiteral(init)) {
-          alias = [init.text];
-        } else if (ts.isArrayLiteralExpression(init)) {
-          alias = init.elements
-            .filter((el): el is ts.StringLiteral => ts.isStringLiteral(el))
-            .map((el) => el.text);
-        }
-      } else if (name === 'keepalive') {
-        if (init.kind === ts.SyntaxKind.TrueKeyword) keepalive = true;
-        else if (init.kind === ts.SyntaxKind.FalseKeyword) keepalive = false;
-      } else if (name === 'pageTransition') {
-        if (init.kind === ts.SyntaxKind.TrueKeyword) pageTransition = true;
-        else if (init.kind === ts.SyntaxKind.FalseKeyword) pageTransition = false;
+      const name = prop.name && staticPropertyName(prop.name);
+      if (name === undefined) {
+        for (const field of ['layout', 'middleware', 'alias', 'keepalive', 'pageTransition'] as const) delete result[field];
+        unknown('*', prop, 'Computed metadata key may override any known field.');
+        continue;
       }
+      if (!result.customMetaKeys.includes(name)) result.customMetaKeys.push(name);
+      if (!['layout', 'middleware', 'alias', 'keepalive', 'pageTransition'].includes(name)) continue;
+      delete result[name as 'layout'];
+      if (!ts.isPropertyAssignment(prop)) { unknown(name, prop, 'Shorthand or method metadata requires value resolution.'); continue; }
+      const init = unwrapExpression(prop.initializer);
+      if (name === 'layout' && (ts.isStringLiteral(init) || init.kind === ts.SyntaxKind.FalseKeyword)) {
+        result.layout = ts.isStringLiteral(init) ? init.text : false;
+      } else if (name === 'middleware' || name === 'alias') {
+        if (ts.isStringLiteral(init)) result[name] = [init.text];
+        else if (ts.isArrayLiteralExpression(init) && init.elements.every(el => ts.isStringLiteral(unwrapExpression(el as ts.Expression)))) {
+          result[name] = init.elements.map(el => (unwrapExpression(el as ts.Expression) as ts.StringLiteral).text);
+        } else unknown(name, init, 'Metadata list contains dynamic values or inline guards; a complete string list is unavailable.');
+      } else if ((name === 'keepalive' || name === 'pageTransition') && [ts.SyntaxKind.TrueKeyword, ts.SyntaxKind.FalseKeyword].includes(init.kind)) {
+        result[name] = init.kind === ts.SyntaxKind.TrueKeyword;
+      } else unknown(name, init, 'Metadata value is dynamic or outside the supported literal shape.');
     }
   }
-
-  return {
-    ...(layout !== undefined ? { layout } : {}),
-    ...(middleware ? { middleware } : {}),
-    ...(alias ? { alias } : {}),
-    ...(keepalive !== undefined ? { keepalive } : {}),
-    ...(pageTransition !== undefined ? { pageTransition } : {}),
-    customMetaKeys,
-  };
+  if (unresolved.length) result.unresolvedFields = unresolved;
+  return result;
 }
 
 /**
@@ -609,10 +642,10 @@ async function scanNuxtPages(baseDir: string, projectRoot: string): Promise<Rout
       const content = await readSourceFile(file);
       pageMeta = extractNuxtPageMeta(content);
 
-      if (pageMeta?.layout === false || /layout:\s*false\b/.test(content)) {
+      if (pageMeta?.layout === false) {
         explicitlyDisabledLayout = true;
       } else {
-        const layoutName = typeof pageMeta?.layout === 'string' ? pageMeta.layout : content.match(/layout:\s*['"]([^'"]+)['"]/)?.[1];
+        const layoutName = typeof pageMeta?.layout === 'string' ? pageMeta.layout : undefined;
         if (layoutName) {
           const customCandidates = [
             join(projectRoot, 'app', 'layouts', `${layoutName}.vue`),
@@ -630,7 +663,7 @@ async function scanNuxtPages(baseDir: string, projectRoot: string): Promise<Rout
       // ignore
     }
 
-    if (!pageLayouts && !explicitlyDisabledLayout && hasDefaultLayout && defaultLayout) {
+    if (!pageLayouts && !explicitlyDisabledLayout && !pageMeta?.unresolvedFields?.some(item => item.field === 'layout' || item.field === '*') && hasDefaultLayout && defaultLayout) {
       pageLayouts = [normalize(defaultLayout)];
     }
 
@@ -914,9 +947,144 @@ async function scanInertiaPages(baseDir: string): Promise<RouteInfo[]> {
 }
 
 /**
- * Scans a Vue Router SPA directory (e.g. src/views or views) and builds its route manifest.
+ * Scans a Vue Router configuration file (e.g. src/router/index.ts) using TypeScript AST.
  */
-async function scanVueRouterPages(baseDir: string): Promise<RouteInfo[]> {
+async function scanVueRouterFromConfig(routerConfigFile: string): Promise<RouteInfo[] | null> {
+  let content: string;
+  try {
+    content = await readSourceFile(routerConfigFile);
+  } catch {
+    return null;
+  }
+  let sf: ts.SourceFile;
+  try {
+    sf = ts.createSourceFile(routerConfigFile, content, ts.ScriptTarget.Latest, true);
+  } catch {
+    return null;
+  }
+  const routes: RouteInfo[] = [];
+  const dir = dirname(routerConfigFile);
+
+  const importMap = new Map<string, string>();
+  for (const statement of sf.statements) {
+    if (ts.isImportDeclaration(statement) && statement.importClause && ts.isStringLiteral(statement.moduleSpecifier)) {
+      const modulePath = statement.moduleSpecifier.text;
+      if (statement.importClause.name) {
+        importMap.set(statement.importClause.name.text, modulePath);
+      }
+      if (statement.importClause.namedBindings && ts.isNamedImports(statement.importClause.namedBindings)) {
+        for (const el of statement.importClause.namedBindings.elements) {
+          importMap.set(el.name.text, modulePath);
+        }
+      }
+    }
+  }
+
+  function resolveComponentPath(specifier: string): string {
+    const candidate = resolve(dir, specifier);
+    for (const ext of ['', '.vue', '.ts', '.js', '.tsx', '.jsx']) {
+      const p = candidate + ext;
+      if (existsSync(p)) return normalize(p);
+    }
+    return normalize(candidate);
+  }
+
+  function parseRouteNode(node: ts.ObjectLiteralExpression, parentPath = ''): void {
+    let pathVal: string | undefined;
+    let compVal: string | undefined;
+    let redirectVal: string | undefined;
+    let childrenNode: ts.ArrayLiteralExpression | undefined;
+    let isRouteObj = false;
+
+    for (const prop of node.properties) {
+      if (!ts.isPropertyAssignment(prop)) continue;
+      const propName = prop.name.getText(sf).replace(/['"]/g, '');
+      if (propName === 'path' && ts.isStringLiteral(prop.initializer)) {
+        pathVal = prop.initializer.text;
+        isRouteObj = true;
+      } else if (propName === 'redirect' && ts.isStringLiteral(prop.initializer)) {
+        redirectVal = prop.initializer.text;
+        isRouteObj = true;
+      } else if (propName === 'component') {
+        isRouteObj = true;
+        if (ts.isIdentifier(prop.initializer)) {
+          const mod = importMap.get(prop.initializer.text);
+          if (mod) compVal = mod;
+        } else {
+          prop.initializer.forEachChild((child) => {
+            if (ts.isCallExpression(child)) {
+              if (child.expression.kind === ts.SyntaxKind.ImportKeyword && child.arguments.length > 0) {
+                const arg = child.arguments[0];
+                if (ts.isStringLiteral(arg)) {
+                  compVal = arg.text;
+                }
+              }
+            }
+          });
+        }
+      } else if (propName === 'children' && ts.isArrayLiteralExpression(prop.initializer)) {
+        childrenNode = prop.initializer;
+      }
+    }
+
+    if (isRouteObj && pathVal !== undefined) {
+      const fullPath = parentPath
+        ? (parentPath.endsWith('/') ? parentPath : parentPath + '/') + (pathVal.startsWith('/') ? pathVal.slice(1) : pathVal)
+        : pathVal;
+      const resolvedFile = compVal ? resolveComponentPath(compVal) : normalize(routerConfigFile);
+
+      routes.push({
+        path: fullPath,
+        filePath: resolvedFile,
+        type: 'page',
+        framework: 'vue-router',
+        params: extractRouteParams(fullPath),
+        ...(redirectVal ? { redirect: redirectVal } : {}),
+      });
+
+      if (childrenNode) {
+        for (const childEl of childrenNode.elements) {
+          if (ts.isObjectLiteralExpression(childEl)) {
+            parseRouteNode(childEl, fullPath);
+          }
+        }
+      }
+    }
+  }
+
+  function visit(node: ts.Node): void {
+    if (ts.isObjectLiteralExpression(node)) {
+      parseRouteNode(node);
+    }
+    node.forEachChild(visit);
+  }
+
+  visit(sf);
+  return routes.length > 0 ? routes : null;
+}
+
+/**
+ * Scans a Vue Router SPA directory or explicit router config file and builds its route manifest.
+ */
+async function scanVueRouterPages(baseDir: string, projectRoot?: string): Promise<RouteInfo[]> {
+  const normRoot = projectRoot ? resolve(projectRoot) : dirname(baseDir);
+  const routerConfigFiles = [
+    join(normRoot, 'src', 'router', 'index.ts'),
+    join(normRoot, 'src', 'router', 'index.js'),
+    join(normRoot, 'src', 'router.ts'),
+    join(normRoot, 'src', 'router.js'),
+    join(normRoot, 'router', 'index.ts'),
+    join(normRoot, 'router', 'index.js'),
+  ];
+  for (const cfg of routerConfigFiles) {
+    if (existsSync(cfg)) {
+      const fromConfig = await scanVueRouterFromConfig(cfg);
+      if (fromConfig && fromConfig.length > 0) {
+        return fromConfig;
+      }
+    }
+  }
+
   const files = await collectFiles(baseDir);
   const routes: RouteInfo[] = [];
 
@@ -942,6 +1110,9 @@ async function scanVueRouterPages(baseDir: string): Promise<RouteInfo[]> {
     for (let i = 0; i < segments.length; i++) {
       let seg = segments[i];
       if (seg.endsWith('View') && seg.length > 4) {
+        seg = seg.slice(0, -4);
+      }
+      if (seg.endsWith('Page') && seg.length > 4) {
         seg = seg.slice(0, -4);
       }
       if (seg === 'Index' || seg.toLowerCase() === 'index') {
@@ -985,13 +1156,14 @@ export async function scanRoutes(options: ScanRoutesOptions): Promise<RouteManif
   const startTime = performance.now();
   const targetPath = resolve(options.targetPath);
   const effectiveScanTarget = targetPath;
+  const projectContext = resolveProjectOwnership(join(targetPath, '__strata_route_probe__.ts'));
   const detection = await detectRouteFramework(effectiveScanTarget);
   const framework = options.frameworkHint || detection.framework;
   let baseDir = detection.baseDir;
 
   if (options.frameworkHint && options.frameworkHint !== detection.framework) {
     const hintCandidates: Record<string, string[]> = {
-      'next-app': [join(effectiveScanTarget, 'src', 'app'), join(effectiveScanTarget, 'app')],
+      'next-app': [join(effectiveScanTarget, 'app'), join(effectiveScanTarget, 'src', 'app')],
       'next-pages': [join(effectiveScanTarget, 'pages'), join(effectiveScanTarget, 'src', 'pages')],
       'nuxt': [
         join(effectiveScanTarget, 'app', 'pages'),
@@ -1024,13 +1196,17 @@ export async function scanRoutes(options: ScanRoutesOptions): Promise<RouteManif
   }
 
   let routes: RouteInfo[] = [];
+  const unresolvedOwnedFramework = framework === 'unknown' && Boolean(projectContext.ownerRoot);
+  if (unresolvedOwnedFramework) projectContext.diagnostics.push({ code: 'ROUTE_FRAMEWORK_UNVERIFIED',
+    reason: 'No unambiguous supported router is established for this owner. Select a specific application package or provide an explicit parser framework hint; empty routes do not prove absence.' });
 
-  switch (framework) {
+  if (!unresolvedOwnedFramework) switch (framework) {
     case 'next-app':
       routes = await scanNextAppRouter(baseDir);
       break;
     case 'nuxt': {
-      routes = await scanNuxtPages(baseDir, effectiveScanTarget);
+      routes = baseDir !== effectiveScanTarget || basename(baseDir) === 'pages'
+        ? await scanNuxtPages(baseDir, effectiveScanTarget) : [];
       const nitroRoutes = await scanNuxtNitroRoutes(effectiveScanTarget);
       routes.push(...nitroRoutes);
       break;
@@ -1042,7 +1218,7 @@ export async function scanRoutes(options: ScanRoutesOptions): Promise<RouteManif
       routes = await scanInertiaPages(baseDir);
       break;
     case 'vue-router':
-      routes = await scanVueRouterPages(baseDir);
+      routes = await scanVueRouterPages(baseDir, effectiveScanTarget);
       break;
     case 'sveltekit':
       routes = await scanSvelteKitRoutes(baseDir);
@@ -1092,6 +1268,13 @@ export async function scanRoutes(options: ScanRoutesOptions): Promise<RouteManif
     }
   }
 
+  if (projectContext.ownerRoot) {
+    const before = routes.length;
+    routes = routes.filter(route => resolveProjectOwnership(route.filePath).ownerRoot === projectContext.ownerRoot);
+    if (routes.length !== before) projectContext.diagnostics.push({ code: 'NESTED_ROUTE_OWNERS_EXCLUDED',
+      reason: `${before - routes.length} route candidates belong to another package/config owner; scan those applications separately.` });
+  }
+
   if (options.excludeDirs?.length) {
     const allowed = new Set(await collectFiles(targetPath, { excludeDirs: options.excludeDirs }));
     routes = routes.filter(r => allowed.has(r.filePath));
@@ -1120,6 +1303,7 @@ export async function scanRoutes(options: ScanRoutesOptions): Promise<RouteManif
   const durationMs = Math.round(performance.now() - startTime);
 
   return {
+    projectContext,
     framework,
     baseDirectory: normalize(baseDir),
     totalRoutes: routes.length,
@@ -1146,6 +1330,10 @@ export function formatRoutesAsText(result: RouteManifestResult): string {
     `Base Directory: ${result.baseDirectory}`,
     `Total Routes: ${result.totalRoutes}`,
   ];
+  if (result.projectContext) {
+    lines.push(`Project owner: ${result.projectContext.ownerRoot ?? 'unverified'} (${result.projectContext.status})`);
+    for (const issue of result.projectContext.diagnostics) lines.push(`Ownership partial (${issue.code}): ${issue.reason}`);
+  }
 
   if (result.routes.length === 0) {
     lines.push('\n(No routes found matching query)');
@@ -1172,6 +1360,11 @@ export function formatRoutesAsText(result: RouteManifestResult): string {
     lines.push(`    File: ${r.filePath}`);
     if (r.layouts && r.layouts.length > 0) {
       lines.push(`    Layouts: ${r.layouts.join(', ')}`);
+    }
+    if (r.nextEffectiveSegmentConfig) {
+      const effective = r.nextEffectiveSegmentConfig;
+      lines.push(`    Observed segment config: ${JSON.stringify(effective.config)} (freshness: ${effective.freshness}; runtime behavior unverified)`);
+      for (const issue of effective.unresolvedFields) lines.push(`    Partial ${issue.field}: ${issue.reason}`);
     }
   }
 
@@ -1224,6 +1417,13 @@ function routePatternToRegex(pattern: string): { regex: RegExp; paramNames: stri
     if (nuxt2Dynamic) {
       paramNames.push(nuxt2Dynamic[1]);
       return '([^/]+)';
+    }
+
+    // 5. Vue router colon param :param or :pathMatch(.*)*
+    const colonDynamic = seg.match(/^:([A-Za-z0-9_$]+)(\(.*?\))?(\*|\+)?$/);
+    if (colonDynamic) {
+      paramNames.push(colonDynamic[1]);
+      return colonDynamic[3] === '*' ? '(.*)' : '([^/]+)';
     }
 
     return seg.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
