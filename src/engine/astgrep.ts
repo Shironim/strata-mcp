@@ -271,7 +271,14 @@ export function isBinaryExecutionError(err: unknown): boolean {
 export function isPatternParseError(err: unknown): boolean {
   if (isBinaryExecutionError(err)) return false;
   const message = err instanceof Error ? err.message : String(err);
-  return message.includes('Cannot parse query as a valid pattern') || message.includes('Multiple AST nodes are detected');
+  return (
+    message.includes('Cannot parse query as a valid pattern') ||
+    message.includes('Multiple AST nodes are detected') ||
+    message.includes('Pattern contains an ERROR node') ||
+    message.includes('Invalid AST pattern') ||
+    message.includes('SyntaxError') ||
+    message.includes('parsing error')
+  );
 }
 
 /**
@@ -416,6 +423,14 @@ export async function executeAstGrep(options: AstGrepQueryOptions): Promise<RawM
       proc.on('close', (code) => {
         if (earlyStopped && matches.length >= maxResults) {
           resolve(matches.slice(0, maxResults));
+          return;
+        }
+
+        const detail = stderr.trim();
+
+        // Check if ast-grep reported a pattern syntax/parsing error
+        if (options.pattern && (detail.includes('Pattern contains an ERROR node') || detail.includes('Cannot parse query as a valid pattern'))) {
+          reject(new Error(`Invalid AST pattern: Pattern contains an ERROR node and cannot be parsed as valid AST syntax (${options.pattern}).`));
           return;
         }
 

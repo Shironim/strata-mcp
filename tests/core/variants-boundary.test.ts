@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'bun:test';
+import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { join } from 'node:path';
 import {
   extractComponentContract,
   extractComponentVariants,
@@ -88,7 +90,7 @@ export default function ServerPage() {
 }
       `;
 
-      const result = extractRenderBoundary('app/dashboard/page.tsx', rscCode, 'react');
+      const result = extractRenderBoundary('app/dashboard/page.tsx', rscCode, 'next');
       expect(result.boundary).toBe('server-component');
       expect(result.violations).toBeDefined();
       expect(result.violations?.some((v) => v.code === 'RSC_CLIENT_HOOK_IN_SERVER_COMPONENT')).toBe(
@@ -103,7 +105,7 @@ export default function ServerPage() {
 }
       `;
 
-      const result = extractRenderBoundary('app/products/page.tsx', rscCode, 'react');
+      const result = extractRenderBoundary('app/products/page.tsx', rscCode, 'next');
       expect(result.boundary).toBe('server-component');
       expect(result.violations).toBeDefined();
       expect(
@@ -148,11 +150,16 @@ import ProductModal from '../components/ProductModal.vue';
 
   describe('Formatted Text Output with Variants and Violations', async () => {
     it('formats variants and boundary warnings cleanly', async () => {
+      const root = await mkdtemp('/tmp/strata-variants-next-');
+      await mkdir(join(root,'app/checkout'),{recursive:true});
+      await writeFile(join(root,'package.json'),'{"dependencies":{"next":"15.0.0"}}');
+      try {
       const contract = await extractComponentContract(
-        'app/checkout/page.tsx',
+        join(root,'app/checkout/page.tsx'),
         `
 import { useState } from 'react';
 import { cva } from 'class-variance-authority';
+import Link from 'next/link';
 
 const badgeVariants = cva('badge', {
   variants: {
@@ -173,6 +180,7 @@ export default function Page() {
       expect(text).toContain('status: ["success", "error"] (default: "success")');
       expect(text).toContain('Boundary Warnings / Violations:');
       expect(text).toContain('RSC_CLIENT_HOOK_IN_SERVER_COMPONENT');
+      } finally { await rm(root,{recursive:true,force:true}); }
     });
   });
 });

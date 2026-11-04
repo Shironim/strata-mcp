@@ -2,6 +2,36 @@ import { parse } from 'svelte/compiler';
 import { getSourcePosition } from '../utils/source-position';
 import type { SfcBlock, SvelteDescriptor } from '../types';
 
+export interface SvelteEventDirective {
+  name: string;
+  start: number;
+  end: number;
+  modifiers: string[];
+  forwarding: boolean;
+  component: boolean;
+}
+
+/** Strict compiler AST only; malformed input must not revive textual event matches. */
+export function svelteEventDirectives(content: string, filename: string): SvelteEventDirective[] {
+  const bom = content.charCodeAt(0) === 0xFEFF ? 1 : 0;
+  const ast = parse(content.slice(bom), { modern: true, filename });
+  const result: SvelteEventDirective[] = [];
+  function visit(node: any): void {
+    if (!node || typeof node !== 'object') return;
+    if (Array.isArray(node)) { for (const child of node) visit(child); return; }
+    for (const attr of node.attributes ?? []) {
+      if (attr.type === 'OnDirective') result.push({ name: attr.name, start: attr.start + bom, end: attr.end + bom,
+        modifiers: attr.modifiers ?? [], forwarding: !attr.expression, component: node.type === 'Component' });
+    }
+    // Expressions and script bodies cannot contain Svelte template directives.
+    for (const [key, child] of Object.entries(node)) {
+      if (!['attributes', 'expression', 'metadata', 'loc', 'parent'].includes(key)) visit(child);
+    }
+  }
+  visit(ast.fragment);
+  return result;
+}
+
 function extractAttributeMap(attributes: any[] | undefined): Record<string, string | true> {
   const result: Record<string, string | true> = {};
   if (!attributes) return result;

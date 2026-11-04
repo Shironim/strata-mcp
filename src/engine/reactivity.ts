@@ -1,8 +1,9 @@
 import { readSourceFile } from './source-file';
 import { findProjectRoot } from './path-resolver';
 import { getProjectEcosystem } from './framework-detector';
-import { existsSync, promises as fs } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { promises as fs } from 'node:fs';
+import { resolve } from 'node:path';
+import { discoverNuxtAutoImports } from './nuxt-auto-imports';
 import {
   parse as parseDom,
   NodeTypes,
@@ -240,27 +241,10 @@ export async function auditEventHandlers(
 
   const projectRoot = findProjectRoot(targetFile);
   const eco = getProjectEcosystem(projectRoot);
-  const isNuxt =
-    eco.hasNuxt ||
-    targetFile.includes('/pages/') ||
-    targetFile.includes('/app/') ||
-    fileContent.includes('definePageMeta') ||
-    fileContent.includes('useFetch') ||
-    fileContent.includes('useAsyncData');
+  const autoImports = eco.hasNuxt ? await discoverNuxtAutoImports(projectRoot) : null;
 
   function isNuxtCandidate(ident: string): boolean {
-    if (!isNuxt) return false;
-    if (NUXT_AUTO_IMPORTS.has(ident)) return true;
-    if (/^use[A-Z][A-Za-z0-9_$]*$/.test(ident)) return true;
-    const candidates = [
-      join(projectRoot, 'composables', `${ident}.ts`),
-      join(projectRoot, 'composables', `${ident}.js`),
-      join(projectRoot, 'utils', `${ident}.ts`),
-      join(projectRoot, 'utils', `${ident}.js`),
-      join(projectRoot, 'app', 'composables', `${ident}.ts`),
-      join(projectRoot, 'app', 'utils', `${ident}.ts`),
-    ];
-    return candidates.some((c) => existsSync(c));
+    return !!autoImports?.enabled && (NUXT_AUTO_IMPORTS.has(ident) || autoImports.names.has(ident));
   }
 
   function walkTemplate(node: RootNode | TemplateChildNode): void {
@@ -432,6 +416,8 @@ export async function auditEventHandlers(
     brokenHandlers,
     inlineExpressions,
     ...(candidateHandlers.length > 0 ? { candidateHandlers } : {}),
+    ...(autoImports?.unresolved.length ? { autoImportUnresolved: autoImports.unresolved } : {}),
+    ...(autoImports?.dependencies.length ? { autoImportDependencies: autoImports.dependencies } : {}),
     deadScriptHandlers,
   };
 }
@@ -443,6 +429,10 @@ export function formatEventHandlerAuditAsText(result: EventHandlerAuditResult): 
   const lines: string[] = [];
   lines.push(`### Event Handler Audit: \`${result.filePath}\``);
   lines.push(`**Total Event Bindings:** ${result.totalEventBindings}\n`);
+  if (result.autoImportUnresolved?.length) {
+    lines.push('Nuxt auto-import discovery is partial; unresolved handlers do not prove application build failure.');
+    for (const reason of result.autoImportUnresolved) lines.push(`- ${reason}`);
+  }
 
   if (result.brokenHandlers.length > 0) {
     lines.push(`⚠️ **BROKEN EVENT HANDLERS (${result.brokenHandlers.length}):**`);

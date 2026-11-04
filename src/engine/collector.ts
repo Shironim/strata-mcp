@@ -121,6 +121,17 @@ export interface CollectOptions {
 export const INDEX_CONFIG_FILES = new Set(['package.json', 'tsconfig.json', 'jsconfig.json', '.gitignore', '.strataignore', 'nuxt.config.mjs', 'next.config.mjs', 'astro.config.mjs']);
 
 /**
+ * Returns true if the file is a project configuration file affecting build,
+ * path aliases (e.g. tsconfig.*.json, jsconfig.*.json), or framework setup.
+ */
+export function isConfigFile(fileName: string): boolean {
+  if (INDEX_CONFIG_FILES.has(fileName)) return true;
+  if (/^(tsconfig|jsconfig)(\..+)?\.json$/i.test(fileName)) return true;
+  if (/^(nuxt|next|astro|svelte|vite)\.config\.(ts|js|mjs|cjs|mts)$/i.test(fileName)) return true;
+  return false;
+}
+
+/**
  * Loads ignore rules from .strataignore or .gitignore in the target directory.
  */
 async function loadIgnoreRules(dirPath: string, failOnReadError = false): Promise<string[]> {
@@ -252,7 +263,7 @@ export async function* iterateFiles(
       const relPath = relative(dirPath, fullPath).replace(/\\/g, '/');
 
       if (isExcluded(entry.name, relPath)) continue;
-      if (entry.isFile() && options?.includeConfigFiles && INDEX_CONFIG_FILES.has(entry.name)) {
+      if (entry.isFile() && options?.includeConfigFiles && isConfigFile(entry.name)) {
         yield fullPath;
         continue;
       }

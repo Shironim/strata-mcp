@@ -1,11 +1,15 @@
 import { basename, extname } from 'node:path';
 import ts from 'typescript';
+import { unwrapExpression, staticPropertyName } from './ts-syntax';
+import { resolveLocalPropType } from './local-prop-types';
 import { parseAstro, parseAstroAttributes } from '../astro-sfc';
+import { astroOpeningTags } from '../astro-template';
 import type {
   AstroIslandContract,
   ComponentContract,
   ComponentPropContract,
   SourceLocation,
+  UnresolvedTypeInfo,
 } from '../../types';
 import { getSourcePosition } from '../source-file';
 
@@ -24,57 +28,24 @@ export async function extractAstroContract(filePath: string, content: string): P
   const propsMap = new Map<string, ComponentPropContract>();
   const slots: string[] = [];
   const islands: AstroIslandContract[] = [];
+  const unresolvedTypes: UnresolvedTypeInfo[] = [];
 
   // 1. Parse frontmatter TypeScript AST
   if (descriptor.frontmatter) {
     const fmContent = descriptor.frontmatter.content;
     const sf = ts.createSourceFile('frontmatter.ts', fmContent, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
 
-    // Collect interface and type alias declarations for Props
-    for (const stmt of sf.statements) {
-      if (ts.isInterfaceDeclaration(stmt) && /Props$/i.test(stmt.name.text)) {
-        for (const member of stmt.members) {
-          if (ts.isPropertySignature(member) && member.name) {
-            const name = member.name.getText(sf).trim();
-            const required = !member.questionToken;
-            const type = member.type ? member.type.getText(sf).trim() : 'any';
-            propsMap.set(name, { name, type, required });
-          }
-        }
-      } else if (ts.isTypeAliasDeclaration(stmt) && /Props$/i.test(stmt.name.text)) {
-        if (ts.isTypeLiteralNode(stmt.type)) {
-          for (const member of stmt.type.members) {
-            if (ts.isPropertySignature(member) && member.name) {
-              const name = member.name.getText(sf).trim();
-              const required = !member.questionToken;
-              const type = member.type ? member.type.getText(sf).trim() : 'any';
-              propsMap.set(name, { name, type, required });
-            }
-          }
-        } else if (ts.isIntersectionTypeNode(stmt.type)) {
-          for (const typeElem of stmt.type.types) {
-            if (ts.isTypeLiteralNode(typeElem)) {
-              for (const member of typeElem.members) {
-                if (ts.isPropertySignature(member) && member.name) {
-                  const name = member.name.getText(sf).trim();
-                  const required = !member.questionToken;
-                  const type = member.type ? member.type.getText(sf).trim() : 'any';
-                  propsMap.set(name, { name, type, required });
-                }
-              }
-            }
-          }
-        }
-      }
+    const declaredTypes = new Map<string, ts.InterfaceDeclaration | ts.TypeAliasDeclaration>();
+    for (const statement of sf.statements) {
+      if (ts.isInterfaceDeclaration(statement) || ts.isTypeAliasDeclaration(statement)) declaredTypes.set(statement.name.text, statement);
     }
+    const propsDeclaration = declaredTypes.get('Props');
+    if (propsDeclaration) resolveLocalPropType(propsDeclaration, sf, declaredTypes, new Map(), propsMap, unresolvedTypes);
 
     // Inspect statements for destructuring `Astro.props`
     const visit = (node: ts.Node) => {
       if (ts.isVariableDeclaration(node) && node.initializer) {
-        let initExpr = node.initializer;
-        while (ts.isAsExpression(initExpr) || ts.isTypeAssertionExpression(initExpr) || ts.isParenthesizedExpression(initExpr)) {
-          initExpr = initExpr.expression;
-        }
+        const initExpr = unwrapExpression(node.initializer);
 
         const isAstroProps = ts.isPropertyAccessExpression(initExpr) &&
           ts.isIdentifier(initExpr.expression) && initExpr.expression.text === 'Astro' &&
@@ -82,10 +53,9 @@ export async function extractAstroContract(filePath: string, content: string): P
 
         if (isAstroProps && ts.isObjectBindingPattern(node.name)) {
           for (const elem of node.name.elements) {
-            if (ts.isBindingElement(elem) && ts.isIdentifier(elem.name)) {
-              const propName = (elem.propertyName && ts.isIdentifier(elem.propertyName))
-                ? elem.propertyName.text
-                : elem.name.text;
+            if (ts.isBindingElement(elem) && ts.isIdentifier(elem.name) && !elem.dotDotDotToken) {
+              const propName = elem.propertyName ? staticPropertyName(elem.propertyName) : elem.name.text;
+              if (propName === undefined) continue;
               const defaultValue = elem.initializer ? elem.initializer.getText(sf).trim() : undefined;
 
               if (propsMap.has(propName)) {
@@ -106,9 +76,11 @@ export async function extractAstroContract(filePath: string, content: string): P
           }
         }
       }
-      ts.forEachChild(node, visit);
+
     };
-    visit(sf);
+    for (const statement of sf.statements) if (ts.isVariableStatement(statement)) {
+      for (const declaration of statement.declarationList.declarations) visit(declaration);
+    }
   }
 
   // 2. Parse template for slots and islands
@@ -117,10 +89,9 @@ export async function extractAstroContract(filePath: string, content: string): P
     const tmplOffset = descriptor.template.loc.start.offset;
 
     // Slots: <slot /> or <slot name="header" />
-    const slotRegex = /<slot\b([^>]*)(\/?>)/g;
-    let slotMatch: RegExpExecArray | null;
-    while ((slotMatch = slotRegex.exec(tmplText)) !== null) {
-      const attrString = slotMatch[1];
+    const tags = astroOpeningTags(tmplText);
+    for (const tag of tags.filter(tag => tag.name === 'slot')) {
+      const attrString = tag.attributes;
       const nameMatch = attrString.match(/\bname=(?:"([^"]*)"|'([^']*)'|\{([^}]*)\}|([^\s>]+))/);
       const slotName = nameMatch ? (nameMatch[1] ?? nameMatch[2] ?? nameMatch[3] ?? nameMatch[4]) : 'default';
       if (!slots.includes(slotName)) {
@@ -129,19 +100,15 @@ export async function extractAstroContract(filePath: string, content: string): P
     }
 
     // Islands: <Comp ... client:... /> or <Comp ... client:...>...</Comp>
-    const islandRegex = /<([A-Z][A-Za-z0-9_.]*)\b([^>]*\bclient:(?:load|visible|idle|media|only)[^>]*)(\/?>|>)/g;
-    let islandMatch: RegExpExecArray | null;
-    while ((islandMatch = islandRegex.exec(tmplText)) !== null) {
-      const compName = islandMatch[1];
-      const attrString = islandMatch[2];
-      const startOffset = tmplOffset + islandMatch.index;
-      const endOffset = startOffset + islandMatch[0].length;
-
-      const directiveMatch = attrString.match(/\b(client:(?:load|visible|idle|media|only))(?:=(?:"([^"]*)"|'([^']*)'|\{([^}]*)\}|([^\s>]+)))?/);
-      const directiveName = directiveMatch ? directiveMatch[1] : 'client:load';
-      const directiveVal = directiveMatch ? (directiveMatch[2] ?? directiveMatch[3] ?? directiveMatch[4] ?? directiveMatch[5]) : undefined;
-
+    for (const tag of tags.filter(tag => /^[A-Z]/.test(tag.name))) {
+      const compName = tag.name;
+      const attrString = tag.attributes;
       const attrs = parseAstroAttributes(attrString);
+      const directiveName = Object.keys(attrs).find(name => /^client:(load|visible|idle|media|only)$/.test(name));
+      if (!directiveName) continue;
+      const directiveVal = attrs[directiveName] === true ? undefined : String(attrs[directiveName]);
+      const startOffset = tmplOffset + tag.start;
+      const endOffset = tmplOffset + tag.end;
       const props: Record<string, string> = {};
       for (const [k, v] of Object.entries(attrs)) {
         if (!k.startsWith('client:')) {
@@ -169,6 +136,7 @@ export async function extractAstroContract(filePath: string, content: string): P
     framework: 'astro',
     filePath,
     props: Array.from(propsMap.values()),
+    ...(unresolvedTypes.length ? { unresolvedTypes } : {}),
     emits: [],
     slots,
     islands: islands.length > 0 ? islands : undefined,

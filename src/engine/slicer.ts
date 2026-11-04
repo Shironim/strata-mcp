@@ -5,7 +5,7 @@ import { executeAstGrep } from './astgrep';
 import { createDocumentAdapter } from '../adapters/factory';
 import { remapPosition } from './remapper';
 import { getWorkspaceDatabase } from './database';
-import { findProjectRoot } from './path-resolver';
+import { canonicalizePath, findProjectRoot } from './path-resolver';
 import { escapeRegExp } from './patterns';
 import type { RawMatch, SliceSymbolOptions, SymbolKind, SymbolSliceResult } from '../types';
 
@@ -165,7 +165,7 @@ export function extractInternalCalls(codeSnippet: string, selfSymbol: string, ma
  * Precision symbol slicer: extracts the verbatim declaration body of a symbol with line numbers and callers.
  */
 export async function sliceSymbol(options: SliceSymbolOptions): Promise<SymbolSliceResult | null> {
-  const targetFile = resolve(options.path);
+  const targetFile = canonicalizePath(resolve(options.path));
   let fileContent: string;
   try {
     fileContent = await readSourceFile(targetFile);

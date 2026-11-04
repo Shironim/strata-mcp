@@ -237,6 +237,23 @@ export async function scanDynamicImportsAndGlobals(
         globMatchedFiles.add(normalize(resolvedPath));
       }
     }
+
+    // 5. Scan createApp(RootComp) or createSSRApp(RootComp)
+    const CREATE_APP_PATTERN = /(?:createApp|createSSRApp)\s*\(\s*([A-Za-z0-9_$]+)/g;
+    for (const match of content.matchAll(CREATE_APP_PATTERN)) {
+      const rootIdent = match[1];
+      const importRegex = new RegExp(
+        `import\\s+(?:${rootIdent}|\\{[^}]*\\b${rootIdent}\\b[^}]*\\})\\s+from\\s+['"]([^'"]+)['"]`
+      );
+      const importMatch = content.match(importRegex);
+      if (importMatch) {
+        const specifier = importMatch[1];
+        const resolvedPath = resolveSpecifier(specifier, file, aliasConfig, allFiles);
+        if (resolvedPath) {
+          globMatchedFiles.add(normalize(resolvedPath));
+        }
+      }
+    }
   }
 
   return {

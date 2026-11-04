@@ -105,15 +105,16 @@ describe('00 - Foundation: Multi-Framework & Canon Engine (Backend Standards)', 
       expect(solidRes.framework).toBe('solid');
       expect(solidRes.evidence.method).toBe('ast-import-signature');
 
-      // Next.js via 'use client'
-      const nextRes = detectFrameworkWithEvidence('/test/Button.tsx', "'use client';\nexport function Btn() {}");
+      // Next identity requires more than a React directive.
+      const nextRes = detectFrameworkWithEvidence('/test/Button.tsx', "'use client';\nimport Link from 'next/link'; export function Btn() {}");
       expect(nextRes.framework).toBe('next');
       expect(nextRes.evidence.method).toBe('ast-import-signature');
 
       // Nuxt via definePageMeta
       const nuxtRes = detectFrameworkWithEvidence('/test/page.ts', "definePageMeta({ layout: 'custom' });");
       expect(nuxtRes.framework).toBe('nuxt');
-      expect(nuxtRes.evidence.method).toBe('ast-import-signature');
+      expect(nuxtRes.evidence.method).toBe('unbound-call-convention');
+      expect(nuxtRes.evidence.resolution).toBe('candidate');
     });
 
     test('Unhappy Path: Corrupted package.json falls back cleanly without crash', async () => {

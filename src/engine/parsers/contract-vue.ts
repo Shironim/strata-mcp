@@ -1,12 +1,16 @@
 import { readSourceFile } from '../source-file';
+import { createHash } from 'node:crypto';
 import { existsSync, promises as fs } from 'node:fs';
-import { basename, dirname, extname, resolve } from 'node:path';
+import { basename, dirname, extname, resolve, sep } from 'node:path';
 import { parse as parseDom, NodeTypes, type RootNode, type TemplateChildNode } from '@vue/compiler-dom';
 import ts from 'typescript';
+import { unwrapExpression, staticPropertyName } from './ts-syntax';
 import { executeAstGrep, isBinaryExecutionError } from '../astgrep';
 import { parseSfc } from '../splitter';
 import { stripQuotes, escapeRegExp } from '../patterns';
 import { extractStyleTokens } from '../contract';
+import { canonicalizePath, findProjectRoot } from '../path-resolver';
+import { loadAliasConfig } from '../resolver';
 import type {
   ComponentContract,
   ComponentEmitContract,
@@ -14,17 +18,17 @@ import type {
   ComponentPropContract,
   ComponentSlotDetail,
   ContractOptions,
+  InputDependency,
+  UnresolvedTypeInfo,
 } from '../../types';
 
 const SLOT_TAG_PATTERN = /<slot(?:\s+name=['"]([^'"]+)['"])?[^>]*\/?>/gi;
-const DEFAULT_ENTRY_PATTERN = /^([A-Za-z0-9_$]+)\s*:\s*(.+?),?$/;
 const PROP_NAME_VALUE_PATTERN = /^([A-Za-z0-9_$]+)\s*:\s*([\s\S]+)$/;
 const REQUIRED_TRUE_PATTERN = /(?:^|[,\s])required\s*:\s*true/;
 const TYPE_ANNOTATION_PATTERN = /type\s*:\s*([A-Za-z0-9_$]+)/;
 const SHORTHAND_TYPE_PATTERN = /^[A-Za-z0-9_$]+$/;
 const DEFAULT_VALUE_PATTERN = /default\s*:\s*([^,\n}]+)/;
 const PROPERTY_SIGNATURE_PATTERN = /^([A-Za-z0-9_$]+)(\?)?:\s*(.+)$/;
-const WITH_DEFAULTS_SECOND_ARG_PATTERN = /withDefaults\s*\([^,]+,\s*(\{[\s\S]*?\})\s*\)/;
 const NAMED_PROPS_TYPE_PATTERN = /defineProps<\s*([A-Za-z0-9_$]+)(?:<[^>]+>)?\s*>\s*\(\)/;
 const EMIT_CALL_SIGNATURE_PATTERN = /\(\s*(?:e\s*:\s*)?['"]([^'"]+)['"](?:\s*,\s*(.+?))?\s*\)/;
 const QUOTED_STRING_PATTERN = /['"]([^'"]+)['"]/g;
@@ -137,55 +141,6 @@ export function extractSlotDetailsFromTemplate(templateContent: string): Compone
  */
 export function extractSlotsFromTemplate(templateContent: string): string[] {
   return extractSlotDetailsFromTemplate(templateContent).map((s) => s.name);
-}
-
-/**
- * Parses default values dictionary from a withDefaults object literal code string
- * using TypeScript Compiler API AST traversal for 100% precision on multiline objects/functions.
- */
-function parseDefaultsObject(objectCode: string): Record<string, string> {
-  const defaults: Record<string, string> = {};
-  const trimmed = objectCode.trim();
-  if (!trimmed) return defaults;
-
-  try {
-    const wrappedCode = trimmed.startsWith('{') ? `const _d = ${trimmed}` : `const _d = { ${trimmed} }`;
-    const sourceFile = ts.createSourceFile('defaults.ts', wrappedCode, ts.ScriptTarget.Latest, true);
-
-    function visit(node: ts.Node) {
-      if (ts.isVariableDeclaration(node) && node.initializer && ts.isObjectLiteralExpression(node.initializer)) {
-        for (const prop of node.initializer.properties) {
-          if (ts.isPropertyAssignment(prop)) {
-            let key = '';
-            if (ts.isIdentifier(prop.name) || ts.isStringLiteral(prop.name)) {
-              key = prop.name.text;
-            } else {
-              key = prop.name.getText(sourceFile);
-            }
-            const val = prop.initializer.getText(sourceFile).trim();
-            if (key) {
-              defaults[key] = val;
-            }
-          }
-        }
-      }
-      ts.forEachChild(node, visit);
-    }
-    visit(sourceFile);
-  } catch {
-    // Fallback line-matching if AST creation fails
-    const inner = trimmed.startsWith('{') && trimmed.endsWith('}') ? trimmed.slice(1, -1) : trimmed;
-    const lines = inner.split('\n');
-    for (const line of lines) {
-      const lineTrim = line.trim();
-      const match = lineTrim.match(DEFAULT_ENTRY_PATTERN);
-      if (match && match[1] && match[2]) {
-        defaults[match[1]] = match[2].trim();
-      }
-    }
-  }
-
-  return defaults;
 }
 
 /**
@@ -417,10 +372,12 @@ rule:
  * Extracts layout and style tokens (Tailwind CSS utility classes, z-indices, overflow traps) from component content.
  */
 
-export async function extractVueContract(filePath: string, content: string): Promise<ComponentContract> {
+export async function extractVueContract(filePath: string, content: string, options?: ContractOptions): Promise<ComponentContract> {
   const component = basename(filePath, extname(filePath));
   const descriptor = parseSfc(content, filePath);
 
+  const dependencies: InputDependency[] = [];
+  const unresolvedTypes: UnresolvedTypeInfo[] = [];
   const props: ComponentPropContract[] = [];
   const emits: ComponentEmitContract[] = [];
   let slots: string[] = [];
@@ -441,60 +398,48 @@ export async function extractVueContract(filePath: string, content: string): Pro
 
   if (fullScript) {
     // 2. Props Extraction
-    let defaultsMap: Record<string, string> = {};
+    let defaultsMap: Record<string, string> = Object.create(null);
 
-    // A. Check for withDefaults(defineProps<...>, { ... })
-    try {
-      const withDefaultsMatches = await executeAstGrep({
-        code: fullScript,
-        pattern: 'withDefaults(defineProps<$$$>(), { $$$ })',
-        language: lang,
-      });
-
-      for (const m of withDefaultsMatches) {
-        try {
-          const sf = ts.createSourceFile('wd.ts', m.text, ts.ScriptTarget.Latest, true);
-          let secondArgText = '';
-          function findCall(n: ts.Node) {
-            if (ts.isCallExpression(n) && n.arguments.length >= 2) {
-              secondArgText = n.arguments[1].getText(sf);
-              return;
+    // Defaults are expressions: commas, nested literals and aliases must retain their AST boundaries.
+    const defaultsSource = ts.createSourceFile('props-defaults.ts', descriptor.scriptSetup?.content ?? '', ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+    const readDefaults = (expression: ts.Expression): boolean => {
+      let call = unwrapExpression(expression);
+      if (ts.isCallExpression(call) && ts.isIdentifier(call.expression) && call.expression.text === 'withDefaults') {
+        const first = call.arguments[0] && unwrapExpression(call.arguments[0]);
+        if (!first || !ts.isCallExpression(first) || !ts.isIdentifier(first.expression) || first.expression.text !== 'defineProps') return false;
+        const defaults = call.arguments[1] && unwrapExpression(call.arguments[1]);
+        if (defaults && ts.isObjectLiteralExpression(defaults)) {
+          for (const property of defaults.properties) {
+            if (ts.isSpreadAssignment(property) || (property.name && staticPropertyName(property.name) === undefined)) {
+              defaultsMap = Object.create(null);
+              unresolvedTypes.push({ name: 'withDefaults', kind: 'props', reason: 'Dynamic default keys or spread overrides are unresolved.' });
+              continue;
             }
-            ts.forEachChild(n, findCall);
-          }
-          findCall(sf);
-          if (secondArgText) {
-            defaultsMap = parseDefaultsObject(secondArgText);
-          }
-        } catch {
-          const secondArgMatch = m.text.match(WITH_DEFAULTS_SECOND_ARG_PATTERN);
-          if (secondArgMatch && secondArgMatch[1]) {
-            defaultsMap = parseDefaultsObject(secondArgMatch[1]);
-          }
-        }
-      }
-    } catch {
-      // ignore
-    }
-
-    // A2. Reactive destructuring defaults (Vue 3.3 / Vue 3.5): const { a = val, b = val } = defineProps(...)
-    try {
-      const destructureMatches = fullScript.match(/(?:const|let)\s*\{([^}]+)\}\s*=\s*(?:withDefaults\s*\(\s*)?defineProps/);
-      if (destructureMatches && destructureMatches[1]) {
-        const bindings = destructureMatches[1].split(',');
-        for (const binding of bindings) {
-          const parts = binding.split('=');
-          if (parts.length >= 2) {
-            const propName = parts[0].trim();
-            const defaultVal = parts.slice(1).join('=').trim();
-            if (propName && defaultVal && !defaultsMap[propName]) {
-              defaultsMap[propName] = defaultVal;
+            if (ts.isPropertyAssignment(property)) {
+              const name = staticPropertyName(property.name);
+              if (name !== undefined) defaultsMap[name] = property.initializer.getText(defaultsSource);
+            } else if (property.name) {
+              const name = staticPropertyName(property.name);
+              if (name !== undefined) delete defaultsMap[name];
+              unresolvedTypes.push({ name: name ?? 'withDefaults', kind: 'props', reason: 'Shorthand or method default requires value resolution.' });
             }
           }
+        } else unresolvedTypes.push({ name: 'withDefaults', kind: 'props', reason: 'Default values require a local object literal.' });
+        call = first;
+      }
+      return ts.isCallExpression(call) && ts.isIdentifier(call.expression) && call.expression.text === 'defineProps';
+    };
+    for (const statement of defaultsSource.statements) {
+      if (ts.isExpressionStatement(statement)) readDefaults(statement.expression);
+      if (!ts.isVariableStatement(statement)) continue;
+      for (const declaration of statement.declarationList.declarations) {
+        if (!declaration.initializer || !readDefaults(declaration.initializer) || !ts.isObjectBindingPattern(declaration.name)) continue;
+        for (const binding of declaration.name.elements) {
+          if (!binding.initializer || binding.dotDotDotToken || !ts.isIdentifier(binding.name)) continue;
+          const name = binding.propertyName ? staticPropertyName(binding.propertyName) : binding.name.text;
+          if (name !== undefined) defaultsMap[name] = binding.initializer.getText(defaultsSource);
         }
       }
-    } catch {
-      // ignore
     }
 
     // B. Type-based defineProps<{ ... }>()
@@ -511,6 +456,7 @@ export async function extractVueContract(filePath: string, content: string): Pro
         const namedMatch = snippet.match(NAMED_PROPS_TYPE_PATTERN);
         if (namedMatch && namedMatch[1]) {
           const typeName = namedMatch[1];
+          const propsBeforeCount = props.length;
           // Search for interface or type definition locally (non-generic or generic)
           let ifaceMatches = await executeAstGrep({
             code: fullScript,
@@ -554,13 +500,31 @@ export async function extractVueContract(filePath: string, content: string): Pro
                 const importMatch = fullScript.match(importRegex);
                 if (importMatch && importMatch[1]) {
                   const importPath = importMatch[1];
+                  let resolvedBase: string | null = null;
                   if (importPath.startsWith('.')) {
-                    const resolvedBase = resolve(dirname(filePath), importPath);
+                    resolvedBase = resolve(dirname(filePath), importPath);
+                  } else {
+                    const aliasConfig = await loadAliasConfig(filePath);
+                    if (aliasConfig && aliasConfig.isAlias(importPath)) {
+                      resolvedBase = aliasConfig.resolve(importPath);
+                    }
+                  }
+                  if (resolvedBase) {
                     const candidateExtensions = ['', '.ts', '.d.ts', '.tsx', '/index.ts', '/index.d.ts'];
+                    let foundMatch = false;
                     for (const ext of candidateExtensions) {
                       const fullImportPath = resolvedBase + ext;
                       if (existsSync(fullImportPath)) {
+                        foundMatch = true;
                         const externalCode = await readSourceFile(fullImportPath);
+                        const depHash = createHash('sha256').update(externalCode).digest('hex');
+                        const wsRoot = options?.workspaceRoot ?? findProjectRoot(filePath);
+                        const normImportPath = canonicalizePath(fullImportPath);
+                        const normWsRoot = canonicalizePath(wsRoot);
+                        const isExternal = !normImportPath.startsWith(normWsRoot + sep) && normImportPath !== normWsRoot;
+                        if (!dependencies.some(d => d.path === normImportPath)) {
+                          dependencies.push({ path: normImportPath, hash: depHash, isExternal });
+                        }
                         let extIface = await executeAstGrep({
                           code: externalCode,
                           pattern: `interface ${typeName} { $$$ }`,
@@ -573,9 +537,67 @@ export async function extractVueContract(filePath: string, content: string): Pro
                             language: 'ts',
                           });
                         }
+                        if (extIface.length === 0) {
+                          extIface = await executeAstGrep({
+                            code: externalCode,
+                            pattern: `interface ${typeName} extends $$$ { $$$ }`,
+                            language: 'ts',
+                          });
+                        }
+                        if (extIface.length === 0) {
+                          extIface = await executeAstGrep({
+                            code: externalCode,
+                            pattern: `interface ${typeName}<$$$> extends $$$ { $$$ }`,
+                            language: 'ts',
+                          });
+                        }
                         if (extIface.length > 0) {
                           const extracted = await extractPropertySignatures(extIface[0].text, 'ts');
                           props.push(...extracted);
+
+                          // Support inherited interfaces (extends BaseProps)
+                          const extendsMatch = extIface[0].text.match(/interface\s+\w+(?:<[^>]+>)?\s+extends\s+([\w\s,]+)\{/);
+                          if (extendsMatch && extendsMatch[1]) {
+                            const baseNames = extendsMatch[1].split(',').map(s => s.trim()).filter(Boolean);
+                            for (const baseName of baseNames) {
+                              let baseIface = await executeAstGrep({
+                                code: externalCode,
+                                pattern: `interface ${baseName} { $$$ }`,
+                                language: 'ts',
+                              });
+                              if (baseIface.length > 0) {
+                                props.push(...await extractPropertySignatures(baseIface[0].text, 'ts'));
+                              } else {
+                                const baseImportRegex = new RegExp(`import\\s+(?:type\\s+)?(?:\\{[^}]*\\b${baseName}\\b[^}]*\\}|${baseName})\\s+from\\s+['"]([^'"]+)['"]`);
+                                const baseImportMatch = externalCode.match(baseImportRegex);
+                                if (baseImportMatch && baseImportMatch[1]) {
+                                  const baseRelPath = baseImportMatch[1];
+                                  const baseDir = dirname(fullImportPath);
+                                  const candidateBase = resolve(baseDir, baseRelPath);
+                                  for (const bExt of candidateExtensions) {
+                                    const fullBasePath = candidateBase + bExt;
+                                    if (existsSync(fullBasePath)) {
+                                      const baseCode = await readSourceFile(fullBasePath);
+                                      const baseHash = createHash('sha256').update(baseCode).digest('hex');
+                                      const normBasePath = canonicalizePath(fullBasePath);
+                                      if (!dependencies.some(d => d.path === normBasePath)) {
+                                        dependencies.push({ path: normBasePath, hash: baseHash, isExternal: !normBasePath.startsWith(normWsRoot + sep) && normBasePath !== normWsRoot });
+                                      }
+                                      const deepIface = await executeAstGrep({
+                                        code: baseCode,
+                                        pattern: `interface ${baseName} { $$$ }`,
+                                        language: 'ts',
+                                      });
+                                      if (deepIface.length > 0) {
+                                        props.push(...await extractPropertySignatures(deepIface[0].text, 'ts'));
+                                      }
+                                      break;
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          }
                           break;
                         }
                         let extType = await executeAstGrep({
@@ -597,12 +619,31 @@ export async function extractVueContract(filePath: string, content: string): Pro
                         }
                       }
                     }
+                    if (!foundMatch) {
+                      const wsRoot = options?.workspaceRoot ?? findProjectRoot(filePath);
+                      const normWsRoot = canonicalizePath(wsRoot);
+                      for (const ext of candidateExtensions) {
+                        const fullImportPath = resolvedBase + ext;
+                        const normImportPath = canonicalizePath(fullImportPath);
+                        const isExternal = !normImportPath.startsWith(normWsRoot + sep) && normImportPath !== normWsRoot;
+                        if (!dependencies.some(d => d.path === normImportPath)) {
+                          dependencies.push({ path: normImportPath, hash: '', isExternal });
+                        }
+                      }
+                    }
                   }
                 }
               } catch {
                 // ignore
               }
             }
+          }
+          if (props.length === propsBeforeCount) {
+            unresolvedTypes.push({
+              name: typeName,
+              kind: 'props',
+              reason: `Unresolved interface or type definition '${typeName}' for defineProps`,
+            });
           }
         } else {
           // Inline object type
@@ -640,7 +681,7 @@ export async function extractVueContract(filePath: string, content: string): Pro
 
     // Apply defaults from withDefaults
     for (const p of props) {
-      if (defaultsMap[p.name]) {
+      if (Object.hasOwn(defaultsMap, p.name)) {
         p.default = defaultsMap[p.name];
       }
     }
@@ -792,6 +833,8 @@ rule:
     models: models.length > 0 ? models : undefined,
     exposed: exposed.length > 0 ? Array.from(new Set(exposed)) : undefined,
     styleTokens: extractStyleTokens(content),
+    dependencies: dependencies.length > 0 ? dependencies : undefined,
+    unresolvedTypes: unresolvedTypes.length > 0 ? unresolvedTypes : undefined,
   };
 }
 

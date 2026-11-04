@@ -10,12 +10,14 @@ import ts from 'typescript';
 import type { FrontendFramework } from '../../types';
 import { createDocumentAdapter } from '../../adapters/factory';
 import { extractTemplateExpressions } from '../template';
+import { extractReactStateDependencies } from './react-state-dependency';
 
 export function extractStateDependencies(
   content: string,
   _framework: FrontendFramework | 'vue-composable' | string,
   selfComponentName?: string
 ): StateDependencyInfo {
+  if (_framework === 'react' || _framework === 'next') return extractReactStateDependencies(content, selfComponentName);
   const stores = new Set<string>();
   const contexts = new Set<string>();
   const composables = new Set<string>();

@@ -24,19 +24,19 @@ describe('Render Boundary & State Dependencies Extractor (Phase 3)', () => {
       expect(result.isClientHydrated).toBe(false);
     });
 
-    it('defaults to React Server Component (RSC) inside app/ directory', () => {
+    it('defaults to RSC inside app/ only with Next framework identity', () => {
       const code = `export default function Page() { return <h1>Hello</h1>; }`;
-      const result = extractRenderBoundary('app/dashboard/page.tsx', code, 'react');
+      const result = extractRenderBoundary('app/dashboard/page.tsx', code, 'next');
       expect(result.boundary).toBe('server-component');
       expect(result.isClientHydrated).toBe(false);
     });
 
     it('detects Nuxt .client.vue and .server.vue suffixes', () => {
-      const clientResult = extractRenderBoundary('components/Chart.client.vue', '<template />', 'vue');
+      const clientResult = extractRenderBoundary('components/Chart.client.vue', '<template />', 'nuxt');
       expect(clientResult.boundary).toBe('client-only');
       expect(clientResult.isClientHydrated).toBe(true);
 
-      const serverResult = extractRenderBoundary('components/Stats.server.vue', '<template />', 'vue');
+      const serverResult = extractRenderBoundary('components/Stats.server.vue', '<template />', 'nuxt');
       expect(serverResult.boundary).toBe('server-only');
       expect(serverResult.isClientHydrated).toBe(false);
     });

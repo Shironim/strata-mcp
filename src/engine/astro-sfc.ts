@@ -1,5 +1,6 @@
 import type { AstroDescriptor, SfcBlock, SourceLocation } from '../types';
 import { getSourcePosition } from '../utils/source-position';
+import { astroExpressionEnd } from './astro-template';
 
 /**
  * Calculates 1-based line and column from an offset within a string.
@@ -13,7 +14,7 @@ function getLineAndColumn(text: string, offset: number): { line: number; column:
  * Parses HTML tag attribute string into a key-value dictionary with support
  * for boolean attributes, quoted strings, and nested JSX/Astro brace expressions.
  */
-export function parseAstroAttributes(attrString: string): Record<string, string | true> {
+export function parseAstroAttributes(attrString: string, expressionAttributes?: Set<string>): Record<string, string | true> {
   const attrs: Record<string, string | true> = {};
   const len = attrString.length;
   let i = 0;
@@ -21,6 +22,7 @@ export function parseAstroAttributes(attrString: string): Record<string, string 
   while (i < len) {
     while (i < len && /\s/.test(attrString[i])) i++;
     if (i >= len) break;
+    if (attrString[i] === '{') { i = astroExpressionEnd(attrString, i); continue; }
 
     const keyStart = i;
     while (i < len && /[a-zA-Z0-9_:@.-]/.test(attrString[i])) i++;
@@ -51,19 +53,9 @@ export function parseAstroAttributes(attrString: string): Record<string, string 
         attrs[key] = attrString.slice(valStart, i);
         if (i < len && attrString[i] === quote) i++;
       } else if (quote === '{') {
+        expressionAttributes?.add(key);
         const valStart = i;
-        let braceDepth = 0;
-        while (i < len) {
-          if (attrString[i] === '{') braceDepth++;
-          else if (attrString[i] === '}') {
-            braceDepth--;
-            if (braceDepth === 0) {
-              i++;
-              break;
-            }
-          }
-          i++;
-        }
+        i = astroExpressionEnd(attrString, i);
         attrs[key] = attrString.slice(valStart, i);
       } else {
         const valStart = i;

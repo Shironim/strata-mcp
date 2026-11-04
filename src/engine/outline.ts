@@ -1,11 +1,13 @@
 import { readSourceFile } from './source-file';
+import { loadTsConfigHierarchySync } from './resolver';
 import { existsSync, promises as fs, readFileSync } from 'node:fs';
 import { dirname, extname, isAbsolute, join, resolve } from 'node:path';
+import { createHash } from 'node:crypto';
 import ts from 'typescript';
 import { createDocumentAdapter } from '../adapters/factory';
 import { remapPosition } from './remapper';
 import { extractInternalCalls } from './slicer';
-import { findProjectRoot, resolveWorkspacePath } from './path-resolver';
+import { canonicalizePath, findProjectRoot, resolveWorkspacePath } from './path-resolver';
 import type {
   ComponentSymbolOutline,
   ExtractOutlineOptions,
@@ -35,22 +37,17 @@ export function clearTsConfigCache(): void {
  * Loads and caches compilerOptions.paths from tsconfig.json or jsconfig.json.
  */
 function loadTsConfigPaths(workspaceRoot: string): TsConfigPaths | null {
-
   const candidateFiles = ['tsconfig.json', 'jsconfig.json'];
   for (const configFile of candidateFiles) {
     const fullPath = join(workspaceRoot, configFile);
     if (existsSync(fullPath)) {
       try {
-        const raw = readFileSync(fullPath, 'utf8');
-        const stripped = raw.replace(/\/\*[\s\S]*?\*\/|\/\/.*/g, '');
-        const parsed = JSON.parse(stripped);
-        const compilerOptions = parsed?.compilerOptions;
-        if (compilerOptions?.paths) {
-          const config: TsConfigPaths = {
-            baseUrl: compilerOptions.baseUrl ? resolve(workspaceRoot, compilerOptions.baseUrl) : workspaceRoot,
-            paths: compilerOptions.paths,
+        const hierarchy = loadTsConfigHierarchySync(fullPath);
+        if (Object.keys(hierarchy.paths).length > 0) {
+          return {
+            baseUrl: workspaceRoot,
+            paths: hierarchy.paths,
           };
-          return config;
         }
       } catch {
         // Graceful fallback
@@ -149,13 +146,18 @@ async function locateTargetSymbolLines(
   symbolName: string,
   workspaceRoot: string,
   visited: Set<string> = new Set(),
-  depth: number = 0
+  depth: number = 0,
+  trackedDeps?: Map<string, string>
 ): Promise<TargetSymbolResult | null> {
   if (depth > 3 || visited.has(targetFilePath)) return null;
   visited.add(targetFilePath);
 
   try {
     const content = await readSourceFile(targetFilePath);
+    if (trackedDeps) {
+      const h = createHash('sha256').update(content).digest('hex');
+      trackedDeps.set(canonicalizePath(targetFilePath), h);
+    }
     const adapter = createDocumentAdapter(targetFilePath, content);
     const scriptBlocks = adapter.getScriptBlocks();
     const isJsx = targetFilePath.endsWith('.tsx') || targetFilePath.endsWith('.jsx');
@@ -235,7 +237,8 @@ async function locateTargetSymbolLines(
           reExport.lookupName,
           workspaceRoot,
           visited,
-          depth + 1
+          depth + 1,
+          trackedDeps
         );
         if (reExportResult) return reExportResult;
       }
@@ -414,6 +417,7 @@ export async function extractComponentOutline(
   }
 
   // 3. 1-hop cross-file callee resolution
+  const trackedDeps = new Map<string, string>();
   if (shouldResolveCalls) {
     const resolvedCache = new Map<string, ResolvedCalleeReference>();
 
@@ -452,7 +456,7 @@ export async function extractComponentOutline(
 
         if (targetFilePath && existsSync(targetFilePath)) {
           const lookupName = importInfo.importedName === '*' ? targetLookupName : importInfo.importedName;
-          const lines = await locateTargetSymbolLines(targetFilePath, lookupName, workspaceRoot);
+          const lines = await locateTargetSymbolLines(targetFilePath, lookupName, workspaceRoot, new Set(), 0, trackedDeps);
           if (lines) {
             ref.targetRange = {
               startLine: lines.startLine,
@@ -477,12 +481,21 @@ export async function extractComponentOutline(
 
   const highComplexityCount = functions.filter((f) => f.complexitySmell?.isHighComplexity).length;
 
+  const dependencies = trackedDeps.size > 0
+    ? Array.from(trackedDeps.entries()).map(([p, hash]) => ({
+        path: p,
+        hash,
+        isExternal: !p.startsWith(canonicalizePath(workspaceRoot)),
+      }))
+    : undefined;
+
   return {
     filePath: targetFile,
     framework,
     totalFunctions: functions.length,
     highComplexityCount,
     functions,
+    ...(dependencies ? { dependencies } : {}),
   };
 }
 

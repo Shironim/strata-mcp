@@ -1,13 +1,19 @@
 import { readSourceFile, readSourceSnapshot } from './source-file';
+import { moduleDirective } from './parsers/ts-syntax';
+import { reactBindings } from './parsers/react-bindings';
+import { jsxDomEventName } from './parsers/jsx-events';
+import { isOwnedNextAppFile } from './project-ownership';
 import { runCanonAudit } from './canon';
 import { extractNuxtPageMeta, extractNextSegmentConfig } from './routes';
 import { existsSync, promises as fs, readFileSync } from 'node:fs';
 import { basename, extname, join, resolve } from 'node:path';
 import { findProjectRoot } from './path-resolver';
 import ts from 'typescript';
+import { parse as parseDom, NodeTypes } from '@vue/compiler-dom';
 import { executeAstGrep, isBinaryExecutionError } from './astgrep';
 import { parseSfc } from './splitter';
-import { parseAstro } from './astro-sfc';
+import { parseAstro, parseAstroAttributes } from './astro-sfc';
+import { astroOpeningTags } from './astro-template';
 import { stripQuotes, escapeRegExp } from './patterns';
 import type {
   BoundaryContract,
@@ -28,6 +34,7 @@ import type {
   GlobalSymbolInfo,
   InferredPropDetail,
   RenderBoundaryInfo,
+  ProjectOwnershipInfo,
   StateAccessMode,
   StateDependencyInfo,
   StateDependencyItem,
@@ -57,6 +64,7 @@ import {
   getProjectEcosystem,
   detectFramework,
   detectFrameworkWithEvidence,
+  componentFramework,
   type ProjectEcosystem,
   type ProjectFrameworkInfo,
   type FrameworkDetectionResult,
@@ -138,7 +146,8 @@ import { analyzeBidirectionalTransport } from './transport-analyzer';
 export function extractRenderBoundary(
   filePath: string,
   content: string,
-  framework: FrontendFramework | 'vue-composable'
+  framework: FrontendFramework | 'vue-composable',
+  projectContext?: ProjectOwnershipInfo
 ): RenderBoundaryInfo {
   const normPath = filePath.replace(/\\/g, '/');
   const violations: BoundaryViolation[] = [];
@@ -152,7 +161,7 @@ export function extractRenderBoundary(
 
   if (framework === 'react' || framework === 'next') {
     // 1. Check for 'use client' directive
-    if (/^\s*['"]use client['"]/m.test(content)) {
+    if (moduleDirective(content, 'use client')) {
       return {
         boundary: 'client-component',
         directive: 'use client',
@@ -167,7 +176,7 @@ export function extractRenderBoundary(
     }
 
     // 2. Check for 'use server' directive
-    if (/^\s*['"]use server['"]/m.test(content)) {
+    if (moduleDirective(content, 'use server')) {
       return {
         boundary: 'server-action',
         directive: 'use server',
@@ -182,17 +191,27 @@ export function extractRenderBoundary(
     }
 
     // 3. Next.js App router defaults to React Server Component (RSC)
-    if (normPath.startsWith('app/') || normPath.includes('/app/')) {
+    const inApp = projectContext ? isOwnedNextAppFile(filePath, projectContext)
+      : normPath.startsWith('app/') || normPath.includes('/app/');
+    if (framework === 'next' && inApp) {
       // Check for client-only hooks in RSC
-      const clientHooks = Array.from(
-        new Set(
-          Array.from(
-            content.matchAll(
-              /\b(useState|useEffect|useReducer|useRef|useLayoutEffect|useTransition|useDeferredValue|useActionState|useOptimistic|createContext|useContext)\b/g
-            )
-          ).map((m) => m[1])
-        )
-      );
+      const sourceFile = ts.createSourceFile(filePath, content, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+      const bindings = reactBindings(sourceFile);
+      const clientApis = new Set(['useState', 'useEffect', 'useReducer', 'useRef', 'useLayoutEffect',
+        'useTransition', 'useDeferredValue', 'useActionState', 'useOptimistic', 'createContext', 'useContext']);
+      const observedHooks = new Set<string>();
+      const observedEvents = new Set<string>();
+      function visitHook(node: ts.Node): void {
+        if (ts.isCallExpression(node)) {
+          const api = bindings.api(node.expression);
+          if (api && clientApis.has(api)) observedHooks.add(api);
+        }
+        const event = jsxDomEventName(node);
+        if (event) observedEvents.add(event);
+        ts.forEachChild(node, visitHook);
+      }
+      visitHook(sourceFile);
+      const clientHooks = [...observedHooks];
 
       if (clientHooks.length > 0) {
         violations.push({
@@ -204,15 +223,7 @@ export function extractRenderBoundary(
       }
 
       // Check for DOM event handlers attached in JSX
-      const eventHandlers = Array.from(
-        new Set(
-          Array.from(
-            content.matchAll(
-              /\b(onClick|onChange|onSubmit|onKeyDown|onKeyUp|onMouseEnter|onMouseLeave|onFocus|onBlur)\s*=/g
-            )
-          ).map((m) => m[1])
-        )
-      );
+      const eventHandlers = [...observedEvents];
 
       if (eventHandlers.length > 0) {
         violations.push({
@@ -229,15 +240,16 @@ export function extractRenderBoundary(
         violations: violations.length > 0 ? violations : undefined,
         evidence: {
           basis: 'source',
-          resolution: 'resolved',
+          resolution: projectContext ? 'resolved' : 'candidate',
           method: 'app-router-convention',
-          reason: 'Next.js App Router default render boundary without client directive',
+          reason: projectContext ? 'Source is inside the observed Next owner app directory without a client directive'
+            : 'App path convention without captured project ownership; application root and caller context are unverified',
         },
       };
     }
 
-    // Shared component directory without explicit directive
-    if (normPath.includes('/components/') || normPath.includes('/ui/')) {
+    // Next shared modules require caller context to determine their render environment.
+    if (framework === 'next' || normPath.includes('/components/') || normPath.includes('/ui/')) {
       return {
         boundary: 'isomorphic',
         isClientHydrated: true,
@@ -245,7 +257,9 @@ export function extractRenderBoundary(
           basis: 'derived',
           resolution: 'candidate',
           method: 'neutral-component',
-          reason: 'Component without explicit directive in shared component directory',
+          reason: framework === 'next'
+            ? 'Next module outside observed app convention; caller server/client context is unverified'
+            : 'Component without explicit directive in shared component directory',
         },
       };
     }
@@ -256,83 +270,100 @@ export function extractRenderBoundary(
       isClientHydrated: true,
       evidence: {
         basis: 'derived',
-        resolution: 'resolved',
+        resolution: 'candidate',
         method: 'framework-default',
-        reason: 'Standard client component in client-side framework',
+        reason: 'React client-side default candidate; application bundler, SSR and caller context are unverified',
       },
     };
   }
 
   if (framework === 'vue' || framework === 'nuxt') {
-    if (normPath.endsWith('.client.vue')) {
+    if (framework === 'nuxt' && normPath.endsWith('.client.vue')) {
       return {
         boundary: 'client-only',
         directive: '.client.vue',
         isClientHydrated: true,
+        evidence: { basis: 'derived', resolution: 'candidate', method: 'nuxt-filename-convention',
+          reason: 'Nuxt client suffix observed; registration and runtime configuration are unverified' },
       };
     }
-    if (normPath.endsWith('.server.vue')) {
+    if (framework === 'nuxt' && normPath.endsWith('.server.vue')) {
       return {
         boundary: 'server-only',
         directive: '.server.vue',
         isClientHydrated: false,
+        evidence: { basis: 'derived', resolution: 'candidate', method: 'nuxt-filename-convention',
+          reason: 'Nuxt server suffix observed; paired client components, island settings and registration are unverified' },
       };
     }
-    if (/<ClientOnly\b/i.test(content)) {
+    const vueTemplate = parseSfc(content, filePath).template;
+    let hasClientOnly = false;
+    if (framework === 'nuxt' && vueTemplate) {
+      try {
+        const ast = parseDom(vueTemplate.content);
+        const visit = (node: any): void => {
+          if (node.type === NodeTypes.ELEMENT && ['ClientOnly', 'client-only'].includes(node.tag)) hasClientOnly = true;
+          for (const child of node.children ?? []) visit(child);
+        };
+        visit(ast);
+      } catch { /* Invalid templates do not establish a ClientOnly wrapper. */ }
+    }
+    if (hasClientOnly) {
       return {
         boundary: 'isomorphic',
         directive: '<ClientOnly>',
         isClientHydrated: true,
+        evidence: { basis: 'source', resolution: 'candidate', method: 'nuxt-template-wrapper',
+          reason: 'Local ClientOnly tag observed in Nuxt; binding identity and descendant boundaries are unverified' },
       };
     }
 
     return {
       boundary: 'isomorphic',
       isClientHydrated: true,
+      evidence: { basis: 'derived', resolution: 'candidate', method: 'framework-default',
+        reason: 'Vue syntax does not establish application SSR/hydration configuration' },
     };
   }
 
   if (framework === 'astro') {
-    // Check if Astro component mounts any client-hydrated islands
-    const islandMatch = content.match(/\b(client:(?:load|visible|idle|media|only)(?:=[^>\s]+)?)/i);
-    if (islandMatch) {
-      return {
-        boundary: 'astro-island',
-        directive: islandMatch[1],
-        isClientHydrated: true,
-      };
+    const template = parseAstro(content, filePath).template;
+    const tags = astroOpeningTags(template?.content ?? '').filter(tag => /^[A-Z]/.test(tag.name));
+    let directive: string | undefined;
+    const interactiveMatch: string[] = [];
+    for (const tag of tags) {
+      const attrs = parseAstroAttributes(tag.attributes);
+      const hydration = Object.keys(attrs).find(name => /^client:(load|visible|idle|media|only)$/.test(name));
+      if (hydration) directive ??= attrs[hydration] === true ? hydration : `${hydration}=${attrs[hydration]}`;
+      else if (/(Modal|Dialog|Dropdown|Drawer|Menu|Select|Button|Tabs|Form|Input|Counter|Carousel|Accordion)$/.test(tag.name)) {
+        if (!interactiveMatch.includes(tag.name)) interactiveMatch.push(tag.name);
+      }
     }
-
-    // Check for interactive components rendered in Astro without client directives
-    const interactiveMatch = Array.from(
-      new Set(
-        Array.from(
-          content.matchAll(
-            /<([A-Z][A-Za-z0-9_$]*(?:Modal|Dialog|Dropdown|Drawer|Menu|Select|Button|Tabs|Form|Input|Counter|Carousel|Accordion))\b(?![^>]*\bclient:)/g
-          )
-        ).map((m) => m[1])
-      )
-    );
-
-    if (interactiveMatch.length > 0 && !content.includes('client:')) {
+    if (interactiveMatch.length > 0) {
       violations.push({
         code: 'ASTRO_UNHYDRATED_INTERACTIVE_ISLAND',
         severity: 'warning',
-        message: `Interactive component(s) (${interactiveMatch.slice(0, 3).join(', ')}) rendered without hydration directive.`,
+        message: `Potentially interactive component(s) (${interactiveMatch.slice(0, 3).join(', ')}) rendered without hydration directive (name-based candidates).`,
         hint: "Add client:load or client:visible if this component requires client-side interactivity, otherwise it will render as inert static HTML.",
       });
     }
 
     return {
-      boundary: 'astro-static',
-      isClientHydrated: false,
+      boundary: directive ? 'astro-island' : 'astro-static',
+      ...(directive ? { directive } : {}),
+      isClientHydrated: Boolean(directive),
       violations: violations.length > 0 ? violations : undefined,
+      evidence: { basis: 'source', resolution: 'candidate', method: 'astro-template-convention',
+        reason: directive ? 'Local component hydration directive observed; component compatibility and runtime behavior are unverified'
+          : 'Astro component default without observed island directive; embedded scripts and runtime interactivity are not evaluated' },
     };
   }
 
   return {
     boundary: 'unknown',
     isClientHydrated: false,
+    evidence: { basis: 'heuristic', resolution: 'unresolved', method: 'boundary-not-established',
+      reason: 'Component syntax alone does not establish SSR, hydration or a server/client boundary' },
   };
 }
 
@@ -1060,6 +1091,8 @@ export function extractFormContracts(
 export interface ExtractContractOptions {
   inferProps?: boolean;
   resolveGlobals?: boolean;
+  path?: string;
+  workspaceRoot?: string;
 }
 
 /**
@@ -1082,17 +1115,18 @@ export async function extractComponentContract(
     explicitContent !== undefined
       ? explicitContent
       : await readSourceFile(resolvedPath);
-  const framework = detectFramework(resolvedPath, content);
+  const detection = detectFrameworkWithEvidence(resolvedPath, content, options.workspaceRoot);
+  const framework = componentFramework(resolvedPath, detection.framework);
 
   let baseContract: ComponentContract;
   switch (framework) {
     case 'vue':
     case 'nuxt':
-      baseContract = await extractVueContract(resolvedPath, content);
+      baseContract = await extractVueContract(resolvedPath, content, options);
       break;
     case 'react':
     case 'next':
-      baseContract = await extractReactContract(resolvedPath, content);
+      baseContract = await extractReactContract(resolvedPath, content, options?.workspaceRoot);
       break;
     case 'astro':
       baseContract = await extractAstroContract(resolvedPath, content);
@@ -1119,7 +1153,7 @@ export async function extractComponentContract(
 
   const renderBoundary = framework === 'vue-composable'
     ? undefined
-    : extractRenderBoundary(resolvedPath, content, framework);
+    : extractRenderBoundary(resolvedPath, content, framework, detection.projectContext);
   const stateDependencies = extractStateDependencies(content, framework, baseContract.component);
   const dataDependencies = extractDataDependencies(content, framework);
   const variants = extractComponentVariants(content, baseContract.props);
@@ -1150,7 +1184,8 @@ export async function extractComponentContract(
     patternDiagnostics = await runCanonAudit(
       snapshot,
       content,
-      framework === 'vue-composable' ? 'vue' : framework
+      framework === 'vue-composable' ? 'vue' : framework,
+      { projectContext: detection.projectContext }
     );
   } catch {
     // optional snapshot fallback
@@ -1163,9 +1198,19 @@ export async function extractComponentContract(
   const nextSegmentConfig = (framework === 'react' || framework === 'next')
     ? extractNextSegmentConfig(content)
     : undefined;
+  const dependencies = new Map((baseContract.dependencies ?? []).map(input => [input.path, input]));
+  for (const input of detection.projectContext?.dependencies ?? []) {
+    if (dependencies.has(input.path) && dependencies.get(input.path)!.hash !== input.hash) {
+      detection.projectContext!.diagnostics.push({ code: 'DEPENDENCY_CHANGED', reason: `${input.path}: ownership and contract reads observed different input hashes.` });
+    }
+    dependencies.set(input.path, input);
+  }
 
   return {
     ...baseContract,
+    framework,
+    projectContext: detection.projectContext,
+    dependencies: [...dependencies.values()],
     variants,
     renderBoundary,
     stateDependencies,

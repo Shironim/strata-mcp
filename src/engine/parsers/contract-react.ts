@@ -1,11 +1,16 @@
-import { basename, extname } from 'node:path';
+import { basename, dirname, extname } from 'node:path';
 import ts from 'typescript';
 import { extractStyleTokens } from '../contract';
+import { unwrapExpression, staticPropertyName } from './ts-syntax';
+import { resolveLocalPropType } from './local-prop-types';
+import { PropTypeModules } from './prop-type-modules';
 import type {
   ComponentContract,
   ComponentEmitContract,
   ComponentPropContract,
   ComponentSlotDetail,
+  UnresolvedTypeInfo,
+  InputDependency,
 } from '../../types';
 
 const REACT_EVENT_HANDLER_PATTERN = /^on[A-Z]/;
@@ -25,39 +30,51 @@ interface UnwrappedComponent {
 
 function unwrapHoc(
   expr: ts.Expression,
-  declaredFunctions: Map<string, ts.FunctionDeclaration | ts.ArrowFunction | ts.FunctionExpression>
+  declaredFunctions: Map<string, ts.FunctionDeclaration | ts.ArrowFunction | ts.FunctionExpression>,
+  declaredVariables: Map<string, ts.VariableDeclaration>,
+  wrappers: Map<string, string>,
+  namespaces: Set<string>,
 ): UnwrappedComponent {
   let current: ts.Expression = expr;
   let isForwardRef = false;
   let isMemo = false;
   let refType: ts.TypeNode | undefined;
   let propsType: ts.TypeNode | undefined;
+  const visited = new Set<string>();
 
   while (true) {
-    while (ts.isParenthesizedExpression(current)) {
-      current = current.expression;
+    current = unwrapExpression(current);
+    if (ts.isIdentifier(current) && declaredVariables.has(current.text)) {
+      if (visited.has(current.text)) break;
+      visited.add(current.text);
+      const initializer = declaredVariables.get(current.text)!.initializer;
+      if (!initializer) break;
+      current = initializer;
+      continue;
     }
     if (!ts.isCallExpression(current)) break;
 
     let calleeName = '';
     if (ts.isIdentifier(current.expression)) {
-      calleeName = current.expression.text;
-    } else if (ts.isPropertyAccessExpression(current.expression)) {
+      calleeName = wrappers.get(current.expression.text) ?? '';
+    } else if (ts.isPropertyAccessExpression(current.expression)
+      && ts.isIdentifier(current.expression.expression) && namespaces.has(current.expression.expression.text)) {
       calleeName = current.expression.name.text;
     }
 
     if (calleeName === 'memo') {
+      if (!current.arguments[0]) break;
       isMemo = true;
+      propsType ??= current.typeArguments?.[0];
       current = current.arguments[0];
     } else if (calleeName === 'forwardRef') {
+      if (!current.arguments[0]) break;
       isForwardRef = true;
       if (current.typeArguments && current.typeArguments.length > 0) {
         if (current.typeArguments.length >= 2) {
           refType = current.typeArguments[0];
           propsType = current.typeArguments[1];
-        } else {
-          propsType = current.typeArguments[0];
-        }
+        } else refType = current.typeArguments[0];
       }
       current = current.arguments[0];
     } else {
@@ -65,9 +82,7 @@ function unwrapHoc(
     }
   }
 
-  while (ts.isParenthesizedExpression(current)) {
-    current = current.expression;
-  }
+  current = unwrapExpression(current);
 
   if (ts.isArrowFunction(current) || ts.isFunctionExpression(current)) {
     return { fnNode: current, refType, propsType, isForwardRef, isMemo };
@@ -85,7 +100,8 @@ function extractParameterDefaults(param: ts.ParameterDeclaration, sf: ts.SourceF
   if (ts.isObjectBindingPattern(param.name)) {
     for (const element of param.name.elements) {
       if (ts.isIdentifier(element.name) && element.initializer) {
-        defaults.set(element.name.text, element.initializer.getText(sf).trim());
+        const name = element.propertyName ? staticPropertyName(element.propertyName) : element.name.text;
+        if (name !== undefined) defaults.set(name, element.initializer.getText(sf).trim());
       }
     }
   }
@@ -145,119 +161,42 @@ function extractExposedMethods(fnNode: ts.Node): string[] {
   return exposed;
 }
 
-function extractPropertyFromSignature(
-  member: ts.TypeElement,
-  sf: ts.SourceFile,
-  defaults: Map<string, string>,
-  propsMap: Map<string, ComponentPropContract>
-): void {
-  if (!ts.isPropertySignature(member) || !member.name) return;
-  const name = member.name.getText(sf).trim();
-  const isOptional = Boolean(member.questionToken);
-  const typeText = member.type ? member.type.getText(sf).trim() : 'any';
-  const defaultVal = defaults.get(name);
-  const required = !isOptional && defaultVal === undefined;
 
-  let isUnion: boolean | undefined;
-  let unionMembers: string[] | undefined;
-  if (member.type && ts.isUnionTypeNode(member.type)) {
-    isUnion = true;
-    unionMembers = member.type.types.map(t => t.getText(sf).trim()).filter(Boolean);
-  }
-
-  propsMap.set(name, {
-    name,
-    type: typeText,
-    required,
-    ...(defaultVal !== undefined ? { default: defaultVal } : {}),
-    ...(isUnion && unionMembers && unionMembers.length > 1 ? { isUnion, unionMembers } : {}),
-  });
-}
-
-function resolveTypeProperties(
-  typeNode: ts.TypeNode | ts.InterfaceDeclaration | ts.TypeAliasDeclaration,
-  sf: ts.SourceFile,
-  declaredTypes: Map<string, ts.InterfaceDeclaration | ts.TypeAliasDeclaration>,
-  defaults: Map<string, string>,
-  propsMap: Map<string, ComponentPropContract>,
-  visited = new Set<string>()
-): void {
-  if (ts.isInterfaceDeclaration(typeNode)) {
-    if (visited.has(typeNode.name.text)) return;
-    visited.add(typeNode.name.text);
-
-    // Check heritage clauses (extends BaseProps)
-    if (typeNode.heritageClauses) {
-      for (const clause of typeNode.heritageClauses) {
-        if (clause.token === ts.SyntaxKind.ExtendsKeyword) {
-          for (const typeExpr of clause.types) {
-            const baseName = typeExpr.expression.getText(sf).trim();
-            const baseDecl = declaredTypes.get(baseName);
-            if (baseDecl) {
-              resolveTypeProperties(baseDecl, sf, declaredTypes, defaults, propsMap, visited);
-            }
-          }
-        }
-      }
-    }
-
-    for (const member of typeNode.members) {
-      extractPropertyFromSignature(member, sf, defaults, propsMap);
-    }
-    return;
-  }
-
-  if (ts.isTypeAliasDeclaration(typeNode)) {
-    if (visited.has(typeNode.name.text)) return;
-    visited.add(typeNode.name.text);
-    resolveTypeProperties(typeNode.type, sf, declaredTypes, defaults, propsMap, visited);
-    return;
-  }
-
-  if (ts.isTypeLiteralNode(typeNode)) {
-    for (const member of typeNode.members) {
-      extractPropertyFromSignature(member, sf, defaults, propsMap);
-    }
-    return;
-  }
-
-  if (ts.isIntersectionTypeNode(typeNode)) {
-    for (const member of typeNode.types) {
-      resolveTypeProperties(member, sf, declaredTypes, defaults, propsMap, visited);
-    }
-    return;
-  }
-
-  if (ts.isTypeReferenceNode(typeNode)) {
-    const typeName = typeNode.typeName.getText(sf).trim();
-    const resolved = declaredTypes.get(typeName);
-    if (resolved) {
-      resolveTypeProperties(resolved, sf, declaredTypes, defaults, propsMap, visited);
-    }
-  }
-}
-
-export async function extractReactContract(filePath: string, content: string): Promise<ComponentContract> {
+export async function extractReactContract(filePath: string, content: string, workspaceRoot = dirname(filePath)): Promise<ComponentContract> {
   const component = basename(filePath, extname(filePath));
   const props: ComponentPropContract[] = [];
   const emits: ComponentEmitContract[] = [];
   const slots: string[] = [];
   const slotDetails: ComponentSlotDetail[] = [];
   let exposed: string[] = [];
+  const unresolvedTypes: UnresolvedTypeInfo[] = [];
+  let dependencies: InputDependency[] = [];
 
   try {
     const sf = ts.createSourceFile(filePath, content, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
     const declaredTypes = new Map<string, ts.InterfaceDeclaration | ts.TypeAliasDeclaration>();
     const declaredFunctions = new Map<string, ts.FunctionDeclaration | ts.ArrowFunction | ts.FunctionExpression>();
     const declaredVariables = new Map<string, ts.VariableDeclaration>();
+    const wrappers = new Map<string, string>();
+    const namespaces = new Set<string>();
     let defaultExport: ts.FunctionDeclaration | ts.Expression | undefined;
 
     for (const stmt of sf.statements) {
+      if (ts.isImportDeclaration(stmt) && ts.isStringLiteral(stmt.moduleSpecifier) && stmt.moduleSpecifier.text === 'react' && !stmt.importClause?.isTypeOnly) {
+        const clause = stmt.importClause;
+        if (clause?.name) namespaces.add(clause.name.text);
+        const bindings = clause?.namedBindings;
+        if (bindings && ts.isNamespaceImport(bindings)) namespaces.add(bindings.name.text);
+        if (bindings && ts.isNamedImports(bindings)) for (const binding of bindings.elements) {
+          const name = (binding.propertyName ?? binding.name).text;
+          if (!binding.isTypeOnly && ['memo', 'forwardRef'].includes(name)) wrappers.set(binding.name.text, name);
+        }
+      }
       if (ts.isInterfaceDeclaration(stmt) || ts.isTypeAliasDeclaration(stmt)) {
         declaredTypes.set(stmt.name.text, stmt);
       }
-      if (ts.isFunctionDeclaration(stmt) && stmt.name) {
-        declaredFunctions.set(stmt.name.text, stmt);
+      if (ts.isFunctionDeclaration(stmt)) {
+        if (stmt.name) declaredFunctions.set(stmt.name.text, stmt);
         if (stmt.modifiers?.some(m => m.kind === ts.SyntaxKind.DefaultKeyword)) {
           defaultExport = stmt;
         }
@@ -319,7 +258,7 @@ export async function extractReactContract(filePath: string, content: string): P
         }
 
         if (targetComponentDecl.initializer) {
-          const unwrapped = unwrapHoc(targetComponentDecl.initializer, declaredFunctions);
+          const unwrapped = unwrapHoc(targetComponentDecl.initializer, declaredFunctions, declaredVariables, wrappers, namespaces);
           targetFnNode = unwrapped.fnNode;
           if (unwrapped.propsType) targetPropsType = unwrapped.propsType;
         }
@@ -327,8 +266,8 @@ export async function extractReactContract(filePath: string, content: string): P
         targetFnNode = targetComponentDecl;
       } else if (ts.isArrowFunction(targetComponentDecl) || ts.isFunctionExpression(targetComponentDecl)) {
         targetFnNode = targetComponentDecl;
-      } else if (ts.isCallExpression(targetComponentDecl)) {
-        const unwrapped = unwrapHoc(targetComponentDecl, declaredFunctions);
+      } else {
+        const unwrapped = unwrapHoc(targetComponentDecl, declaredFunctions, declaredVariables, wrappers, namespaces);
         targetFnNode = unwrapped.fnNode;
         if (unwrapped.propsType) targetPropsType = unwrapped.propsType;
       }
@@ -345,16 +284,23 @@ export async function extractReactContract(filePath: string, content: string): P
     }
 
     const propsMap = new Map<string, ComponentPropContract>();
+    if (targetComponentDecl && !targetFnNode) unresolvedTypes.push({ name: component, kind: 'props', reason: 'Component expression or wrapper could not be resolved to a local React function.' });
 
+    const modules = new PropTypeModules(workspaceRoot);
+    if (targetPropsType || targetFnNode) await modules.prepare(sf);
+    dependencies = [...modules.dependencies.values()];
+    if (targetFnNode?.typeParameters?.length) unresolvedTypes.push({ name: component, kind: 'props', reason: 'Component-level generic arguments are unbound at declaration inspection.' });
     if (targetPropsType) {
-      resolveTypeProperties(targetPropsType, sf, declaredTypes, defaults, propsMap);
+      resolveLocalPropType(targetPropsType, sf, declaredTypes, defaults, propsMap, unresolvedTypes, new Set(), { lookup: modules.lookup });
     } else {
       // Fallback conventional Props interface or type
       const fallbackDecl = declaredTypes.get(`${component}Props`) ?? declaredTypes.get('Props');
-      if (fallbackDecl) {
-        resolveTypeProperties(fallbackDecl, sf, declaredTypes, defaults, propsMap);
+      if (fallbackDecl && targetFnNode) {
+        resolveLocalPropType(fallbackDecl, sf, declaredTypes, defaults, propsMap, unresolvedTypes, new Set(), { lookup: modules.lookup });
       }
     }
+
+    for (const reason of modules.diagnostics) unresolvedTypes.push({ name: component, kind: 'props', reason });
 
     // Process extracted props
     for (const p of propsMap.values()) {
@@ -403,6 +349,8 @@ export async function extractReactContract(filePath: string, content: string): P
     slots,
     ...(slotDetails.length > 0 ? { slotDetails } : {}),
     ...(exposed.length > 0 ? { exposed } : {}),
+    ...(unresolvedTypes.length ? { unresolvedTypes } : {}),
+    ...(dependencies.length ? { dependencies } : {}),
     styleTokens: extractStyleTokens(content),
   };
 }

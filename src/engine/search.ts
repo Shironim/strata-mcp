@@ -240,12 +240,17 @@ export async function findCode(options: SearchOptions): Promise<ResolvedMatch[]>
           : undefined;
 
       for (const block of adapter.getScriptBlocks()) {
-        const rawMatches = await executeAstGrep({
-          code: block.content,
-          pattern: options.pattern,
-          language: effectiveScriptLang || block.lang || 'ts',
-        });
-        matches.push(...remapMatches(rawMatches, block, file));
+        try {
+          const rawMatches = await executeAstGrep({
+            code: block.content,
+            pattern: options.pattern,
+            language: effectiveScriptLang || block.lang || 'ts',
+          });
+          matches.push(...remapMatches(rawMatches, block, file));
+        } catch (err) {
+          if (isBinaryExecutionError(err)) throw err;
+          // Non-fatal fallback: pattern might be for another language/block (e.g. template tag vs script)
+        }
       }
 
       // Scan template block for HTML / component tag patterns in .vue and .astro
@@ -412,7 +417,9 @@ export async function findComponentUsage(options: ComponentSearchOptions): Promi
         }
 
         if (scope === 'script' || scope === 'both') {
-          matches.push(...remapMatches(scriptMatches, block, file));
+          const remapped = remapMatches(scriptMatches, block, file);
+          for (const m of remapped) m.usageKind = 'import';
+          matches.push(...remapped);
         }
       }
 
@@ -423,11 +430,13 @@ export async function findComponentUsage(options: ComponentSearchOptions): Promi
         if (templateBlock) {
           // Vue or Astro template
           const tMatches = findComponentInTemplateBlock(templateBlock, options.componentName, file);
+          for (const m of tMatches) m.usageKind = 'render';
           matches.push(...tMatches);
 
           for (const alias of detectedAliases) {
             const aliasMatches = findComponentInTemplateBlock(templateBlock, alias, file);
             for (const am of aliasMatches) {
+              am.usageKind = 'render';
               if (!matches.some((e) => e.file === am.file && e.line === am.line && e.column === am.column)) {
                 matches.push(am);
               }
@@ -469,6 +478,7 @@ rule:
                     column: m.column,
                     endLine: m.endLine,
                     endColumn: m.endColumn,
+                    usageKind: 'render',
                     snippet: m.text.split('\n')[0] || m.text,
                   });
                 }

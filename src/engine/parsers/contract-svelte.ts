@@ -1,5 +1,7 @@
 import { basename, extname } from 'node:path';
 import ts from 'typescript';
+import { unwrapExpression, staticPropertyName } from './ts-syntax';
+import { resolveLocalPropType } from './local-prop-types';
 import { parseSvelte } from '../svelte-sfc';
 import type {
   ComponentContract,
@@ -7,6 +9,7 @@ import type {
   ComponentModelContract,
   ComponentPropContract,
   ComponentSlotDetail,
+  UnresolvedTypeInfo,
 } from '../../types';
 
 function inferTypeFromLiteral(node: ts.Expression): string {
@@ -16,19 +19,6 @@ function inferTypeFromLiteral(node: ts.Expression): string {
   if (ts.isArrayLiteralExpression(node)) return 'any[]';
   if (ts.isObjectLiteralExpression(node)) return 'Record<string, any>';
   return 'any';
-}
-
-function unwrapExpression(expr: ts.Expression): ts.Expression {
-  let curr = expr;
-  while (
-    ts.isAsExpression(curr) ||
-    ts.isTypeAssertionExpression(curr) ||
-    ts.isParenthesizedExpression(curr) ||
-    ts.isNonNullExpression(curr)
-  ) {
-    curr = curr.expression;
-  }
-  return curr;
 }
 
 function isPropsCall(expr: ts.Expression): boolean {
@@ -74,7 +64,7 @@ export async function extractSvelteContract(filePath: string, content: string): 
   const slotDetails: ComponentSlotDetail[] = [];
   const exposed: string[] = [];
 
-  const typeDefs = new Map<string, { type: string; required: boolean; default?: string }>();
+  const unresolvedTypes: UnresolvedTypeInfo[] = [];
 
   // Process scripts (module & instance)
   const scriptsToParse: Array<{ content: string; isInstance: boolean }> = [];
@@ -84,33 +74,12 @@ export async function extractSvelteContract(filePath: string, content: string): 
   for (const { content: scriptContent, isInstance } of scriptsToParse) {
     const sf = ts.createSourceFile('svelte-script.ts', scriptContent, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
 
-    // 1. Collect Type Definitions (Interfaces & Type Aliases)
-    const collectMembers = (members: ts.NodeArray<ts.TypeElement>) => {
-      for (const member of members) {
-        if (ts.isPropertySignature(member) && member.name) {
-          const name = member.name.getText(sf).trim();
-          const required = !member.questionToken;
-          const type = member.type ? member.type.getText(sf).trim() : 'any';
-          typeDefs.set(name, { type, required });
-        }
-      }
-    };
-
+    const declaredTypes = new Map<string, ts.InterfaceDeclaration | ts.TypeAliasDeclaration>();
     for (const stmt of sf.statements) {
-      if (ts.isInterfaceDeclaration(stmt)) {
-        collectMembers(stmt.members);
-      } else if (ts.isTypeAliasDeclaration(stmt)) {
-        if (ts.isTypeLiteralNode(stmt.type)) {
-          collectMembers(stmt.type.members);
-        } else if (ts.isIntersectionTypeNode(stmt.type)) {
-          for (const elem of stmt.type.types) {
-            if (ts.isTypeLiteralNode(elem)) {
-              collectMembers(elem.members);
-            }
-          }
-        }
-      }
-
+      if (ts.isInterfaceDeclaration(stmt) || ts.isTypeAliasDeclaration(stmt)) declaredTypes.set(stmt.name.text, stmt);
+    }
+    if (!isInstance) continue;
+    for (const stmt of sf.statements) {
       // Check exposed functions in instance script: export function foo() / export const bar = () =>
       if (isInstance) {
         const isExported = ts.canHaveModifiers(stmt) && ts.getModifiers(stmt)?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword);
@@ -162,26 +131,18 @@ export async function extractSvelteContract(filePath: string, content: string): 
 
     // 3. Svelte 5 Runes: $props() and $bindable()
     const visit = (node: ts.Node) => {
-      if (ts.isVariableDeclaration(node) && node.initializer && isPropsCall(node.initializer)) {
-        // Collect inline type annotations if present
-        const inlineTypes = new Map<string, { type: string; required: boolean }>();
-        if (node.type && ts.isTypeLiteralNode(node.type)) {
-          for (const member of node.type.members) {
-            if (ts.isPropertySignature(member) && member.name) {
-              const name = member.name.getText(sf).trim();
-              const required = !member.questionToken;
-              const type = member.type ? member.type.getText(sf).trim() : 'any';
-              inlineTypes.set(name, { type, required });
-            }
-          }
-        }
+      if (ts.isVariableDeclaration(node) && ts.isVariableDeclarationList(node.parent)
+        && ts.isVariableStatement(node.parent.parent) && ts.isSourceFile(node.parent.parent.parent)
+        && node.initializer && isPropsCall(node.initializer)) {
+        const typeDefs = new Map<string, ComponentPropContract>();
+        if (node.type) resolveLocalPropType(node.type, sf, declaredTypes, new Map(), typeDefs, unresolvedTypes);
+        for (const [name, prop] of typeDefs) propsMap.set(name, prop);
 
         if (ts.isObjectBindingPattern(node.name)) {
           for (const elem of node.name.elements) {
-            if (ts.isBindingElement(elem) && ts.isIdentifier(elem.name)) {
-              const propName = (elem.propertyName && ts.isIdentifier(elem.propertyName))
-                ? elem.propertyName.text
-                : elem.name.text;
+            if (ts.isBindingElement(elem) && ts.isIdentifier(elem.name) && !elem.dotDotDotToken) {
+              const propName = elem.propertyName ? staticPropertyName(elem.propertyName) : elem.name.text;
+              if (propName === undefined) continue;
 
               const bindableInfo = checkBindable(elem.initializer, sf);
               if (bindableInfo.isBindable) {
@@ -199,11 +160,7 @@ export async function extractSvelteContract(filePath: string, content: string): 
               let type = 'any';
               let required = defaultValue === undefined;
 
-              if (inlineTypes.has(propName)) {
-                const info = inlineTypes.get(propName)!;
-                type = info.type;
-                required = defaultValue === undefined && info.required;
-              } else if (typeDefs.has(propName)) {
+              if (typeDefs.has(propName)) {
                 const info = typeDefs.get(propName)!;
                 type = info.type;
                 required = defaultValue === undefined && info.required;
@@ -313,6 +270,7 @@ export async function extractSvelteContract(filePath: string, content: string): 
     framework: 'svelte',
     filePath,
     props: Array.from(propsMap.values()),
+    ...(unresolvedTypes.length ? { unresolvedTypes } : {}),
     emits,
     slots,
     slotDetails: slotDetails.length > 0 ? slotDetails : undefined,
