@@ -1,6 +1,9 @@
 import { TOOL_CATALOG } from './catalog';
 import { withRetrievalEvidence } from './retrieval-response';
+import { renderBoundaryOmission } from './boundary-evidence';
+import { resolveProjectOwnership } from '../engine/project-ownership';
 import fs from 'node:fs';
+import { createHash } from 'node:crypto';
 import { basename, extname, relative, isAbsolute, resolve } from 'node:path';
 import { collectFiles } from '../engine/collector';
 import { sliceSymbol, formatSymbolSliceAsText } from '../engine/slicer';
@@ -13,11 +16,16 @@ import {
 import { extractComponentContract, formatContractAsText } from '../engine/contract';
 import { extractComponentOutline, formatOutlineAsText } from '../engine/outline';
 import { resolveWorkspacePath, findProjectRoot, PROJECT_ROOT_MARKERS, parseSafePositiveInt } from '../engine/path-resolver';
-import { getSourceLineRange, readSourceSnapshot, readSourceRef, sliceSourceSnapshot } from '../engine/source-file';
+import { getSourceLineRange, readSourceSnapshot, readSourceRef, sliceSourceSnapshot, readSourceFile } from '../engine/source-file';
 import { sourceRetrievalEvidence, derivedRetrievalEvidence, formatRetrievalEvidence } from '../engine/retrieval-evidence';
 import { mapSourceFile } from '../engine/source-map';
 import { parseSfc } from '../engine/splitter';
 import { runCanonAudit } from '../engine/canon';
+import { inspectVueTreeInput } from '../engine/graph/vue-tree-input';
+import { loadAliasConfigWithDependencies } from '../engine/resolver';
+import { analyzePropImpact, formatPropImpactAsText } from '../engine/prop-impact';
+import { parseContractExpectation, verifyContractExpectation } from '../engine/contract-expectation';
+import type { ComponentContract, RetrievalEvidence } from '../types';
 import type { McpToolDefinition } from './types';
 
 const inspectComponentToolDefinition: McpToolDefinition = {
@@ -83,6 +91,20 @@ const inspectComponentToolDefinition: McpToolDefinition = {
     const symbolName = args.symbol || args.symbol_name;
     const isOutline = Boolean(args.outline || args.include_outline || args.outline_symbols);
     const view = args.view;
+    const impact = args.impact ?? 'none';
+    let expectation: ReturnType<typeof parseContractExpectation> | undefined;
+    if (args.expectation !== undefined) {
+      try { expectation = parseContractExpectation(args.expectation); }
+      catch (error) { return { isError: true, content: [{ type: 'text', text: error instanceof Error ? error.message : String(error) }] }; }
+      if (view || symbolName || isOutline || args.source_range !== undefined || args.sfc_sections || args.audit_events || args.auditEvents)
+        return { isError: true, content: [{ type: 'text', text: 'CONTRACT_EXPECTATION_SELECTOR_CONFLICT: expectation requires contract inspection.' }] };
+    }
+    if (!['none', 'summary', 'full'].includes(impact)) {
+      return { isError: true, content: [{ type: 'text', text: "'impact' must be 'none', 'summary', or 'full'." }] };
+    }
+    if (impact !== 'none' && (view || symbolName || isOutline || args.source_range !== undefined || args.sfc_sections || args.audit_events || args.auditEvents)) {
+      return { isError: true, content: [{ type: 'text', text: "'impact' applies only to component contract inspection; remove other selectors." }] };
+    }
     if (view !== undefined && !['map', 'source'].includes(view)) {
       return { isError: true, content: [{ type: 'text', text: "'view' must be 'map' or 'source'." }] };
     }
@@ -104,13 +126,21 @@ const inspectComponentToolDefinition: McpToolDefinition = {
       if (args.view === 'map') {
         const maxRegions = Math.min(500, parseSafePositiveInt(args.max_regions ?? args.maxRegions, 200) ?? 200);
         const result = await mapSourceFile(filePath, { maxRegions });
+        const primary = await readSourceSnapshot(filePath);
+        const templateIssue = filePath.endsWith('.vue') ? inspectVueTreeInput(primary.content, filePath) : null;
+        if (templateIssue) {
+          result.diagnostics.push({
+            code: templateIssue.code,
+            message: templateIssue.reason,
+          });
+        }
         const retrieval = await sourceRetrievalEvidence({
           workspace: targetPathHint ? resolveWorkspacePath(targetPathHint) : findProjectRoot(filePath), snapshot: result.snapshot,
           policy: 'file-map-v1', query: { maxRegions },
-          complete: result.status === 'complete', selectionReason: 'Source regions of the explicitly requested file, bounded by max_regions and parser capability.',
+          complete: result.status === 'complete' && !templateIssue, selectionReason: 'Source regions of the explicitly requested file, bounded by max_regions and parser capability.',
           omissions: [...result.diagnostics.map(d => ({ code: d.code, reason: d.message })), ...result.unsupported.map(reason => ({ code: 'UNSUPPORTED_CAPABILITY', reason }))],
         });
-        return { structuredContent: { retrieval }, content: [{ type: 'text', text: isJson ? JSON.stringify({ ...result, retrieval }, null, 2) : `${formatSourceMap(result)}\n${formatRetrievalEvidence(retrieval)}` }] };
+        return { structuredContent: { ...result, retrieval }, content: [{ type: 'text', text: isJson ? JSON.stringify({ ...result, retrieval }, null, 2) : `${formatSourceMap(result)}\n${formatRetrievalEvidence(retrieval)}` }] };
       }
 
       if (args.view === 'source' && args.source_ref) {
@@ -118,7 +148,7 @@ const inspectComponentToolDefinition: McpToolDefinition = {
         const source = sliceSourceSnapshot(snapshot, content, args.source_ref);
         const retrieval = await sourceRetrievalEvidence({ workspace: targetPathHint ? resolveWorkspacePath(targetPathHint) : findProjectRoot(filePath), snapshot,
           policy: 'exact-source-ref-v1', query: { source_ref: args.source_ref }, complete: true, selectionReason: 'Exact hash-bound source reference explicitly requested by the caller.' });
-        return { structuredContent: { retrieval }, content: isJson
+        return { structuredContent: { file: filePath, source_ref: args.source_ref, source, retrieval }, content: isJson
           ? [{ type: 'text', text: JSON.stringify({ file: filePath, source_ref: args.source_ref, source, retrieval }, null, 2) }]
           : [{ type: 'text', text: source }, { type: 'text', text: formatRetrievalEvidence(retrieval) }] };
       }
@@ -162,7 +192,7 @@ const inspectComponentToolDefinition: McpToolDefinition = {
               ? JSON.stringify({ file: filePath, startLine, endLine, source_ref: selected.ref, source, retrieval }, null, 2)
               : source,
           }, ...(!isJson ? [{ type: 'text' as const, text: formatRetrievalEvidence(retrieval) }] : [])],
-          structuredContent: { retrieval },
+          structuredContent: { file: filePath, startLine, endLine, source_ref: selected.ref, source, retrieval },
         };
       }
 
@@ -190,7 +220,7 @@ const inspectComponentToolDefinition: McpToolDefinition = {
           policy: 'sfc-sections-v1', query: {}, complete: !descriptor.diagnostics?.length, selectionReason: 'All source block boundaries of the explicitly requested Vue SFC.',
           omissions: descriptor.diagnostics?.map(d => ({ code: d.code, reason: d.message })) });
         return {
-          structuredContent: { retrieval },
+          structuredContent: { file: filePath, blocks, retrieval },
           content: [{
             type: 'text',
             text: isJson
@@ -209,11 +239,34 @@ const inspectComponentToolDefinition: McpToolDefinition = {
           path: filePath,
           maxFunctionLines: args.max_function_lines ? Number(args.max_function_lines) : undefined,
         });
-        const retrieval = await derivedRetrievalEvidence({ workspace: targetPathHint ? resolveWorkspacePath(targetPathHint) : findProjectRoot(filePath), snapshot: primary.snapshot,
-          policy: 'component-outline-v1', query: { maxFunctionLines: args.max_function_lines ? Number(args.max_function_lines) : null }, complete: false,
-          selectionReason: 'Requested symbol outline and derived cross-file mappings; analyzer may read additional source versions.' });
+
+        let configFingerprint: string | undefined;
+        try {
+          const { configFiles } = await loadAliasConfigWithDependencies(filePath);
+          if (configFiles.length > 0) {
+            const ch = createHash('sha256');
+            for (const cf of configFiles.sort()) {
+              try {
+                const cfContent = await readSourceFile(cf);
+                ch.update(cf).update('\0').update(createHash('sha256').update(cfContent).digest('hex'));
+              } catch {}
+            }
+            configFingerprint = ch.digest('hex');
+          }
+        } catch {}
+
+        const retrieval = await derivedRetrievalEvidence({
+          workspace: targetPathHint ? resolveWorkspacePath(targetPathHint) : findProjectRoot(filePath),
+          snapshot: primary.snapshot,
+          policy: 'component-outline-v1',
+          query: { maxFunctionLines: args.max_function_lines ? Number(args.max_function_lines) : null },
+          complete: false,
+          selectionReason: 'Requested symbol outline and derived cross-file mappings; analyzer may read additional source versions.',
+          dependencies: outlineResult.dependencies,
+          configFingerprint,
+        });
         return {
-          structuredContent: { retrieval },
+          structuredContent: { ...outlineResult, retrieval },
           content: [
             {
               type: 'text',
@@ -229,6 +282,7 @@ const inspectComponentToolDefinition: McpToolDefinition = {
         const result = await sliceSymbol({
           path: filePath,
           symbolName: String(symbolName),
+          workspaceRoot: targetPathHint ? resolveWorkspacePath(targetPathHint) : findProjectRoot(filePath),
           includeBlastRadius: true,
         });
         const retrieval = await derivedRetrievalEvidence({ workspace: targetPathHint ? resolveWorkspacePath(targetPathHint) : findProjectRoot(filePath), snapshot: primary.snapshot,
@@ -236,7 +290,7 @@ const inspectComponentToolDefinition: McpToolDefinition = {
           selectionReason: 'Requested named symbol and derived caller information; analyzer may read additional source versions.' });
         if (!result) {
           return {
-            structuredContent: { retrieval },
+            structuredContent: { file: filePath, found: false, symbol: String(symbolName), retrieval },
             content: [
               {
                 type: 'text',
@@ -246,7 +300,7 @@ const inspectComponentToolDefinition: McpToolDefinition = {
           };
         }
         return {
-          structuredContent: { retrieval },
+          structuredContent: { ...result, retrieval },
           content: [
             {
               type: 'text',
@@ -260,32 +314,159 @@ const inspectComponentToolDefinition: McpToolDefinition = {
       const inferProps = args.infer_props !== false && args.inferProps !== false;
       const resolveGlobals = args.resolve_globals !== false && args.resolveGlobals !== false;
       const auditEvents = Boolean(args.audit_events || args.auditEvents);
-      const primary = await readSourceSnapshot(filePath);
-      const contract = await extractComponentContract(filePath, primary.content, { inferProps, resolveGlobals });
-      const omissions: Array<{ code: string; reason: string }> = [];
+      const wsRoot = targetPathHint ? resolveWorkspacePath(targetPathHint) : resolveProjectOwnership(filePath).ownerRoot ?? findProjectRoot(filePath);
 
-      // Detect Reactivity Smells directly as first-class diagnostics
-      const reactivitySmells = await detectReactivitySmells({ path: filePath });
-      contract.reactivitySmells = reactivitySmells;
+      let primary = await readSourceSnapshot(filePath);
+      let contract: ComponentContract | null = null;
+      let omissions: Array<{ code: string; reason: string }> = [];
+      let auditResult: any = null;
+      let retrieval: RetrievalEvidence | null = null;
+      const maxAttempts = 2;
 
-      try {
-        contract.patternDiagnostics = await runCanonAudit(primary.snapshot, primary.content);
-      } catch (error) {
-        omissions.push({ code: 'PATTERN_AUDIT_FAILED', reason: error instanceof Error ? error.message : String(error) });
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        omissions = [];
+        primary = await readSourceSnapshot(filePath);
+        contract = await extractComponentContract(filePath, primary.content, { inferProps, resolveGlobals, workspaceRoot: wsRoot });
+        const boundaryOmission = renderBoundaryOmission(contract.renderBoundary);
+        if (boundaryOmission) omissions.push(boundaryOmission);
+        omissions.push(...(contract.projectContext?.diagnostics ?? []));
+
+        if (contract.unresolvedTypes && contract.unresolvedTypes.length > 0) {
+          for (const unres of contract.unresolvedTypes) {
+            omissions.push({
+              code: unres.kind === 'props' ? 'UNRESOLVED_PROPS_TYPE' : 'UNRESOLVED_TYPE',
+              reason: `${unres.name}: ${unres.reason}`,
+            });
+          }
+        }
+        omissions.push(...(contract.stateDependencies?.diagnostics ?? []));
+
+        for (const [owner, metadata] of [['NUXT_PAGE_META', contract.nuxtPageMeta], ['NEXT_SEGMENT_CONFIG', contract.nextSegmentConfig]] as const) {
+          for (const field of metadata?.unresolvedFields ?? []) omissions.push({
+            code: `${owner}_UNRESOLVED`, reason: `${field.field}: ${field.reason} (${field.expression})`,
+          });
+        }
+
+        if (filePath.endsWith('.vue')) {
+          const templateIssue = inspectVueTreeInput(primary.content, filePath);
+          if (templateIssue) {
+            omissions.push({
+              code: templateIssue.code,
+              reason: templateIssue.reason,
+            });
+          }
+        }
+
+        // Detect Reactivity Smells directly as first-class diagnostics
+        const reactivitySmells = await detectReactivitySmells({ path: filePath });
+        contract.reactivitySmells = reactivitySmells;
+
+        try {
+          contract.patternDiagnostics = await runCanonAudit(primary.snapshot, primary.content,
+            contract.framework === 'vue-composable' ? 'vue' : contract.framework as import('../types').FrontendFramework,
+            { projectContext: contract.projectContext, projectRoot: wsRoot });
+        } catch (error) {
+          omissions.push({ code: 'PATTERN_AUDIT_FAILED', reason: error instanceof Error ? error.message : String(error) });
+        }
+
+        if (auditEvents) {
+          auditResult = await auditEventHandlers({ path: filePath });
+          omissions.push(...(auditResult.autoImportUnresolved ?? []).map((reason: string) => ({ code: 'NUXT_AUTO_IMPORT_PARTIAL', reason })));
+          const dependencies = new Map((contract.dependencies ?? []).map(dependency => [dependency.path, dependency]));
+          for (const dependency of auditResult.autoImportDependencies ?? []) {
+            if (dependencies.has(dependency.path) && dependencies.get(dependency.path)!.hash !== dependency.hash) {
+              omissions.push({ code: 'DEPENDENCY_CHANGED', reason: `${dependency.path}: dependency changed between contract and event audit reads` });
+            }
+            dependencies.set(dependency.path, dependency);
+          }
+          contract.dependencies = [...dependencies.values()];
+        }
+
+        if (impact !== 'none') {
+          contract.propImpact = await analyzePropImpact({ target: filePath, workspace: wsRoot, props: contract.props, detail: impact });
+          omissions.push({ code: 'PROP_IMPACT_PARTIAL', reason: 'Prop impact counts cover observed static Vue usages only; unknown consumers and input closure remain unverified.' });
+          omissions.push(...contract.propImpact.diagnostics.map(item => ({ code: item.code, reason: `${item.file}: ${item.reason}` })));
+        }
+
+        // Check if secondary dependencies or primary snapshot mutated during analysis
+        let hasConcurrentMutation = contract.propImpact?.freshness === 'stale' || omissions.some(item => item.code === 'DEPENDENCY_CHANGED');
+        if (contract.dependencies && contract.dependencies.length > 0) {
+          for (const dep of contract.dependencies) {
+            try {
+              if (!fs.existsSync(dep.path)) {
+                hasConcurrentMutation = true;
+                break;
+              }
+              const currentContent = await readSourceFile(dep.path);
+              const currentHash = createHash('sha256').update(currentContent).digest('hex');
+              if (currentHash !== dep.hash) {
+                hasConcurrentMutation = true;
+                break;
+              }
+            } catch {
+              hasConcurrentMutation = true;
+              break;
+            }
+          }
+        }
+
+        try {
+          const rechecked = await readSourceSnapshot(filePath);
+          if (rechecked.snapshot.sha256 !== primary.snapshot.sha256) {
+            hasConcurrentMutation = true;
+          }
+        } catch {
+          hasConcurrentMutation = true;
+        }
+
+        if (hasConcurrentMutation && attempt < maxAttempts) {
+          // Conservative retry on concurrent mutation
+          continue;
+        }
+
+        if (hasConcurrentMutation) {
+          omissions.push({
+            code: 'CONCURRENT_MUTATION_DETECTED',
+            reason: 'Concurrent mutation detected on source or secondary dependency during analysis; retried once but changes persisted.',
+          });
+        }
+
+        let configFingerprint: string | undefined;
+        try {
+          const { configFiles } = await loadAliasConfigWithDependencies(filePath);
+          if (configFiles.length > 0) {
+            const ch = createHash('sha256');
+            for (const cf of configFiles.sort()) {
+              try {
+                const cfContent = await readSourceFile(cf);
+                ch.update(cf).update('\0').update(createHash('sha256').update(cfContent).digest('hex'));
+              } catch {}
+            }
+            configFingerprint = ch.digest('hex');
+          }
+        } catch {}
+
+        const evidenceOptions = {
+          workspace: wsRoot,
+          snapshot: primary.snapshot,
+          policy: 'component-contract-v1',
+          query: { inferProps, resolveGlobals, auditEvents, impact, expectation: expectation ?? null },
+          complete: omissions.length === 0,
+          selectionReason: 'Derived public component contract and diagnostics for the explicitly requested file.',
+          omissions,
+          dependencies: contract.dependencies,
+          configFingerprint,
+        };
+
+        retrieval = await derivedRetrievalEvidence(evidenceOptions);
+        if (hasConcurrentMutation) retrieval.freshness = 'stale';
+        break;
       }
 
-      const evidenceOptions = {
-        workspace: targetPathHint ? resolveWorkspacePath(targetPathHint) : findProjectRoot(filePath), snapshot: primary.snapshot,
-        policy: 'component-contract-v1', query: { inferProps, resolveGlobals, auditEvents }, complete: false,
-        selectionReason: 'Derived public component contract and diagnostics for the explicitly requested file.', omissions,
-      };
-
       if (auditEvents) {
-        const auditResult = await auditEventHandlers({ path: filePath });
-        const retrieval = await derivedRetrievalEvidence(evidenceOptions);
         if (isJson) {
           return {
-            structuredContent: { retrieval },
+            structuredContent: { ...contract, eventAudit: auditResult, retrieval },
             content: [
               {
                 type: 'text',
@@ -303,26 +484,29 @@ const inspectComponentToolDefinition: McpToolDefinition = {
           };
         }
 
-        const contractText = formatContractAsText(contract);
+        const contractText = formatContractAsText(contract!);
         const auditText = formatEventHandlerAuditAsText(auditResult);
         return {
-          structuredContent: { retrieval },
+          structuredContent: { ...contract, eventAudit: auditResult, retrieval },
           content: [
             {
               type: 'text',
-              text: `${contractText}\n\n${auditText}\n\n${formatRetrievalEvidence(retrieval)}`,
+              text: `${contractText}\n\n${auditText}\n\n${formatRetrievalEvidence(retrieval!)}`,
             },
           ],
         };
       }
 
-      const retrieval = await derivedRetrievalEvidence(evidenceOptions);
+      const verification = expectation ? verifyContractExpectation({ contract: contract!, content: primary.content, expectation,
+        sourceCurrent: retrieval?.sourceFreshness === 'current' && !retrieval.omissions.some(item => ['CONCURRENT_MUTATION_DETECTED', 'DEPENDENCY_CHANGED'].includes(item.code)) }) : undefined;
+      const contractText = [formatContractAsText(contract!), contract?.propImpact ? formatPropImpactAsText(contract.propImpact) : '',
+        verification ? `Contract verification: ${JSON.stringify(verification)}` : '', formatRetrievalEvidence(retrieval!)].filter(Boolean).join('\n\n');
       return {
-        structuredContent: { retrieval },
+        structuredContent: { ...contract, retrieval, ...(verification ? { verification } : {}) },
         content: [
           {
             type: 'text',
-            text: isJson ? JSON.stringify({ ...contract, retrieval }, null, 2) : `${formatContractAsText(contract)}\n\n${formatRetrievalEvidence(retrieval)}`,
+            text: isJson ? JSON.stringify({ ...contract, retrieval, ...(verification ? { verification } : {}) }, null, 2) : contractText,
           },
         ],
       };

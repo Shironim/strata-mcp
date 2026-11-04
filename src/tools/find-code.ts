@@ -12,6 +12,7 @@ import {
 } from '../engine/search';
 import { dumpSyntaxTree, executeAstGrep, isPatternParseError } from '../engine/astgrep';
 import { mapFrontendScope } from '../engine/frontend-map';
+import { findByIntent } from '../engine/search-intent';
 import {
   parseSafePositiveInt,
   parseStringList,
@@ -34,6 +35,24 @@ const findCodeToolDefinition: McpToolDefinition = {
       : undefined;
     const language = args.language ? String(args.language) : undefined;
 
+    if (args.intent !== undefined) {
+      if ((args.action && args.action !== 'search') || ['pattern', 'query', 'search', 'code', 'code_snippet', 'rule_yaml', 'component', 'component_name', 'componentName',
+        'mode', 'language', 'scope', 'limit', 'offset', 'max_results', 'maxResults', 'exclude_dirs', 'excludeDirs'].some(key => args[key] !== undefined)) {
+        return { isError: true, content: [{ type: 'text', text: 'INTENT_SELECTOR_CONFLICT: use intent with path and format/budget only; remove pattern, component, code, rule_yaml, mode and other actions.' }] };
+      }
+      try {
+        const result = await findByIntent(args.intent, rawTargetPath ? resolveWorkspacePath(rawTargetPath) : resolveProjectRoot());
+        return { structuredContent: result, content: [{ type: 'text', text: isJson ? JSON.stringify(result, null, 2)
+          : `Interpreted query: ${JSON.stringify(result.interpretation.query)}\n${formatMatchesAsText(result.matches)}\nProp supply coverage: ${JSON.stringify(result.coverage.propSupply)}\nPartial static search: review candidates and coverage before concluding absence.` }] };
+      } catch (error) {
+        return { isError: true, content: [{ type: 'text', text: error instanceof Error ? error.message : String(error) }] };
+      }
+    }
+
+    if (pattern !== undefined && pattern.trim().length === 0 && !args.rule_yaml && !args.component && args.action !== 'map' && args.action !== 'dump_ast') {
+      return { isError: true, content: [{ type: 'text', text: 'Pattern cannot be empty or whitespace only.' }] };
+    }
+
     const mode = args.mode ?? 'ast';
     if (!['ast', 'auto', 'literal'].includes(mode) ||
         (mode !== 'ast' && (!pattern || args.rule_yaml || args.component || args.component_name || args.componentName || args.action === 'dump_ast'))) {
@@ -45,7 +64,7 @@ const findCodeToolDefinition: McpToolDefinition = {
     const notice = () => fallbackReason ? '[Notice: Invalid AST pattern; used exact literal line search.]\n' : '';
 
     if (args.action === 'map') {
-      if (pattern || args.rule_yaml || codeSnippet || args.component || args.component_name || args.componentName || args.mode) {
+      if (pattern || args.rule_yaml || codeSnippet || args.component || args.component_name || args.componentName || (args.mode && args.mode !== 'ast')) {
         return { isError: true, content: [{ type: 'text', text: "'action: map' accepts a path, limit, offset, and exclude_dirs only." }] };
       }
       try {
@@ -63,6 +82,7 @@ const findCodeToolDefinition: McpToolDefinition = {
           textOutput = `[Notice: Update available: v${runtimeVersion.server_version} -> v${runtimeVersion.latest_version}. Run: ${runtimeVersion.upgrade_command}]\n\n` + textOutput;
         }
         return {
+          structuredContent: payload,
           content: [{ type: 'text', text: textOutput }],
           metadata: { runtime_version: runtimeVersion },
           runtime_version: runtimeVersion,
@@ -112,7 +132,7 @@ const findCodeToolDefinition: McpToolDefinition = {
             : notice() + formatMatchesAsText(rawMatches.map(match => ({
               ...match, file: '<snippet>', snippet: match.text,
             }))) }],
-          ...(args.rule_yaml ? {} : { structuredContent: metadata() }),
+          structuredContent: { ...result, ...(args.rule_yaml ? {} : metadata()) },
         };
       }
 
@@ -132,11 +152,14 @@ const findCodeToolDefinition: McpToolDefinition = {
           maxResults,
           excludeDirs,
         });
+        const isTruncated = Boolean(maxResults && matches.length >= maxResults);
+        const coverage = maxResults ? { truncated: isTruncated, limit: maxResults, returned: matches.length } : undefined;
         return {
+          structuredContent: { matches, matchCount: matches.length, ...(coverage ? { coverage, truncated: isTruncated } : {}) },
           content: [
             {
               type: 'text',
-              text: isJson ? JSON.stringify(matches, null, 2) : formatMatchesAsText(matches),
+              text: isJson ? JSON.stringify(matches, null, 2) : formatMatchesAsText(matches) + (isTruncated ? `\n\n[Notice: Results truncated at max_results=${maxResults}.]` : ''),
             },
           ],
         };
@@ -150,11 +173,14 @@ const findCodeToolDefinition: McpToolDefinition = {
           maxResults,
           excludeDirs,
         });
+        const isTruncated = Boolean(maxResults && matches.length >= maxResults);
+        const coverage = maxResults ? { truncated: isTruncated, limit: maxResults, returned: matches.length } : undefined;
         return {
+          structuredContent: { matches, matchCount: matches.length, ...(coverage ? { coverage, truncated: isTruncated } : {}) },
           content: [
             {
               type: 'text',
-              text: isJson ? JSON.stringify(matches, null, 2) : formatMatchesAsText(matches),
+              text: isJson ? JSON.stringify(matches, null, 2) : formatMatchesAsText(matches) + (isTruncated ? `\n\n[Notice: Results truncated at max_results=${maxResults}.]` : ''),
             },
           ],
         };
@@ -168,8 +194,8 @@ const findCodeToolDefinition: McpToolDefinition = {
           matches = await findLiteralCode(options);
         } else {
           try {
-            // Validate explicit modes before keyword pruning can skip every source file.
-            if (args.mode) await executeAstGrep({ pattern, code: '', language: language || 'auto' });
+            // Validate AST modes before keyword pruning can skip every source file.
+            if (mode === 'ast' || mode === 'auto') await executeAstGrep({ pattern, code: '', language: language || 'auto' });
             matches = await findCode(options);
           } catch (err) {
             if (mode !== 'auto' || !isPatternParseError(err)) throw err;
@@ -178,12 +204,14 @@ const findCodeToolDefinition: McpToolDefinition = {
             matches = await findLiteralCode(options);
           }
         }
+        const isTruncated = Boolean(maxResults && matches.length >= maxResults);
+        const coverage = maxResults ? { truncated: isTruncated, limit: maxResults, returned: matches.length } : undefined;
         return {
-          structuredContent: metadata(),
+          structuredContent: { ...metadata(), matches, matchCount: matches.length, ...(coverage ? { coverage, truncated: isTruncated } : {}) },
           content: [
             {
               type: 'text',
-              text: isJson ? JSON.stringify(matches, null, 2) : notice() + formatMatchesAsText(matches),
+              text: isJson ? JSON.stringify(matches, null, 2) : notice() + formatMatchesAsText(matches) + (isTruncated ? `\n\n[Notice: Results truncated at max_results=${maxResults}.]` : ''),
             },
           ],
         };
@@ -218,7 +246,7 @@ export const findCodeTool: McpToolDefinition = withRetrievalEvidence(findCodeToo
   return {
     workspace: scope ? findProjectRoot(scope) : null, scope, policy: `find-code-${action}-v1`,
     ...(snippet ? { inputHash: hashRetrievalIdentity({ encoding: 'utf-8', content: snippet }) } : {}),
-    query: { action, pattern: pattern ? String(pattern) : null, component: component ? String(component) : null,
+    query: { action, intent: args.intent ?? null, pattern: pattern ? String(pattern) : null, component: component ? String(component) : null,
       rule: args.rule_yaml ? String(args.rule_yaml) : null, language: args.language ?? (snippet ? 'ts' : null),
       mode: pattern ? args.mode ?? 'ast' : null, componentScope: component ? args.scope ?? 'both' : null,
       limit: action === 'map' ? Math.min(500, parseSafePositiveInt(args.limit ?? args.max_results ?? args.maxResults, 100)!) : parseSafePositiveInt(args.max_results ?? args.maxResults, snippet ? 200 : undefined) ?? null,

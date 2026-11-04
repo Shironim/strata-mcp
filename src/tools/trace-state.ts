@@ -2,6 +2,7 @@ import { TOOL_CATALOG } from './catalog';
 import { withRetrievalEvidence } from './retrieval-response';
 import { observeRetrievalIndex, indexedRetrievalEvidence } from '../engine/index-retrieval-evidence';
 import { formatRetrievalEvidence } from '../engine/retrieval-evidence';
+import { syncWorkspace } from '../engine/storage/delta-sync';
 import fs from 'node:fs';
 import {
   queryStateImpact,
@@ -109,6 +110,11 @@ const traceStateToolDefinition: McpToolDefinition = {
       const depth = parseSafePositiveInt(args.depth ?? args.max_depth ?? args.maxDepth, 1) ?? 1;
 
       const shouldMultiHop = depth > 1 || args.direction === 'dependencies' || args.direction === 'both';
+      try {
+        await syncWorkspace(targetPath);
+      } catch {
+        // Unindexed or uninitialized workspace will be handled by observeRetrievalIndex
+      }
       const before = observeRetrievalIndex(targetPath);
       const evidence = () => indexedRetrievalEvidence({ workspace: targetPath, scope: targetPath, policy: 'state-trace-v1', before,
         query: { identifier, role, depth, direction: shouldMultiHop ? args.direction || 'both' : 'consumers' },
@@ -119,10 +125,11 @@ const traceStateToolDefinition: McpToolDefinition = {
           direction: (args.direction as 'consumers' | 'dependencies' | 'both') || 'both',
           maxDepth: depth,
           role,
+          skipSync: true,
         });
         const retrieval = evidence();
         return {
-          structuredContent: { retrieval },
+          structuredContent: { ...result, retrieval },
           content: [
             {
               type: 'text',
@@ -132,10 +139,10 @@ const traceStateToolDefinition: McpToolDefinition = {
         };
       }
 
-      const result = await queryStateImpact(targetPath, identifier, role);
+      const result = await queryStateImpact(targetPath, identifier, role, { skipSync: true });
       const retrieval = evidence();
       return {
-        structuredContent: { retrieval },
+        structuredContent: { ...result, retrieval },
         content: [
           {
             type: 'text',

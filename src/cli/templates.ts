@@ -17,20 +17,22 @@ Prioritize using \`strata-mcp\` MCP tools over performing raw text searches (\`g
 | Frontend Scenario | Strata-MCP Tool | Advantage vs Raw File Reading |
 |---|---|---|
 | Investigating features, domains, or components | \`find_code(action: "map")\`, then \`inspect_component(view: "map")\` | Select files and regions from a bounded inventory without pulling full sources; fetch exact source slices only via hash-bound \`source_ref\`. |
-| Inspecting props, emits, slots, exposed methods, and state | \`inspect_component\` | Delivers a concise public contract (10–30 lines) without flooding the context window with hundreds of template HTML lines. |
+| Inspecting props, emits, slots, exposed methods, and state | \`inspect_component\` | Returns a structural contract with evidence and limitations; request summary for an overview and full for primary details. |
 | Mapping component tree hierarchy or parent-child relations | \`get_component_tree\` | Instantly displays component topology (\`downward\`/\`down\` or \`upward\`/\`up\`), props drilling, and import dependencies. |
 | Searching template structures, variable bindings, or expressions | \`find_code\` | AST structural pattern matching that is resilient against whitespace differences, line formatting, and local naming. |
-| Tracing global/local reactive state flow (Pinia, Context, Zustand) | \`trace_state\` | Uncovers read/write blast radius (\`consumers\`, \`dependencies\`, \`both\`) across the entire application. |
+| Tracing global/local reactive state flow (Pinia, Context, Zustand) | \`trace_state\` | Finds static read/write candidates within the selected scope and capability (\`consumers\`, \`dependencies\`, \`both\`); review unresolved and excluded references. |
 | Extracting URL routes, route parameters, and layout hierarchies | \`audit_frontend(target: "routes")\` | Maps page sitemaps across Next.js, Nuxt, Astro, SvelteKit, and Inertia without reading dozens of page files. |
 | Extracting backend API calls (Inertia, TanStack, Axios, fetch) | \`audit_frontend(target: "api-contracts")\` | Discovers endpoint URLs, HTTP methods, form payload fields, and \`backendTargetHint\` to backend controllers. |
 | Auditing dead code, unused state, archetype drift, design tokens, or bundle | \`audit_frontend\` | Verifies architectural health and cleanliness (\`dead-components\`, \`dead-state\`, \`routes\`, \`similar-templates\`, \`design-tokens\`, \`bundle-health\`, \`api-contracts\`, \`archetype-drift\`, \`all\`). |
-| Refactoring props, events, models, or slots across all consumers | \`generate_patch_plan\` | Produces prescriptive AST patch recommendations (\`rename_prop\`, \`remove_prop\`, \`rename_event\`, \`rename_model\`, \`rename_slot\`) without risks of manual regressions. |
+| Refactoring props, events, models, or slots across discovered consumers | \`generate_patch_plan\` | Proposes supported static edits (\`rename_prop\`, \`remove_prop\`, \`rename_event\`, \`rename_model\`, \`rename_slot\`) with hashes; review coverage and preconditions, then verify the edited contract and run relevant application checks. |
 
 ## 3. Protocol & Execution Principles
 - **Map First, Read Selectively:** Inventory scope using \`find_code(action: "map")\`, map selected files with \`inspect_component(view: "map")\`, then copy the returned \`source_ref\` for \`view: "source"\`. Never construct line numbers or byte offsets manually.
 - **Evidence Boundaries:** Maps and ranges indicate source locations, not quality or correctness. Treat framework and path hints as candidates/conventions; verify parser diagnostics, status, and coverage before concluding findings.
 - **No Blind Probing:** Never read component files from line 1 when you only need to inspect props, emits, or slots. Use \`inspect_component\`.
 - **Pre-Refactor Verification:** Always verify upstream consumers with \`get_component_tree(direction: "upward")\` or \`generate_patch_plan\` before modifying component props, emits, v-models, or slots.
+- **Layered Output:** Request \`response_detail: "summary"\` for counts and risk metadata, then repeat the request with \`response_detail: "full"\` for primary analysis. Exact source requires full; summary is not a continuation page.
+- **After Prop Edits:** For supported local Vue declarations, inspect with an explicit \`expectation\` (old prop absent, new prop present/type/requiredness). FAIL requires correction; UNKNOWN requires source/application checks and is not PASS. The check does not certify consumers or business behavior.
 `;
 
 export const STRATA_INSPECT_SKILL = `---
@@ -51,8 +53,8 @@ description: Deep frontend AST component inspection, component trees, reactivity
    - Inspect public component contracts (props, emits, slots, exposed methods) via \`inspect_component\` in 15–30 lines instead of 500 lines of template markup.
 
 2. **Refactoring Component Interfaces (Props, Emits, Models, Slots):**
-   - Before renaming or removing a prop or event, calculate the exact blast radius across all parent consumers using \`get_component_tree(direction: "upward")\`.
-   - Generate deterministic, prescriptive AST refactoring instructions across all consumers with \`generate_patch_plan(refactor_type: "rename_prop" | "remove_prop" | "rename_event" | "rename_model" | "rename_slot")\`.
+   - Before renaming or removing a prop or event, inspect scoped consumer candidates using \`get_component_tree(direction: "upward")\`. For Vue props, request \`inspect_component(impact: "summary")\`; use \`impact: "full"\` for usage refs. Counts do not establish runtime completeness.
+   - Generate hash-bound proposals for discovered static consumer usages with \`generate_patch_plan(refactor_type: "rename_prop" | "remove_prop" | "rename_event" | "rename_model" | "rename_slot")\`. Review omissions and target declarations separately; verify after editing.
 
 3. **Verifying Reactivity & State Blast Radius:**
    - Map dependencies and downstream consumers of global/modular stores (Pinia, Zustand, React Context) via \`trace_state\`.
@@ -63,7 +65,7 @@ description: Deep frontend AST component inspection, component trees, reactivity
    - Identify Page Archetype Drift (deviations from standard canonical layouts) using \`audit_frontend(target: "archetype-drift")\`.
 
 5. **Mapping Network Calls & Backend API Contracts:**
-   - Discover all client-side API requests (Inertia, TanStack Query, Axios, native fetch, server actions) and identify backend controller hints via \`audit_frontend(target: "api-contracts")\`.
+   - Discover supported static client-side API expressions and backend controller hints via \`audit_frontend(target: "api-contracts")\`; dynamic endpoints and runtime calls may remain unresolved.
 
 6. **Cleaning Dead Code, Duplicate Templates, & Bundle Health:**
    - Detect unused components, unreferenced stores, duplicate template AST fragments, and rogue CSS design tokens using \`audit_frontend(target: "all")\` or specific targets (\`dead-components\`, \`dead-state\`, \`similar-templates\`, \`design-tokens\`, \`bundle-health\`).
@@ -236,7 +238,7 @@ Use \`strata-mcp\` tools for structural frontend intelligence rather than readin
 - \`find_code\`: Search code patterns structurally using AST matching.
 - \`trace_state\`: Trace reactive state reads and mutations (Pinia, Context, Zustand).
 - \`audit_frontend\`: Audit routes, api-contracts, dead-components, bundle-health, and archetype-drift.
-- \`generate_patch_plan\`: Plan deterministic AST refactoring patches across all consumers.
+- \`generate_patch_plan\`: Plan hash-bound patches for discovered static consumer usages; review coverage and verify after editing.
 `;
 
 export const STRATA_GEMINI_HOOKS = JSON.stringify(

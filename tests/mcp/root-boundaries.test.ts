@@ -233,6 +233,7 @@ describe('tree and patch consumer scan root boundaries', () => {
   });
 
   it('preserves downward trees and the default route root in CLI and MCP', async () => {
+    write(join(root, 'nuxt.config.ts'), 'export default {}');
     mkdirSync(join(root, 'pages'));
     const page = join(root, 'pages/index.vue');
     write(page, '<script setup>\nimport Local from "../packages/ui/src/Local.vue";\n</script>\n<template><Local/></template>');

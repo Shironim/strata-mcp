@@ -17,6 +17,10 @@ inputSchema: {
         type: 'string',
         description: 'AST pattern (e.g. "console.log($$$)", "ref($$$)"). For exact text use mode: literal; auto falls back only on AST pattern parse errors. Alias: query, search',
       },
+      intent: {
+        type: 'string',
+        description: 'Bounded Vue component-prop intent: "component Child using prop title" / "komponen Child yang memakai prop title", or "component Child omitting prop title" / "komponen Child tanpa prop title". Requires an unambiguous exact component basename in path scope. Returns visible interpretation, usages or resolved render omissions, and indeterminate supply counts. Cannot combine with other search selectors; arbitrary language/event/slot intent is not implemented.',
+      },
       mode: {
         type: 'string',
         enum: ['ast', 'auto', 'literal'],
@@ -65,6 +69,15 @@ inputSchema: {
         type: 'array',
         items: { type: 'string' },
         description: 'List of directory names or paths to ignore during traversal (e.g. ["storage", "legacy"])',
+      },
+      max_bytes: {
+        type: 'integer',
+        minimum: 512,
+        description: 'Hard limit for the full UTF-8 JSON tool result, including metadata and content/structuredContent duplication; excludes JSON-RPC framing. Pages one selected collection, or returns an explicit budget error when atomic data/metadata cannot fit. Minimum 512 bytes permits a compact error, not every successful result.',
+      },
+      continuation_token: {
+        type: 'string',
+        description: 'Deterministic continuation token from a previous truncated retrieval to fetch the next page.',
       },
     },
   }
@@ -132,6 +145,16 @@ inputSchema: {
         description:
           'When true (default), deeply infers object prop sub-properties (.data, .links, etc.) and data shapes from template and script AST',
       },
+      impact: {
+        type: 'string', enum: ['none', 'summary', 'full'],
+        description: 'Optional contract-only prop impact scan (default none). Vue static template consumer counts, usage counts, candidates and rename/remove risk. summary omits locations; full includes hash-bound usage refs. Scope uses project_root; unresolved/ignored/runtime uses prevent completeness claims.',
+      },
+      expectation: {
+        type: 'object', additionalProperties: false, required: ['props'],
+        properties: { props: { type: 'array', minItems: 1, items: { type: 'object', additionalProperties: false,
+          required: ['name', 'exists'], properties: { name: { type: 'string', minLength: 1 }, exists: { type: 'boolean' }, type: { type: 'string' }, required: { type: 'boolean' } } } } },
+        description: 'Contract-only after-edit check of caller-supplied prop expectations. PASS/FAIL is scoped to closed local Vue script-setup defineProps; imported/dynamic definitions or stale source yield UNKNOWN. Example: {"props":[{"name":"label","exists":false},{"name":"heading","exists":true,"type":"string","required":true}]}. Does not certify consumer or business behavior.',
+      },
       resolve_globals: {
         type: 'boolean',
         description:
@@ -151,6 +174,15 @@ inputSchema: {
         type: 'string',
         enum: ['text', 'json'],
         description: 'Output format: text or json (default: "text", alias: output_format)',
+      },
+      max_bytes: {
+        type: 'integer',
+        minimum: 512,
+        description: 'Hard limit for the full UTF-8 JSON tool result, including metadata and content/structuredContent duplication; excludes JSON-RPC framing. Pages one selected collection, or returns an explicit budget error when atomic data/metadata cannot fit. Minimum 512 bytes permits a compact error, not every successful result.',
+      },
+      continuation_token: {
+        type: 'string',
+        description: 'Deterministic continuation token from a previous truncated retrieval to fetch the next page.',
       },
     },
   }
@@ -204,6 +236,15 @@ inputSchema: {
         enum: ['text', 'json'],
         description: 'Output format: text (indented tree) or json (default: "text", alias: output_format)',
       },
+      max_bytes: {
+        type: 'integer',
+        minimum: 512,
+        description: 'Hard limit for the full UTF-8 JSON tool result, including metadata and content/structuredContent duplication; excludes JSON-RPC framing. Pages one selected collection, or returns an explicit budget error when atomic data/metadata cannot fit. Minimum 512 bytes permits a compact error, not every successful result.',
+      },
+      continuation_token: {
+        type: 'string',
+        description: 'Deterministic continuation token from a previous truncated retrieval to fetch the next page.',
+      },
     },
   }
 },
@@ -241,6 +282,15 @@ inputSchema: {
         type: 'string',
         enum: ['text', 'json'],
         description: 'Output format: text or json (default: "text", alias: output_format)',
+      },
+      max_bytes: {
+        type: 'integer',
+        minimum: 512,
+        description: 'Hard limit for the full UTF-8 JSON tool result, including metadata and content/structuredContent duplication; excludes JSON-RPC framing. Pages one selected collection, or returns an explicit budget error when atomic data/metadata cannot fit. Minimum 512 bytes permits a compact error, not every successful result.',
+      },
+      continuation_token: {
+        type: 'string',
+        description: 'Deterministic continuation token from a previous truncated retrieval to fetch the next page.',
       },
     },
   }
@@ -323,6 +373,15 @@ inputSchema: {
         enum: ['text', 'json'],
         description: 'Output format: text or json (default: "text", alias: output_format)',
       },
+      max_bytes: {
+        type: 'integer',
+        minimum: 512,
+        description: 'Hard limit for the full UTF-8 JSON tool result, including metadata and content/structuredContent duplication; excludes JSON-RPC framing. Pages one selected collection, or returns an explicit budget error when atomic data/metadata cannot fit. Minimum 512 bytes permits a compact error, not every successful result.',
+      },
+      continuation_token: {
+        type: 'string',
+        description: 'Deterministic continuation token from a previous truncated retrieval to fetch the next page.',
+      },
     },
   }
 },
@@ -368,8 +427,35 @@ inputSchema: {
         enum: ['text', 'json'],
         description: 'Output format: text or json (default: "text", alias: output_format)',
       },
+      max_bytes: {
+        type: 'integer',
+        minimum: 512,
+        description: 'Hard limit for the full UTF-8 JSON tool result, including metadata and content/structuredContent duplication; excludes JSON-RPC framing. Pages one selected collection, or returns an explicit budget error when atomic data/metadata cannot fit. Minimum 512 bytes permits a compact error, not every successful result.',
+      },
+      continuation_token: {
+        type: 'string',
+        description: 'Deterministic continuation token from a previous truncated retrieval to fetch the next page.',
+      },
     },
     required: ['path', 'refactor_type', 'old_name'],
   }
 }
 ];
+
+const routing: Record<string, { alternative: string; example: Record<string, unknown> }> = {
+  find_code: { alternative: 'Use inspect_component for the contract or exact source of one file.', example: { path: 'src', component: 'Button', scope: 'template' } },
+  inspect_component: { alternative: 'Use get_component_tree for workspace consumers; this tool does not establish complete impact.', example: { path: 'src/Button.vue', view: 'map' } },
+  get_component_tree: { alternative: 'Use generate_patch_plan for operation-specific edits; static traversal may be partial.', example: { path: 'src/Button.vue', direction: 'upward' } },
+  trace_state: { alternative: 'Use inspect_component for a single-file interface; this tool does not prove runtime state behavior.', example: { path: 'src', identifier: 'useCartStore', role: 'readers' } },
+  audit_frontend: { alternative: 'Use inspect_component for one component; diagnostics do not certify browser or business behavior.', example: { path: '.', target: 'routes' } },
+  generate_patch_plan: { alternative: 'Use inspect_component to understand the target contract first. Plans cover supported static consumer usages, not every dynamic reference, and do not apply edits.', example: { path: 'src/Button.vue', target_path: '.', refactor_type: 'rename_prop', old_name: 'label', new_name: 'heading' } },
+};
+
+for (const tool of TOOL_CATALOG) {
+  tool.inputSchema.properties ??= {};
+  tool.inputSchema.properties.response_detail = { type: 'string', enum: ['summary', 'full'], default: 'full',
+    description: 'Explicit layered output: summary returns counts/previews and preserves evidence, risks and verification; repeat the original request with full for primary analysis. Full remains default for compatibility. Summary is not a continuation page or exact source.' };
+  const guide = routing[tool.name]!;
+  tool.description += ` ${guide.alternative} Example input: ${JSON.stringify(guide.example)}. Analysis does not modify application source; internal cache/index and telemetry may be updated.`;
+  tool.annotations = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true };
+}

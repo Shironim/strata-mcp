@@ -29,6 +29,7 @@ test('auto reports literal fallback while strict AST returns a parse error', asy
   expect((auto as any).structuredContent.modeUsed).toBe('literal');
   expect((auto as any).structuredContent.fallbackReason).toBeDefined();
   expect((await findCodeTool.handler({ ...args, mode: 'ast' })).isError).toBe(true);
+  expect((await findCodeTool.handler({ ...args })).isError).toBe(true);
 });
 
 test('valid AST returns structural matches as a JSON array', async () => {

@@ -4,7 +4,7 @@ import { mapSourceFile } from './engine/source-map';
 import { mapFrontendScope } from './engine/frontend-map';
 import { extractComponentOutline, formatOutlineAsText } from './engine/outline';
 import { findCodeTool } from './tools/find-code';
-import { existsSync, promises as fs } from 'node:fs';
+import { existsSync, promises as fs, statSync } from 'node:fs';
 import { findCodeByRule, findComponentUsage, formatMatchesAsText } from './engine/search';
 import { extractComponentContract, formatContractAsText } from './engine/contract';
 import { sliceSymbol, formatSymbolSliceAsText } from './engine/slicer';
@@ -581,6 +581,10 @@ export async function main(argv: string[] = process.argv.slice(2)) {
         console.error(`Error: File not found: "${filePath}".`);
         process.exit(1);
       }
+      if (statSync(filePath).isDirectory()) {
+        console.error(`Error: "${filePath}" is a directory. Provide a path to a component file, or use "strata audit" / "strata tree" to inspect directories.`);
+        process.exit(1);
+      }
 
       const view = parseStringFlag(flags.view);
       if (view === 'map') {
@@ -595,8 +599,17 @@ export async function main(argv: string[] = process.argv.slice(2)) {
       }
       if (view === 'source') {
         const rawRef = parseStringFlag(flags['source-ref'] ?? flags.sourceRef);
-        if (!rawRef) throw new Error('--view source requires --source-ref <json> returned by --view map');
-        const ref = JSON.parse(rawRef);
+        if (!rawRef) {
+          console.error('Error: --view source requires --source-ref <json> returned by --view map.');
+          process.exit(1);
+        }
+        let ref;
+        try {
+          ref = JSON.parse(rawRef);
+        } catch {
+          console.error(`Error: Invalid JSON for --source-ref: "${rawRef}".`);
+          process.exit(1);
+        }
         const source = await readSourceRef(filePath, ref);
         console.log(isJson ? JSON.stringify({ file: filePath, source_ref: ref, source }, null, 2) : source);
         return;

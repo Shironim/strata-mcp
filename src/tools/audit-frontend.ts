@@ -1,7 +1,8 @@
 import { TOOL_CATALOG } from './catalog';
 import { withRetrievalEvidence } from './retrieval-response';
 import { observeRetrievalIndex, indexedRetrievalEvidence } from '../engine/index-retrieval-evidence';
-import { formatRetrievalEvidence } from '../engine/retrieval-evidence';
+import { formatRetrievalEvidence, filesystemAuditRetrievalEvidence } from '../engine/retrieval-evidence';
+import { syncWorkspace } from '../engine/storage/delta-sync';
 import { scanRoutes, formatRoutesAsText } from '../engine/routes';
 import { findUnusedComponents, formatUnusedAsText } from '../engine/audit';
 import { findUnusedState, formatUnusedStateAsText } from '../engine/database';
@@ -65,11 +66,42 @@ const auditFrontendToolDefinition: McpToolDefinition = {
 
       const runtimeVersion = getCachedRuntimeVersion();
       void checkRuntimeVersion().catch(() => {});
-      const before = observeRetrievalIndex(targetPath);
+      const isDirectFilesystemTarget = ['routes', 'similar-templates', 'design-tokens', 'bundle-health', 'api-contracts', 'archetype-drift'].includes(target);
+      if (!isDirectFilesystemTarget) {
+        try {
+          await syncWorkspace(targetPath);
+        } catch {}
+      }
+      const before = isDirectFilesystemTarget ? null : observeRetrievalIndex(targetPath);
       const formatAuditResponse = (payload: any, formattedText: string) => {
-        const retrieval = indexedRetrievalEvidence({ workspace: targetPath, scope: scopePath ?? targetPath, policy: 'frontend-audit-v1', before,
-          query: { target, excludeDirs, ignorePatterns, includePages, frameworkHint: frameworkHint ?? null, threshold: threshold ?? null, routeView, prefix: args.prefix ?? null, exemplarPath: args.exemplar_path ?? args.exemplarPath ?? null },
-          selectionReason: 'Requested audit target and filters; individual diagnostics retain their own evidence strength.' });
+        const query = { target, excludeDirs, ignorePatterns, includePages, frameworkHint: frameworkHint ?? null, threshold: threshold ?? null, routeView, prefix: args.prefix ?? null, exemplarPath: args.exemplar_path ?? args.exemplarPath ?? null };
+        const retrieval = isDirectFilesystemTarget
+          ? filesystemAuditRetrievalEvidence({
+              workspace: targetPath,
+              scope: scopePath ?? targetPath,
+              policy: 'filesystem-audit-v1',
+              query,
+              selectionReason: 'Requested direct filesystem/AST audit target and filters; AST diagnostics retain their own evidence strength.',
+            })
+          : indexedRetrievalEvidence({
+              workspace: targetPath,
+              scope: scopePath ?? targetPath,
+              policy: 'frontend-audit-v1',
+              before,
+              query,
+              selectionReason: 'Requested audit target and filters; individual diagnostics retain their own evidence strength.',
+            });
+        const routeEntries = Array.isArray(payload?.routes) ? payload.routes : payload?.routes?.routes ?? [];
+        const ownership = payload?.projectContext ?? payload?.routes?.projectContext;
+        retrieval.omissions.push(...(ownership?.diagnostics ?? []));
+        const configReasons = new Set<string>();
+        for (const route of routeEntries) {
+          const effective = route.nextEffectiveSegmentConfig;
+          if (!effective) continue;
+          for (const issue of effective.unresolvedFields) configReasons.add(`${issue.field}: ${issue.reason}`);
+          if (effective.freshness === 'stale') configReasons.add(`${route.filePath}: Segment config sources changed or could not be read.`);
+        }
+        for (const reason of configReasons) retrieval.omissions.push({ code: 'NEXT_EFFECTIVE_CONFIG_PARTIAL', reason });
         const finalJson = isJson
           ? JSON.stringify({ runtime_version: runtimeVersion, ...(typeof payload === 'object' && payload !== null ? payload : { data: payload }), retrieval }, null, 2)
           : undefined;
@@ -78,7 +110,7 @@ const auditFrontendToolDefinition: McpToolDefinition = {
           finalText = `[Notice: Update available: v${runtimeVersion.server_version} -> v${runtimeVersion.latest_version}. Run: ${runtimeVersion.upgrade_command}]\n\n` + finalText;
         }
         return {
-          structuredContent: { retrieval },
+          structuredContent: { runtime_version: runtimeVersion, ...(typeof payload === 'object' && payload !== null ? payload : { data: payload }), retrieval },
           content: [{ type: 'text' as const, text: finalText }],
           metadata: { runtime_version: runtimeVersion },
           runtime_version: runtimeVersion,

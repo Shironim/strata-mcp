@@ -1,6 +1,7 @@
 import { TOOL_CATALOG } from './catalog';
 import { withRetrievalEvidence } from './retrieval-response';
 import { generatePatchPlan } from '../engine/patch-plan';
+import { checkPatchPreconditions } from '../engine/patch-preconditions';
 import { observeRetrievalIndex, indexedRetrievalEvidence } from '../engine/index-retrieval-evidence';
 import { formatRetrievalEvidence } from '../engine/retrieval-evidence';
 import { resolve } from 'node:path';
@@ -49,6 +50,14 @@ const patchPlanToolDefinition: McpToolDefinition = {
         targetPath,
       });
 
+      const preconditionCheck = await checkPatchPreconditions(plan.patches);
+      plan.preconditionsValidated = preconditionCheck.valid;
+      if (!preconditionCheck.valid) {
+        for (const err of preconditionCheck.errors) {
+          plan.coverage.diagnostics.push({ file: componentPath, code: 'PRECONDITION_FAILED', message: err });
+        }
+      }
+
       const retrieval = indexedRetrievalEvidence({ workspace, scope: workspace, policy: 'consumer-patch-plan-v1', before,
         query: { componentPath, refactorType, oldName, newName: newName ?? null },
         selectionReason: 'Upward consumer candidates and supported static usages for the requested component refactor.' });
@@ -58,7 +67,7 @@ const patchPlanToolDefinition: McpToolDefinition = {
 
       if (isJson) {
         return {
-          structuredContent: { retrieval },
+          structuredContent: { ...plan, retrieval },
           content: [
             {
               type: 'text',
@@ -78,6 +87,7 @@ const patchPlanToolDefinition: McpToolDefinition = {
         `- **Candidate Consumers:** ${plan.coverage.candidateCount}`,
         `- **Failed / Unsupported:** ${plan.coverage.failedCount} / ${plan.coverage.unsupportedCount}`,
         `- **Patches Found:** ${plan.totalPatches}`,
+        `- **Preconditions Validated:** ${plan.preconditionsValidated ? 'PASS (all patches verified against current disk snapshots)' : 'FAIL'}`,
         '- **Coverage:** bounded by graph discovery and supported static usages; forwarding and dynamic usages may be omitted.',
         ...plan.coverage.diagnostics.map(d => `- **${d.code}:** ${d.file}: ${d.message}`),
         '- **Operation scope:** supported static consumer usages; target declarations, forwarding, and dynamic components are not rewritten.',
@@ -103,7 +113,7 @@ const patchPlanToolDefinition: McpToolDefinition = {
 
       lines.push(formatRetrievalEvidence(retrieval));
       return {
-        structuredContent: { retrieval },
+        structuredContent: { ...plan, retrieval },
         content: [
           {
             type: 'text',

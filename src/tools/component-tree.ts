@@ -140,7 +140,7 @@ const componentTreeToolDefinition: McpToolDefinition = {
         reason: `${diagnostic.reason} File: ${diagnostic.filePath}; source SHA-256: ${diagnostic.sourceHash ?? 'not-captured'}`,
       })));
       return {
-        structuredContent: { retrieval },
+        structuredContent: { ...tree, retrieval },
         content: [
           {
             type: 'text',

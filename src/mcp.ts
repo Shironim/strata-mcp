@@ -10,6 +10,7 @@ import { AnalysisSupervisor } from './analysis-supervisor';
 import { STRATA_INSTRUCTIONS } from './instructions';
 import { STRATA_VERSION } from './version';
 import { StrataTelemetry } from './engine/telemetry';
+import { enforceResponseLimit } from './engine/context-budget';
 import { getLastKnownProjectRoot, setLastKnownProjectRoot } from './engine/path-resolver';
 
 export { TOOLS, findTool } from './tools';
@@ -252,6 +253,31 @@ export function coerceToolArguments(toolName: string, rawArgs: any): Record<stri
     }
   }
 
+  // 15. Context Budget & Continuation Token Normalization (R-07 / R-08)
+  const rawMaxBytes = args.max_bytes ?? args.maxBytes;
+  if (rawMaxBytes !== undefined) {
+    const parsedMaxBytes = parseSafePositiveInt(rawMaxBytes);
+    if (parsedMaxBytes !== undefined) {
+      args.max_bytes = parsedMaxBytes;
+      args.maxBytes = parsedMaxBytes;
+    } else {
+      delete args.max_bytes;
+      delete args.maxBytes;
+    }
+  }
+
+  const rawContinuationToken = args.continuation_token ?? args.continuationToken;
+  if (rawContinuationToken !== undefined) {
+    const trimmed = String(rawContinuationToken).trim();
+    if (trimmed) {
+      args.continuation_token = trimmed;
+      args.continuationToken = trimmed;
+    } else {
+      delete args.continuation_token;
+      delete args.continuationToken;
+    }
+  }
+
   return args;
 }
 
@@ -390,10 +416,11 @@ export function createMcpServer(): Server {
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     return {
-      tools: TOOLS.map(({ name, description, inputSchema }) => ({
+      tools: TOOLS.map(({ name, description, inputSchema, annotations }) => ({
         name,
         description,
         inputSchema,
+        annotations,
       })),
     };
   });
@@ -425,7 +452,7 @@ export function createMcpServer(): Server {
         status: 'error',
         error: { code: 'UNKNOWN_TOOL', message: errorMsg },
       }, fallbackRoot);
-      return {
+      return enforceResponseLimit({
         isError: true,
         content: [
           {
@@ -433,7 +460,7 @@ export function createMcpServer(): Server {
             text: errorMsg,
           },
         ],
-      };
+      }, args.max_bytes ?? args.maxBytes);
     }
 
     try {
@@ -450,12 +477,14 @@ export function createMcpServer(): Server {
       }
 
       const effectiveRoot = response?.projectRoot ?? explicitRoot ?? requestRootHint ?? process.cwd();
+      const { projectRoot: _workerRoot, ...cleanResponse } = response;
+      const publicResponse = enforceResponseLimit(cleanResponse, args.max_bytes ?? args.maxBytes);
 
       let bytesOut = 0;
       let linesOut = 0;
 
-      if (Array.isArray(response?.content)) {
-        for (const item of response.content) {
+      if (Array.isArray(publicResponse?.content)) {
+        for (const item of publicResponse.content) {
           if (typeof item.text === 'string') {
             bytesOut += Buffer.byteLength(item.text, 'utf8');
             linesOut += item.text.split('\n').length;
@@ -463,14 +492,14 @@ export function createMcpServer(): Server {
         }
       }
 
-      const itemsFound = extractItemsFound(name, args, response);
-      const isHandlerError = Boolean(response?.isError);
+      const itemsFound = extractItemsFound(name, args, publicResponse);
+      const isHandlerError = Boolean(publicResponse?.isError);
       let handlerErrorDiagnosis: { code: string; message: string } | undefined;
 
       if (isHandlerError) {
         let firstLine = '';
-        if (Array.isArray(response.content)) {
-          const firstText = response.content.find((c: any) => typeof c.text === 'string')?.text;
+        if (Array.isArray(publicResponse.content)) {
+          const firstText = publicResponse.content.find((c: any) => typeof c.text === 'string')?.text;
           if (firstText) {
             firstLine = firstText.trim().split('\n')[0].slice(0, 256);
           }
@@ -498,8 +527,7 @@ export function createMcpServer(): Server {
       }, effectiveRoot);
 
       // Strip internal worker metadata before returning to client
-      const { projectRoot: _workerRoot, ...cleanResponse } = response;
-      return cleanResponse;
+      return publicResponse;
     } catch (err) {
       const durationMs = Math.round(performance.now() - startTime);
       const errorInstance = err instanceof Error ? err : new Error(String(err));
@@ -521,7 +549,7 @@ export function createMcpServer(): Server {
         },
       }, effectiveRoot);
 
-      return {
+      return enforceResponseLimit({
         isError: true,
         content: [
           {
@@ -529,7 +557,7 @@ export function createMcpServer(): Server {
             text: `Tool error (${name}): ${errorInstance.message}`,
           },
         ],
-      };
+      }, args.max_bytes ?? args.maxBytes);
     }
   });
 
