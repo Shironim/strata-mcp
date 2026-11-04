@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, renameSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 export interface StrataToolCallEvent {
@@ -7,6 +7,7 @@ export interface StrataToolCallEvent {
   session_id?: string;
   event: 'tool_call_completed' | 'tool_call_failed';
   tool: string;
+  action?: string;
   duration_ms: number;
   cache_hit?: boolean;
   input: Record<string, any>;
@@ -14,7 +15,11 @@ export interface StrataToolCallEvent {
     bytes_out?: number;
     lines_out?: number;
     items_found?: number;
+    estimated_tokens?: number;
+    response_bytes?: number;
   };
+  bloat_alert?: boolean;
+  output_digest?: { summary?: string; sample_preview?: string };
   status: 'success' | 'error';
   error?: {
     code?: string;
@@ -54,8 +59,56 @@ export interface ObservabilitySummary {
 }
 
 export class StrataTelemetry {
-  private static readonly MAX_LOG_SIZE_BYTES = 2 * 1024 * 1024; // 2MB
-  private static readonly SLOW_EXECUTION_THRESHOLD_MS = 250;
+  public static readonly MAX_LOG_SIZE_BYTES = 2 * 1024 * 1024;
+  public static readonly SLOW_EXECUTION_THRESHOLD_MS = 250;
+  public static readonly BLOAT_BYTE_THRESHOLD = 16 * 1024;
+
+  public static createOutputDigest(rawText: string, maxChars = 300): NonNullable<StrataToolCallEvent['output_digest']> {
+    const text = rawText.replace(/\s+/g, ' ').trim();
+    if (!text) return { summary: 'empty_output' };
+    const limit = Number.isFinite(maxChars) ? Math.max(0, Math.min(300, Math.floor(maxChars))) : 300;
+    if (text.length <= limit) return { sample_preview: text };
+    // Include the omission marker in the limit, including for very small budgets.
+    let remaining = Math.max(0, limit - 40);
+    let marker = '';
+    for (let i = 0; i < 4; i++) {
+      marker = ` ... [${text.length - remaining} chars omitted] ... `;
+      remaining = Math.max(0, limit - marker.length);
+    }
+    if (marker.length >= limit) return { sample_preview: marker.slice(0, limit) };
+    const head = Math.ceil(remaining / 2);
+    const tail = remaining - head;
+    return { sample_preview: text.slice(0, head) + marker + (tail ? text.slice(-tail) : '') };
+  }
+
+  /** Measure the final public result; never attach telemetry to the MCP response. */
+  public static recordToolResponse(
+    event: StrataToolCallEvent,
+    response: { content?: Array<{ text?: unknown }> },
+    workspaceRoot: string = process.cwd()
+  ): void {
+    try {
+      const texts = (response.content ?? []).flatMap(item => typeof item.text === 'string' ? [item.text] : []);
+      const bytes = texts.reduce((sum, value) => sum + Buffer.byteLength(value, 'utf8'), 0);
+      const responseBytes = Buffer.byteLength(JSON.stringify(response), 'utf8');
+      this.recordToolCall({
+        ...event,
+        metrics: {
+          ...event.metrics,
+          bytes_out: bytes,
+          lines_out: texts.reduce((sum, value) => sum + (value ? value.split('\n').length : 0), 0),
+          estimated_tokens: Math.round(bytes / 4),
+          response_bytes: responseBytes,
+        },
+        bloat_alert: responseBytes >= this.BLOAT_BYTE_THRESHOLD,
+        output_digest: texts.every(text => !text.trim()) ? { summary: 'empty_output' }
+          : process.env.STRATA_LOG_PREVIEW === '1' ? this.createOutputDigest(texts.join('\n'))
+          : { summary: 'preview_disabled' },
+      }, workspaceRoot);
+    } catch {
+      // Measurement must not change the tool's result either.
+    }
+  }
 
   /**
    * Resolves the log file path inside the active workspace's .strata directory.
@@ -71,59 +124,68 @@ export class StrataTelemetry {
     event: StrataToolCallEvent,
     workspaceRoot: string = process.cwd()
   ): void {
-    const input: Record<string, any> = {};
-    for (const key of Object.keys(event.input).slice(0, 16)) {
-      const value = event.input[key];
-      input[key.slice(0, 32)] = typeof value === 'string' ? { bytes: Buffer.byteLength(value) } : { type: typeof value };
-    }
-    const payload: StrataToolCallEvent = {
-      timestamp: (event.timestamp || new Date().toISOString()).slice(0, 64),
-      event: event.event, tool: event.tool.slice(0, 64), duration_ms: event.duration_ms,
-      trace_id: event.trace_id?.slice(0, 64), session_id: event.session_id?.slice(0, 64),
-      status: event.status, input, metrics: event.metrics,
-      error: event.error ? {code: event.error.code?.slice(0, 64), message: event.error.message.slice(0, 384)} : undefined,
-    };
-
-    let jsonLine = JSON.stringify(payload);
-    if (Buffer.byteLength(jsonLine) > 4095) {
-      payload.input = {}; payload.metrics = undefined;
-      if (payload.error) payload.error.message = payload.error.message.slice(0, 128);
-      jsonLine = JSON.stringify(payload);
-    }
-
-    // Sink 1: Live stderr stream for operator monitoring (slow queries & failures)
-    if (payload.status === 'error') {
-      process.stderr.write(`[strata-telemetry ERROR] ${jsonLine}\n`);
-    } else if (payload.duration_ms >= this.SLOW_EXECUTION_THRESHOLD_MS) {
-      process.stderr.write(`[strata-telemetry SLOW_WARN] ${jsonLine}\n`);
-    }
-
-    // Sink 2: Append-only persistent file recorder in .strata/strata.log (only if .strata already exists)
     try {
-      const logPath = this.getLogPath(workspaceRoot);
-      const logDir = dirname(logPath);
+      const input: Record<string, any> = {};
+      for (const key of Object.keys(event.input).slice(0, 16)) {
+        const value = event.input[key];
+        input[key.slice(0, 32)] = typeof value === 'string' ? { bytes: Buffer.byteLength(value) } : { type: typeof value };
+      }
+      const payload: StrataToolCallEvent = {
+        timestamp: (event.timestamp || new Date().toISOString()).slice(0, 64),
+        event: event.event, tool: event.tool.slice(0, 64), duration_ms: event.duration_ms,
+        trace_id: event.trace_id?.slice(0, 64), session_id: event.session_id?.slice(0, 64),
+        status: event.status, input, metrics: event.metrics,
+        action: event.action?.slice(0, 64),
+        bloat_alert: event.bloat_alert,
+        output_digest: event.output_digest,
+        error: event.error ? {code: event.error.code?.slice(0, 64), message: event.error.message.slice(0, 384)} : undefined,
+      };
 
-      // Do NOT create .strata directory if it does not already exist
-      if (!existsSync(logDir)) {
-        return;
+      let jsonLine = JSON.stringify(payload);
+      if (Buffer.byteLength(jsonLine) > 4095) {
+        payload.input = {}; payload.output_digest = { summary: 'log_entry_budget' };
+        if (payload.error) payload.error.message = payload.error.message.slice(0, 128);
+        jsonLine = JSON.stringify(payload);
       }
 
-      // Check for rotation if file exceeds 2MB
-      if (existsSync(logPath)) {
-        try {
-          const stats = statSync(logPath);
-          if (stats.size >= this.MAX_LOG_SIZE_BYTES) {
-            const rotatedPath = `${logPath}.1`;
-            renameSync(logPath, rotatedPath);
-          }
-        } catch {
-          // If stat/rotation fails, proceed to append without crashing
+      // A broken stderr sink must not prevent persistence.
+      try {
+        if (payload.status === 'error') {
+          process.stderr.write(`[strata-telemetry ERROR] ${jsonLine}\n`);
+        } else if (payload.bloat_alert) {
+          process.stderr.write(`[strata-telemetry BLOAT_WARN] ${jsonLine}\n`);
+        } else if (payload.duration_ms >= this.SLOW_EXECUTION_THRESHOLD_MS) {
+          process.stderr.write(`[strata-telemetry SLOW_WARN] ${jsonLine}\n`);
         }
-      }
+      } catch {}
 
-      appendFileSync(logPath, `${jsonLine}\n`, 'utf8');
+      // Sink 2: Append-only persistent file recorder in .strata/strata.log (only if .strata already exists)
+      try {
+        const logPath = this.getLogPath(workspaceRoot);
+        const logDir = dirname(logPath);
+
+        // Do NOT create .strata directory if it does not already exist
+        if (!existsSync(logDir)) {
+          return;
+        }
+
+        // Check for rotation if file exceeds 2MB
+        if (existsSync(logPath)) {
+          try {
+            const stats = statSync(logPath);
+            if (stats.size + Buffer.byteLength(jsonLine) + 1 > this.MAX_LOG_SIZE_BYTES) {
+              const rotatedPath = `${logPath}.1`;
+              renameSync(logPath, rotatedPath);
+            }
+          } catch { return; }
+        }
+
+        appendFileSync(logPath, `${jsonLine}\n`, { encoding: 'utf8', mode: 0o600 });
+      } catch {
+        // Telemetry file writes must never crash the main application process
+      }
     } catch {
-      // Telemetry file writes must never crash the main application process
+      // Serialization failures are isolated from tool execution.
     }
   }
 

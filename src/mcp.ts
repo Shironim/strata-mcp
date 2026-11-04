@@ -439,6 +439,11 @@ export function createMcpServer(): Server {
     const args = coerceToolArguments(name, rawArgs);
     const startTime = performance.now();
     const tool = findTool(name);
+    const actionKey = name === 'inspect_component' ? 'view' : name === 'audit_frontend' ? 'target'
+      : name === 'generate_patch_plan' ? 'refactor_type' : name === 'get_component_tree' || name === 'trace_state' ? 'direction' : 'action';
+    const actionSchema = tool?.inputSchema.properties?.[actionKey] as { enum?: unknown[]; default?: unknown } | undefined;
+    const requestedAction = args[actionKey] ?? actionSchema?.default;
+    const action = typeof requestedAction === 'string' && actionSchema?.enum?.includes(requestedAction) ? requestedAction : undefined;
 
     // Capture explicit per-request root and determine request root hint without polluting global state early
     const explicitRoot = typeof args.root === 'string' && args.root.trim() ? args.root.trim() : undefined;
@@ -450,7 +455,8 @@ export function createMcpServer(): Server {
     if (!tool) {
       const errorMsg = `Unknown tool name: ${name}. Available tools: ${TOOLS.map((t) => t.name).join(', ')}.`;
       const fallbackRoot = explicitRoot ?? getLastKnownProjectRoot() ?? process.cwd();
-      StrataTelemetry.recordToolCall({
+      const publicResponse = enforceResponseLimit({ isError: true, content: [{ type: 'text', text: errorMsg }] }, args.max_bytes ?? args.maxBytes);
+      StrataTelemetry.recordToolResponse({
         event: 'tool_call_failed',
         tool: name,
         trace_id: traceId,
@@ -459,16 +465,8 @@ export function createMcpServer(): Server {
         input: args,
         status: 'error',
         error: { code: 'UNKNOWN_TOOL', message: errorMsg },
-      }, fallbackRoot);
-      return enforceResponseLimit({
-        isError: true,
-        content: [
-          {
-            type: 'text',
-            text: errorMsg,
-          },
-        ],
-      }, args.max_bytes ?? args.maxBytes);
+      }, publicResponse, fallbackRoot);
+      return publicResponse;
     }
 
     try {
@@ -488,18 +486,6 @@ export function createMcpServer(): Server {
       const { projectRoot: _workerRoot, ...cleanResponse } = response;
       const publicResponse = enforceResponseLimit(cleanResponse, args.max_bytes ?? args.maxBytes);
 
-      let bytesOut = 0;
-      let linesOut = 0;
-
-      if (Array.isArray(publicResponse?.content)) {
-        for (const item of publicResponse.content) {
-          if (typeof item.text === 'string') {
-            bytesOut += Buffer.byteLength(item.text, 'utf8');
-            linesOut += item.text.split('\n').length;
-          }
-        }
-      }
-
       const itemsFound = extractItemsFound(name, args, publicResponse);
       const isHandlerError = Boolean(publicResponse?.isError);
       let handlerErrorDiagnosis: { code: string; message: string } | undefined;
@@ -518,21 +504,20 @@ export function createMcpServer(): Server {
         };
       }
 
-      StrataTelemetry.recordToolCall({
+      StrataTelemetry.recordToolResponse({
         event: isHandlerError ? 'tool_call_failed' : 'tool_call_completed',
         tool: name,
+        action,
         trace_id: traceId,
         session_id: sessionId,
         duration_ms: durationMs,
         input: args,
         metrics: {
-          bytes_out: bytesOut,
-          lines_out: linesOut,
           ...(itemsFound !== undefined ? { items_found: itemsFound } : {}),
         },
         status: isHandlerError ? 'error' : 'success',
         error: handlerErrorDiagnosis,
-      }, effectiveRoot);
+      }, publicResponse, effectiveRoot);
 
       // Strip internal worker metadata before returning to client
       return publicResponse;
@@ -542,9 +527,14 @@ export function createMcpServer(): Server {
       const errorCode = (errorInstance.message.match(/^([A-Z_]+):/) || [])[1] || 'EXECUTION_ERROR';
       const effectiveRoot = explicitRoot ?? requestRootHint ?? process.cwd();
 
-      StrataTelemetry.recordToolCall({
+      const publicResponse = enforceResponseLimit({
+        isError: true,
+        content: [{ type: 'text', text: `Tool error (${name}): ${errorInstance.message}` }],
+      }, args.max_bytes ?? args.maxBytes);
+      StrataTelemetry.recordToolResponse({
         event: 'tool_call_failed',
         tool: name,
+        action,
         trace_id: traceId,
         session_id: sessionId,
         duration_ms: durationMs,
@@ -555,17 +545,8 @@ export function createMcpServer(): Server {
           message: errorInstance.message.slice(0, 384),
           stack: errorInstance.stack,
         },
-      }, effectiveRoot);
-
-      return enforceResponseLimit({
-        isError: true,
-        content: [
-          {
-            type: 'text',
-            text: `Tool error (${name}): ${errorInstance.message}`,
-          },
-        ],
-      }, args.max_bytes ?? args.maxBytes);
+      }, publicResponse, effectiveRoot);
+      return publicResponse;
     }
   });
 
