@@ -11,7 +11,7 @@ const audit = (id: string, reason: string): CapabilityOperation => ({ id, source
 /** Declared implementation scope, not framework certification. No I/O or version inference. */
 export const CAPABILITY_MANIFEST: Readonly<Record<string, readonly CapabilityOperation[]>> = {
   find_code: [
-    { id: 'intent', source: 'src/engine/search-intent.ts', features: [feature('natural-language', 'partial', 'Bounded Indonesian/English component-prop usage and omission grammar for Vue; target must be unambiguous, query interpretation is returned. Omission matches exclude indeterminate supply and candidate renders. Other intents are unsupported.')] },
+    { id: 'component-prop', source: 'src/engine/search-intent.ts', features: [feature('prop-supply', 'partial', 'Structured Vue component-prop usage and omission search (component + prop_name + prop_presence); target must be unambiguous in scope. Omission matches exclude indeterminate supply and candidate renders.')] },
     { id: 'map', source: 'src/engine/frontend-map.ts', features: [feature('file-inventory', 'partial', 'Bounded frontend path inventory; ignore rules and scope exclude files.')] },
     { id: 'dump_ast', source: 'src/tools/find-code.ts', features: [feature('syntax-tree', 'partial', 'Uses the selected ast-grep language; parser acceptance is not semantic correctness.')] },
     ...['ast', 'auto', 'literal', 'yaml', 'component'].map(id => ({ id, source: 'src/engine/search.ts', features: [
@@ -29,7 +29,6 @@ export const CAPABILITY_MANIFEST: Readonly<Record<string, readonly CapabilityOpe
     { id: 'contract', source: 'src/engine/contract.ts', features: [
       ...['props', 'emits', 'slots', 'state'].map(id => feature(id, 'partial', 'Static extraction varies by syntax and framework; imported/dynamic definitions may remain unresolved.')),
       feature('consumer-count-per-prop', 'partial', 'Opt-in impact summary/full counts explicit static Vue script-setup usages and separates candidates; scope/runtime/config closure remains incomplete. Other target frameworks are unsupported by impact analysis.'),
-      feature('contract-expectations', 'partial', 'Caller-supplied prop presence/type/requiredness checks are evaluated only for closed local Vue script-setup declarations; other definitions yield UNKNOWN. This does not verify consumer or business behavior.'),
     ] },
   ],
   get_component_tree: ['downward', 'upward'].map(id => ({ id, source: `src/engine/graph/${id}-traversal.ts`, features: [boundedGraph] })),
@@ -56,7 +55,7 @@ export const CAPABILITY_MANIFEST: Readonly<Record<string, readonly CapabilityOpe
 export function selectCapabilityOperation(tool: string, args: Record<string, any>): string {
   switch (tool) {
     case 'find_code': {
-      if (args.intent !== undefined) return 'intent';
+      if (args.prop_name !== undefined || args.prop !== undefined || args.propName !== undefined || args.prop_presence !== undefined || args.propPresence !== undefined) return 'component-prop';
       const path = args.path || args.file_path || args.filePath || args.target_path || args.targetPath;
       const code = args.code || args.code_snippet;
       const pattern = args.pattern || args.query || args.search;

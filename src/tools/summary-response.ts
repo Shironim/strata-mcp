@@ -12,7 +12,7 @@ function collectSafetyDetails(data: Record<string, unknown>) {
     if (Array.isArray(value)) { value.forEach((item, index) => visit(item, `${path}[${index}]`)); return; }
     const item = value as Record<string, unknown>;
     for (const [key, child] of Object.entries(item)) {
-      if (!path && ['retrieval', 'coverage', 'diagnostics', 'propImpact', 'verification', 'cost'].includes(key)) continue;
+      if (!path && ['retrieval', 'coverage', 'diagnostics', 'propImpact', 'cost'].includes(key)) continue;
       const nextPath = path ? `${path}.${key}` : key;
       if (/warning|diagnostic|omission|violation|limitation|unresolvedFields|unresolvedTypes|reactivitySmells|propsDrilling/i.test(key)) {
         if (child !== undefined && child !== null && (!Array.isArray(child) || child.length))
@@ -54,6 +54,20 @@ export function summarizeToolResponse(result: ToolCallResponse, tool: string, ar
     ...(boundary.directive !== undefined ? { directive: boundary.directive } : {}),
     ...(boundary.evidence ? { evidence: boundary.evidence } : {}),
   } : undefined;
+  const stateDepsList = data.stateDependencies
+    ? Array.from(new Set([
+        ...((data.stateDependencies as any).stores || []),
+        ...((data.stateDependencies as any).contexts || []),
+        ...((data.stateDependencies as any).composables || []),
+      ])).slice(0, 10)
+    : undefined;
+  const apiCalls = Array.isArray(data.boundaryContracts) && data.boundaryContracts.length > 0
+    ? data.boundaryContracts.slice(0, 10).map((b: any) => ({
+        method: b.method,
+        endpoint: b.targetEndpoint,
+      }))
+    : undefined;
+  const formCount = Array.isArray(data.formContracts) ? data.formContracts.length : undefined;
   const structuredContent = {
     resultSummary: { version: 1, tool, selection, preview,
       ...(!Array.isArray(data.props) && contextSummary ? { projectContext: contextSummary } : {}),
@@ -61,12 +75,15 @@ export function summarizeToolResponse(result: ToolCallResponse, tool: string, ar
         ...(data.framework !== undefined ? { framework: data.framework } : {}),
         ...(boundarySummary ? { renderBoundary: boundarySummary } : {}),
         ...(contextSummary ? { projectContext: contextSummary } : {}),
+        ...(stateDepsList && stateDepsList.length > 0 ? { stateDependencies: stateDepsList } : {}),
+        ...(apiCalls && apiCalls.length > 0 ? { apiCalls } : {}),
+        ...(formCount !== undefined ? { formCount } : {}),
         emitCount: Array.isArray(data.emits) ? data.emits.length : null, slotCount: Array.isArray(data.slots) ? data.slots.length : null } } : {}),
       detailRequest: { tool, arguments: { response_detail: 'full' }, argumentMode: 'merge-original' } },
     safetyDetails: collectSafetyDetails(data),
     isTruncated: true,
     ...(retrieval ? { retrieval } : {}),
-    ...Object.fromEntries(['coverage', 'diagnostics', 'verification', 'interpretation', 'inputFreshness'].filter(key => data[key] !== undefined).map(key => [key, data[key]])),
+    ...Object.fromEntries(['coverage', 'diagnostics', 'query', 'inputFreshness'].filter(key => data[key] !== undefined).map(key => [key, data[key]])),
     ...(impact ? { propImpact: { ...impact, props: impact.props.map(({ usages, omissions, ...prop }: Record<string, unknown>) => prop) } } : {}),
   };
   return { ...result, structuredContent, content: [{ type: 'text', text: JSON.stringify(structuredContent) }] };

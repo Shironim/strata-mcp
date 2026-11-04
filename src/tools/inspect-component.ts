@@ -24,7 +24,6 @@ import { runCanonAudit } from '../engine/canon';
 import { inspectVueTreeInput } from '../engine/graph/vue-tree-input';
 import { loadAliasConfigWithDependencies } from '../engine/resolver';
 import { analyzePropImpact, formatPropImpactAsText } from '../engine/prop-impact';
-import { parseContractExpectation, verifyContractExpectation } from '../engine/contract-expectation';
 import type { ComponentContract, RetrievalEvidence } from '../types';
 import type { McpToolDefinition } from './types';
 
@@ -92,13 +91,6 @@ const inspectComponentToolDefinition: McpToolDefinition = {
     const isOutline = Boolean(args.outline || args.include_outline || args.outline_symbols);
     const view = args.view;
     const impact = args.impact ?? 'none';
-    let expectation: ReturnType<typeof parseContractExpectation> | undefined;
-    if (args.expectation !== undefined) {
-      try { expectation = parseContractExpectation(args.expectation); }
-      catch (error) { return { isError: true, content: [{ type: 'text', text: error instanceof Error ? error.message : String(error) }] }; }
-      if (view || symbolName || isOutline || args.source_range !== undefined || args.sfc_sections || args.audit_events || args.auditEvents)
-        return { isError: true, content: [{ type: 'text', text: 'CONTRACT_EXPECTATION_SELECTOR_CONFLICT: expectation requires contract inspection.' }] };
-    }
     if (!['none', 'summary', 'full'].includes(impact)) {
       return { isError: true, content: [{ type: 'text', text: "'impact' must be 'none', 'summary', or 'full'." }] };
     }
@@ -384,7 +376,7 @@ const inspectComponentToolDefinition: McpToolDefinition = {
 
         if (impact !== 'none') {
           contract.propImpact = await analyzePropImpact({ target: filePath, workspace: wsRoot, props: contract.props, detail: impact });
-          omissions.push({ code: 'PROP_IMPACT_PARTIAL', reason: 'Prop impact counts cover observed static Vue usages only; unknown consumers and input closure remain unverified.' });
+          omissions.push({ code: 'PROP_IMPACT_PARTIAL', reason: 'Prop impact counts cover observed static Vue and React/JSX usages only; unknown consumers and input closure remain unverified.' });
           omissions.push(...contract.propImpact.diagnostics.map(item => ({ code: item.code, reason: `${item.file}: ${item.reason}` })));
         }
 
@@ -450,7 +442,7 @@ const inspectComponentToolDefinition: McpToolDefinition = {
           workspace: wsRoot,
           snapshot: primary.snapshot,
           policy: 'component-contract-v1',
-          query: { inferProps, resolveGlobals, auditEvents, impact, expectation: expectation ?? null },
+          query: { inferProps, resolveGlobals, auditEvents, impact },
           complete: omissions.length === 0,
           selectionReason: 'Derived public component contract and diagnostics for the explicitly requested file.',
           omissions,
@@ -497,16 +489,14 @@ const inspectComponentToolDefinition: McpToolDefinition = {
         };
       }
 
-      const verification = expectation ? verifyContractExpectation({ contract: contract!, content: primary.content, expectation,
-        sourceCurrent: retrieval?.sourceFreshness === 'current' && !retrieval.omissions.some(item => ['CONCURRENT_MUTATION_DETECTED', 'DEPENDENCY_CHANGED'].includes(item.code)) }) : undefined;
       const contractText = [formatContractAsText(contract!), contract?.propImpact ? formatPropImpactAsText(contract.propImpact) : '',
-        verification ? `Contract verification: ${JSON.stringify(verification)}` : '', formatRetrievalEvidence(retrieval!)].filter(Boolean).join('\n\n');
+        formatRetrievalEvidence(retrieval!)].filter(Boolean).join('\n\n');
       return {
-        structuredContent: { ...contract, retrieval, ...(verification ? { verification } : {}) },
+        structuredContent: { ...contract, retrieval },
         content: [
           {
             type: 'text',
-            text: isJson ? JSON.stringify({ ...contract, retrieval, ...(verification ? { verification } : {}) }, null, 2) : contractText,
+            text: isJson ? JSON.stringify({ ...contract, retrieval }, null, 2) : contractText,
           },
         ],
       };

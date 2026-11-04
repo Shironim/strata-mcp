@@ -201,8 +201,8 @@ const auditFrontendToolDefinition: McpToolDefinition = {
         return formatAuditResponse(result, formatArchetypeAuditAsText(result));
       }
 
-      // target === 'all'
-      const [routes, unusedComponents, unusedState, similarTemplates, designSystemAudit, bundleAudit, apiContracts] = await Promise.all([
+      // target === 'all' (runs standard structural health checks; similar-templates & archetype-drift are opt-in)
+      const [routes, unusedComponents, unusedState, designSystemAudit, bundleAudit, apiContracts] = await Promise.all([
         scanRoutes({
           targetPath,
           scopePath,
@@ -219,12 +219,6 @@ const auditFrontendToolDefinition: McpToolDefinition = {
           excludeDirs,
         }),
         findUnusedState(targetPath, { scopePath, excludeDirs }),
-        findSimilarTemplates({
-          targetPath,
-          scopePath,
-          threshold,
-          excludeDirs,
-        }),
         auditDesignTokens({
           targetPath,
           scopePath,
@@ -251,8 +245,6 @@ const auditFrontendToolDefinition: McpToolDefinition = {
         '\n---\n',
         formatUnusedStateAsText(unusedState),
         '\n---\n',
-        formatSimilarTemplatesAsText(similarTemplates),
-        '\n---\n',
         formatDesignAuditAsText(designSystemAudit),
         '\n---\n',
         formatBundleAuditAsText(bundleAudit),
@@ -261,7 +253,7 @@ const auditFrontendToolDefinition: McpToolDefinition = {
       ].join('\n');
 
       return formatAuditResponse(
-        { routes, unusedComponents, unusedState, similarTemplates, designSystemAudit, bundleAudit, apiContracts },
+        { routes, unusedComponents, unusedState, designSystemAudit, bundleAudit, apiContracts },
         report
       );
     } catch (err: unknown) {

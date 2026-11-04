@@ -14,16 +14,14 @@ test('six tools expose explicit summaries with counts and full-detail recovery w
   };
   for (const [name, { args, payload }] of Object.entries(samples)) {
     const diagnostic = { code: 'UNRESOLVED', reason: 'Keep this risk visible.' };
-    const verification = { status: 'FAIL', checks: [{ expected: 'heading', actual: 'title' }] };
     const tool = withRetrievalEvidence({ name, description: '', inputSchema: { type: 'object' }, handler: async () => ({
-      content: [{ type: 'text', text: JSON.stringify(payload) }], structuredContent: { ...payload, diagnostics: [diagnostic], verification },
+      content: [{ type: 'text', text: JSON.stringify(payload) }], structuredContent: { ...payload, diagnostics: [diagnostic] },
     }) });
     const full = await tool.handler({ ...args, response_detail: 'full' });
     const summary = await tool.handler({ ...args, response_detail: 'summary', max_bytes: 16000 });
     expect(summary.isError).not.toBe(true);
     const data = summary.structuredContent as any;
     expect(data.resultSummary.tool).toBe(name);
-    expect(data.verification).toEqual(verification);
     expect(data.diagnostics).toEqual([diagnostic]);
     expect(data.retrieval.omissions.some((item: any) => item.code === 'SUMMARY_DETAIL_OMITTED')).toBe(true);
     expect(data.decision.next[0]).toMatchObject({ action: 'request-detail', tool: name, arguments: { response_detail: 'full' }, argumentMode: 'merge-original' });
@@ -62,4 +60,45 @@ test('summary preserves nested warnings beyond its preview and contract diagnost
   expect(data.resultSummary.preview.length).toBe(3);
   expect(data.safetyDetails).toContainEqual({ path: 'root.children[3].children[0].warning', file: 'Deep.vue', value: 'Unresolved runtime target' });
   expect(data.safetyDetails.some((item: any) => item.path === 'propsDrilling')).toBe(true);
+});
+
+test('Workstream 2: summary mode projects rich compact contract with stateDependencies, apiCalls, and formCount', async () => {
+  const payload = {
+    props: [{ name: 'userId', type: 'string', required: true }],
+    framework: 'vue',
+    stateDependencies: {
+      stores: ['useUserStore'],
+      contexts: ['ThemeContext'],
+      composables: ['useAuth'],
+    },
+    boundaryContracts: [
+      { boundaryType: 'fetch', method: 'GET', targetEndpoint: '/api/v1/profile' },
+      { boundaryType: 'axios', method: 'POST', targetEndpoint: '/api/v1/update' },
+    ],
+    formContracts: [
+      { binding: 'profileForm', isMultipart: false, fields: [] },
+    ],
+  };
+
+  const tool = withRetrievalEvidence({
+    name: 'inspect_component',
+    description: '',
+    inputSchema: { type: 'object' },
+    handler: async () => ({
+      content: [{ type: 'text', text: JSON.stringify(payload) }],
+      structuredContent: payload,
+    }),
+  });
+
+  const result = await tool.handler({ path: '/fixture/UserProfile.vue', response_detail: 'summary' });
+  expect(result.isError).not.toBe(true);
+  const contract = (result.structuredContent as any)?.resultSummary?.contract;
+  expect(contract).toBeDefined();
+  expect(contract.propCount).toBe(1);
+  expect(contract.stateDependencies).toEqual(['useUserStore', 'ThemeContext', 'useAuth']);
+  expect(contract.apiCalls).toEqual([
+    { method: 'GET', endpoint: '/api/v1/profile' },
+    { method: 'POST', endpoint: '/api/v1/update' },
+  ]);
+  expect(contract.formCount).toBe(1);
 });

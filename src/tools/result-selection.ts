@@ -12,7 +12,7 @@ const auditCollections: Record<string, string[]> = {
   'similar-templates': ['clusters'], 'design-tokens': ['arbitraryTokens', 'a11yViolations'],
   'bundle-health': ['heavyEagerImports'], 'api-contracts': ['endpoints'], 'archetype-drift': ['violations'],
   all: ['routes.routes', 'unusedComponents.unusedComponents', 'unusedState.unusedState',
-    'similarTemplates.clusters', 'designSystemAudit.arbitraryTokens', 'designSystemAudit.a11yViolations',
+    'designSystemAudit.arbitraryTokens', 'designSystemAudit.a11yViolations',
     'bundleAudit.heavyEagerImports', 'apiContracts.endpoints'],
 };
 

@@ -17,10 +17,6 @@ inputSchema: {
         type: 'string',
         description: 'AST pattern (e.g. "console.log($$$)", "ref($$$)"). For exact text use mode: literal; auto falls back only on AST pattern parse errors. Alias: query, search',
       },
-      intent: {
-        type: 'string',
-        description: 'Bounded Vue component-prop intent: "component Child using prop title" / "komponen Child yang memakai prop title", or "component Child omitting prop title" / "komponen Child tanpa prop title". Requires an unambiguous exact component basename in path scope. Returns visible interpretation, usages or resolved render omissions, and indeterminate supply counts. Cannot combine with other search selectors; arbitrary language/event/slot intent is not implemented.',
-      },
       mode: {
         type: 'string',
         enum: ['ast', 'auto', 'literal'],
@@ -30,18 +26,27 @@ inputSchema: {
         type: 'string',
         description: 'Component name to search (e.g. "OldButton" or "old-button", alias: component_name)',
       },
+      prop_name: {
+        type: 'string',
+        description: 'Prop name to analyze across Vue component usages or omissions (requires component, e.g. "title"; alias: prop). Requires an unambiguous exact component basename in path scope. Returns usages or resolved static render omissions plus indeterminate supply counts.',
+      },
+      prop_presence: {
+        type: 'string',
+        enum: ['present', 'omitted'],
+        description: 'Filter for component + prop_name search: "present" (default, renders supplying the prop) or "omitted" (resolved static renders omitting the prop without dynamic forwarding).',
+      },
       rule_yaml: {
         type: 'string',
         description: 'Complete ast-grep YAML rule definition',
       },
       code: {
         type: 'string',
-        description: 'Code snippet to test pattern/rule against in-memory, or dump CST syntax tree (alias: code_snippet)',
+        description: 'Code snippet to test pattern/rule against in-memory (alias: code_snippet)',
       },
       action: {
         type: 'string',
-        enum: ['search', 'dump_ast', 'map'],
-        description: 'Action: search (default), dump_ast, or map a bounded frontend file inventory without reading file bodies.',
+        enum: ['search', 'map'],
+        description: 'Action: search (default) or map a bounded frontend file inventory without reading file bodies.',
       },
       language: {
         type: 'string',
@@ -85,7 +90,7 @@ inputSchema: {
 {
 name: 'inspect_component',
 description:
-    'Maps and selectively inspects frontend source (.vue, .astro, .tsx, .jsx, .ts, .js). Use view: map for exact regions and source refs, then view: source with a returned source_ref for a hash-validated source slice. Legacy contract, symbol, and audit inspection remain available.',
+    'Component and module inspector for frontend source (.vue, .astro, .svelte, .tsx, .jsx, .ts, .js). Extracts public component contracts (props, emits, slots, state, outbound APIs), maps source structure and outline without code bodies (view: "map" or outline: true), and slices targeted symbols with callers (symbol: "name" or source_range) for precise inspection without dumping entire files.',
 inputSchema: {
     type: 'object',
     properties: {
@@ -147,13 +152,7 @@ inputSchema: {
       },
       impact: {
         type: 'string', enum: ['none', 'summary', 'full'],
-        description: 'Optional contract-only prop impact scan (default none). Vue static template consumer counts, usage counts, candidates and rename/remove risk. summary omits locations; full includes hash-bound usage refs. Scope uses project_root; unresolved/ignored/runtime uses prevent completeness claims.',
-      },
-      expectation: {
-        type: 'object', additionalProperties: false, required: ['props'],
-        properties: { props: { type: 'array', minItems: 1, items: { type: 'object', additionalProperties: false,
-          required: ['name', 'exists'], properties: { name: { type: 'string', minLength: 1 }, exists: { type: 'boolean' }, type: { type: 'string' }, required: { type: 'boolean' } } } } },
-        description: 'Contract-only after-edit check of caller-supplied prop expectations. PASS/FAIL is scoped to closed local Vue script-setup defineProps; imported/dynamic definitions or stale source yield UNKNOWN. Example: {"props":[{"name":"label","exists":false},{"name":"heading","exists":true,"type":"string","required":true}]}. Does not certify consumer or business behavior.',
+        description: 'Optional contract-only per-prop impact scan (default none). Vue static template consumer counts, usage counts, static render omissions, candidates and rename/remove risk per prop. summary omits locations; full includes hash-bound usage/omission refs. Scope uses project_root; for component-level hierarchy across pages, use get_component_tree(direction: "upward").',
       },
       resolve_globals: {
         type: 'boolean',
@@ -298,7 +297,7 @@ inputSchema: {
 {
 name: 'audit_frontend',
 description:
-    'Architectural frontend health audit: file-based routes, dead components, unused state composables, structural template similarity, design tokens & a11y, bundle health / island hydration, outbound API contracts & callers, and page archetype structural drift. Supports targeted or full audits (target: "all").',
+    'Maps frontend architecture topology (routes, api-contracts) and runs structural health audits (dead-components, dead-state, design-tokens, bundle-health, similar-templates, archetype-drift). Use target: "routes" or "api-contracts" when discovering pages, layouts, and endpoints for new or changed features; use health targets or target: "all" for diagnostics.',
 inputSchema: {
     type: 'object',
     properties: {
@@ -334,7 +333,7 @@ inputSchema: {
           'all',
         ],
         description:
-          'Audit target: "routes" (URL topology), "dead-components" (orphan components), "dead-state" (unused composables/stores), "similar-templates" (redundant template structure & DRY opportunities), "design-tokens" (arbitrary Tailwind colors/spacing, radius consistency & a11y violations), "bundle-health" (heavy eager imports & eager island hydration), "api-contracts" (outbound API endpoints & caller mapping), "archetype-drift" (page semantic section & component drift vs exemplar), or "all" for a full architectural diagnostic (default: "all")',
+          'Audit target: "routes" (URL topology), "dead-components" (orphan components), "dead-state" (unused composables/stores), "similar-templates" (redundant template structure & DRY opportunities), "design-tokens" (arbitrary Tailwind colors/spacing, radius consistency & a11y violations), "bundle-health" (heavy eager imports & eager island hydration), "api-contracts" (outbound API endpoints & caller mapping), "archetype-drift" (page semantic section & component drift vs exemplar), or "all" for a full architectural diagnostic (default: "all", excluding similar-templates and archetype-drift)',
       },
       threshold: {
         type: 'number',
@@ -388,7 +387,7 @@ inputSchema: {
 {
 name: 'generate_patch_plan',
 description:
-    'Prescriptive Refactoring: Generates precise AST-level patch recommendations (file, line, column, oldSnippet, newSnippet) across all upward consumer components when refactoring, renaming, or removing props and events.',
+    'Component contract consumer refactoring: generates precise AST-level patch plans (file, line, column, oldSnippet, newSnippet, sourceRef) across upward consumer components when renaming or removing a component prop, event, v-model, or slot.',
 inputSchema: {
     type: 'object',
     properties: {
@@ -444,17 +443,17 @@ inputSchema: {
 
 const routing: Record<string, { alternative: string; example: Record<string, unknown> }> = {
   find_code: { alternative: 'Use inspect_component for the contract or exact source of one file.', example: { path: 'src', component: 'Button', scope: 'template' } },
-  inspect_component: { alternative: 'Use get_component_tree for workspace consumers; this tool does not establish complete impact.', example: { path: 'src/Button.vue', view: 'map' } },
+  inspect_component: { alternative: 'Use impact: summary|full for per-prop usage/omission risk, or get_component_tree(direction: upward) for component-level consumer hierarchy across pages.', example: { path: 'src/Button.vue', view: 'map' } },
   get_component_tree: { alternative: 'Use generate_patch_plan for operation-specific edits; static traversal may be partial.', example: { path: 'src/Button.vue', direction: 'upward' } },
   trace_state: { alternative: 'Use inspect_component for a single-file interface; this tool does not prove runtime state behavior.', example: { path: 'src', identifier: 'useCartStore', role: 'readers' } },
-  audit_frontend: { alternative: 'Use inspect_component for one component; diagnostics do not certify browser or business behavior.', example: { path: '.', target: 'routes' } },
+  audit_frontend: { alternative: 'Use target: routes or api-contracts to discover pages and endpoints for new features; use inspect_component for one component. Diagnostics do not certify browser or business behavior.', example: { path: '.', target: 'routes' } },
   generate_patch_plan: { alternative: 'Use inspect_component to understand the target contract first. Plans cover supported static consumer usages, not every dynamic reference, and do not apply edits.', example: { path: 'src/Button.vue', target_path: '.', refactor_type: 'rename_prop', old_name: 'label', new_name: 'heading' } },
 };
 
 for (const tool of TOOL_CATALOG) {
   tool.inputSchema.properties ??= {};
-  tool.inputSchema.properties.response_detail = { type: 'string', enum: ['summary', 'full'], default: 'full',
-    description: 'Explicit layered output: summary returns counts/previews and preserves evidence, risks and verification; repeat the original request with full for primary analysis. Full remains default for compatibility. Summary is not a continuation page or exact source.' };
+  tool.inputSchema.properties.response_detail = { type: 'string', enum: ['summary', 'full'], default: 'summary',
+    description: 'Explicit layered output: summary (recommended default for initial discovery) returns counts/previews and preserves evidence, risks and diagnostics; repeat the original request with full for primary analysis or exact source slices. Summary is not a continuation page or exact source.' };
   const guide = routing[tool.name]!;
   tool.description += ` ${guide.alternative} Example input: ${JSON.stringify(guide.example)}. Analysis does not modify application source; internal cache/index and telemetry may be updated.`;
   tool.annotations = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true };

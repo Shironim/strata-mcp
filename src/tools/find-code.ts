@@ -12,7 +12,7 @@ import {
 } from '../engine/search';
 import { dumpSyntaxTree, executeAstGrep, isPatternParseError } from '../engine/astgrep';
 import { mapFrontendScope } from '../engine/frontend-map';
-import { findByIntent } from '../engine/search-intent';
+import { findByComponentProp } from '../engine/search-intent';
 import {
   parseSafePositiveInt,
   parseStringList,
@@ -35,15 +35,21 @@ const findCodeToolDefinition: McpToolDefinition = {
       : undefined;
     const language = args.language ? String(args.language) : undefined;
 
-    if (args.intent !== undefined) {
-      if ((args.action && args.action !== 'search') || ['pattern', 'query', 'search', 'code', 'code_snippet', 'rule_yaml', 'component', 'component_name', 'componentName',
+    const rawPropName = args.prop_name ?? args.prop ?? args.propName;
+    const rawPropPresence = args.prop_presence ?? args.propPresence;
+    if (rawPropName !== undefined || rawPropPresence !== undefined) {
+      if ((args.action && args.action !== 'search') || ['pattern', 'query', 'search', 'code', 'code_snippet', 'rule_yaml',
         'mode', 'language', 'scope', 'limit', 'offset', 'max_results', 'maxResults', 'exclude_dirs', 'excludeDirs'].some(key => args[key] !== undefined)) {
-        return { isError: true, content: [{ type: 'text', text: 'INTENT_SELECTOR_CONFLICT: use intent with path and format/budget only; remove pattern, component, code, rule_yaml, mode and other actions.' }] };
+        return { isError: true, content: [{ type: 'text', text: 'PROP_SELECTOR_CONFLICT: use component + prop_name (+ optional prop_presence) with path and format/budget only; remove pattern, code, rule_yaml, mode, scope and other actions.' }] };
       }
+      const rawComponent = args.component ?? args.component_name ?? args.componentName;
       try {
-        const result = await findByIntent(args.intent, rawTargetPath ? resolveWorkspacePath(rawTargetPath) : resolveProjectRoot());
+        const result = await findByComponentProp(
+          { component: rawComponent, prop: rawPropName, presence: rawPropPresence },
+          rawTargetPath ? resolveWorkspacePath(rawTargetPath) : resolveProjectRoot()
+        );
         return { structuredContent: result, content: [{ type: 'text', text: isJson ? JSON.stringify(result, null, 2)
-          : `Interpreted query: ${JSON.stringify(result.interpretation.query)}\n${formatMatchesAsText(result.matches)}\nProp supply coverage: ${JSON.stringify(result.coverage.propSupply)}\nPartial static search: review candidates and coverage before concluding absence.` }] };
+          : `Prop query: ${JSON.stringify(result.query)}\n${formatMatchesAsText(result.matches)}\nProp supply coverage: ${JSON.stringify(result.coverage.propSupply)}\nPartial static search: review candidates and coverage before concluding absence.` }] };
       } catch (error) {
         return { isError: true, content: [{ type: 'text', text: error instanceof Error ? error.message : String(error) }] };
       }
@@ -159,7 +165,7 @@ const findCodeToolDefinition: McpToolDefinition = {
           content: [
             {
               type: 'text',
-              text: isJson ? JSON.stringify(matches, null, 2) : formatMatchesAsText(matches) + (isTruncated ? `\n\n[Notice: Results truncated at max_results=${maxResults}.]` : ''),
+              text: isJson ? JSON.stringify(matches, null, 2) : formatMatchesAsText(matches) + (isTruncated ? `\n\n[Notice: Results truncated at max_results=${maxResults}. Gunakan parameter path/scope yang lebih spesifik atau sesuaikan max_results untuk melihat match lainnya.]` : ''),
             },
           ],
         };
@@ -180,7 +186,7 @@ const findCodeToolDefinition: McpToolDefinition = {
           content: [
             {
               type: 'text',
-              text: isJson ? JSON.stringify(matches, null, 2) : formatMatchesAsText(matches) + (isTruncated ? `\n\n[Notice: Results truncated at max_results=${maxResults}.]` : ''),
+              text: isJson ? JSON.stringify(matches, null, 2) : formatMatchesAsText(matches) + (isTruncated ? `\n\n[Notice: Results truncated at max_results=${maxResults}. Gunakan parameter path/scope yang lebih spesifik atau sesuaikan max_results untuk melihat match lainnya.]` : ''),
             },
           ],
         };
@@ -211,7 +217,7 @@ const findCodeToolDefinition: McpToolDefinition = {
           content: [
             {
               type: 'text',
-              text: isJson ? JSON.stringify(matches, null, 2) : notice() + formatMatchesAsText(matches) + (isTruncated ? `\n\n[Notice: Results truncated at max_results=${maxResults}.]` : ''),
+              text: isJson ? JSON.stringify(matches, null, 2) : notice() + formatMatchesAsText(matches) + (isTruncated ? `\n\n[Notice: Results truncated at max_results=${maxResults}. Gunakan parameter path/scope yang lebih spesifik atau sesuaikan max_results untuk melihat match lainnya.]` : ''),
             },
           ],
         };
@@ -242,13 +248,17 @@ export const findCodeTool: McpToolDefinition = withRetrievalEvidence(findCodeToo
   const scope = snippet ? null : rawPath ? resolveWorkspacePath(String(rawPath)) : resolveProjectRoot();
   const pattern = args.pattern || args.query || args.search;
   const component = args.component || args.component_name || args.componentName;
+  const propName = args.prop_name ?? args.prop ?? args.propName;
+  const propPresence = args.prop_presence ?? args.propPresence;
   const action = args.action === 'map' ? 'map' : args.action === 'dump_ast' || (!rawPath && snippet && !pattern && !args.rule_yaml) ? 'dump_ast' : 'search';
   return {
     workspace: scope ? findProjectRoot(scope) : null, scope, policy: `find-code-${action}-v1`,
     ...(snippet ? { inputHash: hashRetrievalIdentity({ encoding: 'utf-8', content: snippet }) } : {}),
-    query: { action, intent: args.intent ?? null, pattern: pattern ? String(pattern) : null, component: component ? String(component) : null,
+    query: { action, pattern: pattern ? String(pattern) : null, component: component ? String(component) : null,
+      propName: propName !== undefined ? String(propName) : null,
+      propPresence: propName !== undefined || propPresence !== undefined ? String(propPresence ?? 'present') : null,
       rule: args.rule_yaml ? String(args.rule_yaml) : null, language: args.language ?? (snippet ? 'ts' : null),
-      mode: pattern ? args.mode ?? 'ast' : null, componentScope: component ? args.scope ?? 'both' : null,
+      mode: pattern ? args.mode ?? 'ast' : null, componentScope: component && propName === undefined ? args.scope ?? 'both' : null,
       limit: action === 'map' ? Math.min(500, parseSafePositiveInt(args.limit ?? args.max_results ?? args.maxResults, 100)!) : parseSafePositiveInt(args.max_results ?? args.maxResults, snippet ? 200 : undefined) ?? null,
       offset: action === 'map' && Number.isSafeInteger(args.offset) && args.offset >= 0 ? args.offset : 0,
       excludeDirs: parseStringList(args.exclude_dirs ?? args.excludeDirs) },

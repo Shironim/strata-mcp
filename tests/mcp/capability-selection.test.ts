@@ -16,7 +16,7 @@ test('manifest declares every audit target and patch operation in the public cat
   }
   const search = TOOL_CATALOG.find(item => item.name === 'find_code')!.inputSchema.properties as any;
   const inspect = TOOL_CATALOG.find(item => item.name === 'inspect_component')!.inputSchema.properties as any;
-  for (const operation of [...search.mode.enum, 'map', 'dump_ast', 'component', 'yaml'])
+  for (const operation of [...search.mode.enum, 'map', 'component', 'component-prop', 'yaml'])
     expect(CAPABILITY_MANIFEST.find_code!.some(item => item.id === operation)).toBe(true);
   for (const operation of inspect.view.enum)
     expect(CAPABILITY_MANIFEST.inspect_component!.some(item => item.id === operation)).toBe(true);
@@ -26,6 +26,7 @@ test('capability identifies actual selectors and aliases instead of treating vie
   const cases: Array<[string, Record<string, unknown>, string]> = [
     ['find_code', { code_snippet: '<div />' }, 'dump_ast'],
     ['find_code', { component_name: 'Child' }, 'component'],
+    ['find_code', { component: 'Child', prop_name: 'title' }, 'component-prop'],
     ['find_code', { code: 'x', pattern: 'x', mode: 'literal', component: 'Ignored' }, 'literal'],
     ['inspect_component', { source_range: { start_line: 1, end_line: 1 } }, 'source_range'],
     ['inspect_component', { outline_symbols: true }, 'outline'],
@@ -86,7 +87,7 @@ test('local diagnostics and coverage gaps prevent a negative complete result', (
 });
 
 test('audit all requires all selected sections and counts findings rather than empty diagnostics', () => {
-  const all = { routes: { routes: [] }, unusedComponents: { unusedComponents: [] }, unusedState: { unusedState: [] }, similarTemplates: { clusters: [] },
+  const all = { routes: { routes: [] }, unusedComponents: { unusedComponents: [] }, unusedState: { unusedState: [] },
     designSystemAudit: { arbitraryTokens: [], a11yViolations: [] }, bundleAudit: { heavyEagerImports: [] }, apiContracts: { endpoints: [] } };
   expect(decide('audit_frontend', { target: 'all' }, all).selection.count).toBe(0);
   expect(decide('audit_frontend', { target: 'all' }, { ...all, apiContracts: {} }).selection.count).toBeNull();
