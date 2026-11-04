@@ -4,7 +4,7 @@ import { getProjectEcosystem } from '../framework-detector';
 import { findProjectRoot } from '../path-resolver';
 import type { CanonAuditOptions } from './types';
 import { createDiagnostic } from './types';
-import { parseSvelte } from '../svelte-sfc';
+import { parseSvelte, svelteEventDirectives } from '../svelte-sfc';
 
 function unwrapExpression(expr: ts.Expression): ts.Expression {
   let curr = expr;
@@ -372,12 +372,15 @@ export async function checkSvelteRules(
     }
 
     // Rule 6 (template): svelte/prefer-callback-props-over-dispatcher (on:event directive)
-    const onDirectiveRegex = /\bon:([a-zA-Z0-9_-]+)(?:=(?:["'][^"']*["']|\{[^}]*\}))?/g;
-    let onMatch: RegExpExecArray | null;
-    while ((onMatch = onDirectiveRegex.exec(content)) !== null) {
-      const rawEvent = onMatch[1];
-      const startOffset = onMatch.index;
-      const endOffset = startOffset + onMatch[0].length;
+    let eventDirectives: ReturnType<typeof svelteEventDirectives> = [];
+    try { eventDirectives = svelteEventDirectives(content, snapshot.file); } catch {
+      // parseSvelte retains parse diagnostics; do not infer directives from invalid text.
+    }
+    for (const event of eventDirectives) {
+      const rawEvent = event.name;
+      const startOffset = event.start;
+      const endOffset = event.end;
+      const requiresReview = event.component || event.forwarding || event.modifiers.length > 0;
 
       diagnostics.push(
         createDiagnostic({
@@ -390,10 +393,15 @@ export async function checkSvelteRules(
           startOffset,
           endOffset,
           smellTitle: 'Deprecated on:event Directive in Svelte 5',
-          smellExplanation: `The directive 'on:${rawEvent}' is deprecated in Svelte 5. Use standard DOM attributes ('on${rawEvent}={...}') instead.`,
-          canonSummary: `Replace 'on:${rawEvent}' with 'on${rawEvent}={...}'.`,
+          smellExplanation: event.component
+            ? `Component event directive 'on:${rawEvent}' uses legacy syntax. Migration requires reviewing the child's callback prop contract, not assuming a DOM event attribute.`
+            : `The directive 'on:${rawEvent}' is deprecated in Svelte 5. Review callback attributes and preserve any forwarding or modifier behavior.`,
+          canonSummary: requiresReview
+            ? `Review ${event.component ? 'component callback contracts' : 'DOM callbacks'} and preserve forwarding/modifiers (${event.modifiers.join(', ') || 'none'}) before migrating 'on:${rawEvent}'.`
+            : `Replace 'on:${rawEvent}' with 'on${rawEvent}={...}'.`,
           canonRationale: 'Standard event attributes align with DOM standards, reduce CustomEvent wrapping overhead, and provide strict TypeScript checking.',
-          canonicalCode: `on${rawEvent}={handle${rawEvent.charAt(0).toUpperCase() + rawEvent.slice(1)}}`,
+          canonicalCode: requiresReview ? content.slice(startOffset, endOffset)
+            : `on${rawEvent}={handle${rawEvent.charAt(0).toUpperCase() + rawEvent.slice(1)}}`,
           referenceDoc: 'https://svelte.dev/docs/svelte/v5-migration-guide#Event-changes',
         })
       );

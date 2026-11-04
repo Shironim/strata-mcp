@@ -1,6 +1,8 @@
 import ts from 'typescript';
 import type { CodePatternDiagnostic, SourceSnapshot } from '../../types';
-import { parseAstro } from '../astro-sfc';
+import { parseAstro, parseAstroAttributes } from '../astro-sfc';
+import { astroOpeningTags } from '../astro-template';
+import { unwrapExpression } from '../parsers/ts-syntax';
 import type { CanonAuditOptions } from './types';
 import { createDiagnostic } from './types';
 
@@ -130,24 +132,24 @@ export async function checkAstroRules(
       : null;
 
     // Match all JSX/HTML component tags: <ComponentName ... >
-    const componentTagRegex = /<([A-Z][A-Za-z0-9_.]*)\b([^>]*)(\/?>)/g;
-    let match: RegExpExecArray | null;
     let clientLoadCount = 0;
 
-    while ((match = componentTagRegex.exec(tmplText)) !== null) {
-      const compName = match[1];
-      const attrString = match[2];
-      const startOffset = tmplStart + match.index;
-      const endOffset = startOffset + match[0].length;
-      const hasClientDirective = /\bclient:(load|visible|idle|media|only)\b/.test(attrString);
+    for (const tag of astroOpeningTags(tmplText)) {
+      if (!/^[A-Z]/.test(tag.name)) continue;
+      const compName = tag.name;
+      const attrString = tag.attributes;
+      const expressionAttrs = new Set<string>();
+      const attrs = parseAstroAttributes(attrString, expressionAttrs);
+      const startOffset = tmplStart + tag.start;
+      const endOffset = tmplStart + tag.end;
+      const hasClientDirective = Object.keys(attrs).some(name => /^client:(load|visible|idle|media|only)$/.test(name));
       const isAstroImport = importedFrameworkComponents.has(compName) &&
         importedFrameworkComponents.get(compName)!.endsWith('.astro');
 
       // Rule: astro/client-only-missing-framework-hint
-      if (/\bclient:only\b/.test(attrString)) {
-        const clientOnlyValMatch = attrString.match(/\bclient:only(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|\{([^}]*)\}|([^\s>]+)))?/);
-        const val = clientOnlyValMatch ? (clientOnlyValMatch[1] ?? clientOnlyValMatch[2] ?? clientOnlyValMatch[3] ?? clientOnlyValMatch[4]) : undefined;
-        if (!val || val === '' || val === 'true') {
+      if ('client:only' in attrs) {
+        const val = attrs['client:only'];
+        if (!val || val === true || val === 'true') {
           diagnostics.push(
             createDiagnostic({
               ruleId: 'astro/client-only-missing-framework-hint',
@@ -170,7 +172,7 @@ export async function checkAstroRules(
       }
 
       // Rule: astro/over-hydration-client-load
-      if (/\bclient:load\b/.test(attrString)) {
+      if ('client:load' in attrs) {
         clientLoadCount++;
         const isInsideFooter = footerRange && startOffset >= footerRange.start && endOffset <= footerRange.end;
         if (isInsideFooter || clientLoadCount >= 5) {
@@ -200,13 +202,20 @@ export async function checkAstroRules(
       // Rule: astro/no-function-props-to-island
       if (hasClientDirective) {
         // Detect inline arrow function / function expression or passing frontmatter functions to island props
-        const inlineFnMatch = attrString.match(/\b([a-zA-Z0-9_]+)\s*=\s*\{\s*(?:\([^)]*\)|[a-zA-Z0-9_]+)\s*=>/);
-        const passedFmFnMatch = Array.from(declaredFunctionsInFm).find(fnName =>
-          new RegExp(`\\b([a-zA-Z0-9_]+)\\s*=\\s*\\{\\s*${fnName}\\s*\\}`).test(attrString)
-        );
+        const functionProp = Object.entries(attrs).find(([name, value]) => {
+          if (name.startsWith('client:') || !expressionAttrs.has(name) || typeof value !== 'string' || !value.startsWith('{') || !value.endsWith('}')) return false;
+          const sf = ts.createSourceFile('attribute.ts', `const value=(${value.slice(1, -1)});`, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+          const statement = sf.statements[0];
+          if (!statement || !ts.isVariableStatement(statement)) return false;
+          const initializer = statement.declarationList.declarations[0]?.initializer;
+          if (!initializer) return false;
+          const expression = unwrapExpression(initializer);
+          return ts.isArrowFunction(expression) || ts.isFunctionExpression(expression)
+            || (ts.isIdentifier(expression) && declaredFunctionsInFm.has(expression.text));
+        });
 
-        if (inlineFnMatch || passedFmFnMatch) {
-          const offendingProp = inlineFnMatch ? inlineFnMatch[1] : 'handler';
+        if (functionProp) {
+          const offendingProp = functionProp[0];
           diagnostics.push(
             createDiagnostic({
               ruleId: 'astro/no-function-props-to-island',
@@ -230,7 +239,7 @@ export async function checkAstroRules(
 
       // Rule: astro/interactive-component-missing-client-directive
       if (!hasClientDirective && !isAstroImport) {
-        const hasInteractiveEventProp = /\b(on[A-Z][A-Za-z0-9_]*)=/.test(attrString);
+        const hasInteractiveEventProp = Object.keys(attrs).some(name => /^on[A-Z]/.test(name));
         const isKnownFrameworkComp = importedFrameworkComponents.has(compName) &&
           /\.(vue|svelte|tsx|jsx|solid)$/i.test(importedFrameworkComponents.get(compName)!);
         const isInteractiveWidgetName = /(Modal|Dialog|Dropdown|Drawer|Menu|Select|Button|Counter|Carousel|Accordion|Tabs)$/.test(compName);

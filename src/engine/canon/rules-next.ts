@@ -1,4 +1,7 @@
 import ts from 'typescript';
+import { findDirective } from '../parsers/ts-syntax';
+import { jsxDomEventName } from '../parsers/jsx-events';
+import { isOwnedNextAppFile } from '../project-ownership';
 import type { CodePatternDiagnostic, SourceSnapshot } from '../../types';
 import type { CanonAuditOptions } from './types';
 import { createDiagnostic } from './types';
@@ -35,11 +38,7 @@ function containsJsx(node: ts.Node): boolean {
 
 function hasUseServerDirective(node: ts.FunctionDeclaration | ts.ArrowFunction | ts.FunctionExpression): boolean {
   if (node.body && ts.isBlock(node.body)) {
-    for (const stmt of node.body.statements) {
-      if (ts.isExpressionStatement(stmt) && ts.isStringLiteral(stmt.expression) && stmt.expression.text === 'use server') {
-        return true;
-      }
-    }
+    return Boolean(findDirective(node.body.statements, 'use server'));
   }
   return false;
 }
@@ -62,16 +61,17 @@ export async function checkNextRules(
   const diagnostics: CodePatternDiagnostic[] = [];
   const normPath = snapshot.file.replace(/\\/g, '/');
 
-  const hasUseClientDirective = /^\s*['"]use client['"]/m.test(content);
-  const isAppRouterFile = /(?:^|\/)app\//.test(normPath);
-  const isAppRouterRoot = /(?:^|\/)app\/(?:.*\/)?(?:page|layout)\.(?:tsx|jsx|js|ts)$/.test(normPath);
-  const isErrorBoundary = /(?:^|\/)app\/(?:.*\/)?(?:global-)?error\.(?:tsx|jsx|js|ts)$/.test(normPath);
+  const sourceFile = ts.createSourceFile(snapshot.file, content, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const clientDirective = findDirective(sourceFile.statements, 'use client');
+  const hasUseClientDirective = Boolean(clientDirective);
+  const isAppRouterFile = options?.projectContext ? isOwnedNextAppFile(snapshot.file, options.projectContext) : /(?:^|\/)app\//.test(normPath);
+  const isAppRouterRoot = isAppRouterFile && /(?:^|\/)(?:page|layout)\.(?:tsx|jsx|js|ts)$/.test(normPath);
+  const isErrorBoundary = isAppRouterFile && /(?:^|\/)(?:global-)?error\.(?:tsx|jsx|js|ts)$/.test(normPath);
 
   // 1. next/no-use-client-at-page-root
   if (isAppRouterRoot && hasUseClientDirective) {
-    const match = content.match(/^(\s*['"]use client['"])/m);
-    const startOffset = match ? (match.index || 0) : 0;
-    const endOffset = startOffset + (match ? match[0].length : 12);
+    const startOffset = clientDirective!.getStart(sourceFile);
+    const endOffset = clientDirective!.end;
 
     diagnostics.push(
       createDiagnostic({
@@ -120,13 +120,6 @@ export async function checkNextRules(
         referenceDoc: 'https://nextjs.org/docs/app/building-your-application/routing/error-handling',
       })
     );
-  }
-
-  let sourceFile: ts.SourceFile;
-  try {
-    sourceFile = ts.createSourceFile(snapshot.file, content, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-  } catch {
-    return diagnostics;
   }
 
   const isNext15 = options?.majorVersion !== undefined ? options.majorVersion >= 15 : true;
@@ -391,7 +384,7 @@ export async function checkNextRules(
     }
 
     // 6. next/no-self-api-fetch-in-rsc
-    if (!hasUseClientDirective && ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'fetch') {
+    if (!hasUseClientDirective && (!options?.projectContext || isAppRouterFile) && ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'fetch') {
       const firstArg = node.arguments[0];
       let urlStr: string | undefined;
       if (firstArg) {
@@ -430,9 +423,9 @@ export async function checkNextRules(
     }
 
     // 7. next/rsc-event-handler
-    if (!hasUseClientDirective && ts.isJsxAttribute(node) && ts.isIdentifier(node.name)) {
-      const attrName = node.name.text;
-      if (/^on[A-Z]/.test(attrName) && !attrName.startsWith('onServer')) {
+    if (!hasUseClientDirective && (!options?.projectContext || isAppRouterFile)) {
+      const attrName = jsxDomEventName(node);
+      if (attrName) {
         diagnostics.push(
           createDiagnostic({
             ruleId: 'next/rsc-event-handler',

@@ -244,46 +244,139 @@ function scanVueTemplateProps(
     absCol: number,
     rawPropText: string
   ): void {
-    if (prop.name !== 'model') return;
-    const modelArg = prop.arg && 'content' in prop.arg ? prop.arg.content : 'modelValue';
-    const isDefaultModel = !prop.arg || modelArg === 'modelValue';
-    const matches =
-      matchVueProp(modelArg, cleanOld) ||
-      (isDefaultModel && (cleanOld === 'modelValue' || cleanOld === 'model'));
+    if (prop.type === NodeTypes.DIRECTIVE && prop.name === 'model') {
+      if (prop.arg && prop.arg.isStatic === false) return; // Dynamic arguments (v-model:[dynamic]) cannot be statically renamed
+      const modelArg = prop.arg && 'content' in prop.arg ? prop.arg.content : 'modelValue';
+      const isDefaultModel = !prop.arg || modelArg === 'modelValue';
+      const matches =
+        matchVueProp(modelArg, cleanOld) ||
+        (isDefaultModel && (cleanOld === 'modelValue' || cleanOld === 'model'));
 
-    if (!matches) return;
+      if (!matches) return;
 
-    if (refactorType === 'rename_model' && newName) {
-      const targetReplacementModel = modelArg.includes('-') ? newKebab : newCamel;
-      let newSnippet: string;
-      if (!prop.arg) {
-        newSnippet = rawPropText.replace(/^v-model\b/, `v-model:${targetReplacementModel}`);
-      } else {
-        newSnippet = rawPropText.replace(
-          new RegExp(`(:)${escapeRegExp(modelArg)}\\b`),
-          `$1${targetReplacementModel}`
-        );
+      if (refactorType === 'rename_model' && newName) {
+        const targetReplacementModel = modelArg.includes('-') ? newKebab : newCamel;
+        let newSnippet: string;
+        if (!prop.arg) {
+          newSnippet = rawPropText.replace(/^v-model\b/, `v-model:${targetReplacementModel}`);
+        } else {
+          newSnippet = rawPropText.replace(
+            new RegExp(`(:)${escapeRegExp(modelArg)}\\b`),
+            `$1${targetReplacementModel}`
+          );
+        }
+
+        patches.push({
+          file: filePath,
+          line: absLine,
+          column: absCol,
+          targetTag: el.tag,
+          oldSnippet: rawPropText,
+          newSnippet,
+          description: `Rename v-model binding "${modelArg}" to "${targetReplacementModel}" on <${el.tag}>`,
+        });
+      } else if (refactorType === 'remove_model') {
+        patches.push({
+          file: filePath,
+          line: absLine,
+          column: absCol,
+          targetTag: el.tag,
+          oldSnippet: rawPropText,
+          newSnippet: '',
+          description: `Remove v-model binding "${modelArg}" on <${el.tag}>`,
+        });
       }
+      return;
+    }
 
-      patches.push({
-        file: filePath,
-        line: absLine,
-        column: absCol,
-        targetTag: el.tag,
-        oldSnippet: rawPropText,
-        newSnippet,
-        description: `Rename v-model binding "${modelArg}" to "${targetReplacementModel}" on <${el.tag}>`,
-      });
-    } else if (refactorType === 'remove_model') {
-      patches.push({
-        file: filePath,
-        line: absLine,
-        column: absCol,
-        targetTag: el.tag,
-        oldSnippet: rawPropText,
-        newSnippet: '',
-        description: `Remove v-model binding "${modelArg}" on <${el.tag}>`,
-      });
+    // Expanded v-model prop binding: :model-value="..." or v-bind:model-value="..." or model-value="..."
+    if (
+      (prop.type === NodeTypes.DIRECTIVE && prop.name === 'bind' && prop.arg && 'content' in prop.arg) ||
+      (prop.type === NodeTypes.ATTRIBUTE)
+    ) {
+      if (prop.type === NodeTypes.DIRECTIVE && prop.arg && prop.arg.isStatic === false) return; // Dynamic arguments
+      const propName = prop.type === NodeTypes.ATTRIBUTE ? prop.name : prop.arg.content;
+      const isDefaultModel = propName === 'model-value' || propName === 'modelValue';
+      const matches =
+        matchVueProp(propName, cleanOld) ||
+        (isDefaultModel && (cleanOld === 'modelValue' || cleanOld === 'model'));
+
+      if (!matches) return;
+
+      if (refactorType === 'rename_model' && newName) {
+        const targetReplacement = propName.includes('-') ? newKebab : newCamel;
+        let newSnippet: string;
+        if (prop.type === NodeTypes.ATTRIBUTE) {
+          newSnippet = rawPropText.replace(new RegExp(`^${escapeRegExp(propName)}\\b`), targetReplacement);
+        } else {
+          newSnippet = rawPropText.replace(
+            new RegExp(`(:|v-bind:)${escapeRegExp(propName)}\\b`),
+            `$1${targetReplacement}`
+          );
+        }
+        patches.push({
+          file: filePath,
+          line: absLine,
+          column: absCol,
+          targetTag: el.tag,
+          oldSnippet: rawPropText,
+          newSnippet,
+          description: `Rename model prop binding "${propName}" to "${targetReplacement}" on <${el.tag}>`,
+        });
+      } else if (refactorType === 'remove_model') {
+        patches.push({
+          file: filePath,
+          line: absLine,
+          column: absCol,
+          targetTag: el.tag,
+          oldSnippet: rawPropText,
+          newSnippet: '',
+          description: `Remove model prop binding "${propName}" on <${el.tag}>`,
+        });
+      }
+      return;
+    }
+
+    // Expanded v-model event listener: @update:model-value="..." or v-on:update:model-value="..."
+    if (prop.type === NodeTypes.DIRECTIVE && prop.name === 'on' && prop.arg && 'content' in prop.arg) {
+      if (prop.arg.isStatic === false) return; // Dynamic events cannot be statically renamed
+      const eventName = prop.arg.content;
+      if (eventName.startsWith('update:')) {
+        const eventModelPart = eventName.slice(7);
+        const isDefaultModel = eventModelPart === 'model-value' || eventModelPart === 'modelValue';
+        const matches =
+          matchVueProp(eventModelPart, cleanOld) ||
+          (isDefaultModel && (cleanOld === 'modelValue' || cleanOld === 'model'));
+
+        if (!matches) return;
+
+        if (refactorType === 'rename_model' && newName) {
+          const targetReplacement = eventModelPart.includes('-') ? newKebab : newCamel;
+          const newSnippet = rawPropText.replace(
+            new RegExp(`(@|v-on:)(update:)${escapeRegExp(eventModelPart)}\\b`),
+            `$1$2${targetReplacement}`
+          );
+          patches.push({
+            file: filePath,
+            line: absLine,
+            column: absCol,
+            targetTag: el.tag,
+            oldSnippet: rawPropText,
+            newSnippet,
+            description: `Rename model update event "@update:${eventModelPart}" to "@update:${targetReplacement}" on <${el.tag}>`,
+          });
+        } else if (refactorType === 'remove_model') {
+          patches.push({
+            file: filePath,
+            line: absLine,
+            column: absCol,
+            targetTag: el.tag,
+            oldSnippet: rawPropText,
+            newSnippet: '',
+            description: `Remove model update event "@update:${eventModelPart}" on <${el.tag}>`,
+          });
+        }
+      }
     }
   }
 
@@ -367,9 +460,7 @@ function scanVueTemplateProps(
               handleEventDirective(prop, el, absLine, absCol, rawPropText);
             }
           } else if (refactorType === 'rename_model' || refactorType === 'remove_model') {
-            if (prop.type === NodeTypes.DIRECTIVE) {
-              handleModelDirective(prop, el, absLine, absCol, rawPropText);
-            }
+            handleModelDirective(prop, el, absLine, absCol, rawPropText);
           } else if (refactorType === 'rename_slot') {
             if (prop.type === NodeTypes.DIRECTIVE) {
               handleSlotDirective(prop, el.tag, absLine, absCol, rawPropText);
@@ -378,12 +469,20 @@ function scanVueTemplateProps(
             if (prop.type === NodeTypes.DIRECTIVE && prop.name === 'slot' && (!prop.arg || ('isStatic' in prop.arg && prop.arg.isStatic))) {
               const slotName = prop.arg && 'content' in prop.arg ? prop.arg.content : 'default';
               if (matchVueProp(slotName, cleanOld) || (slotName === 'default' && cleanOld === 'slot')) {
-                patches.push({ file: filePath,
-                  line: templateStartLine + el.loc.start.line - 1,
-                  column: el.loc.start.line === 1 ? templateStartCol + el.loc.start.column - 1 : el.loc.start.column,
-                  targetTag: el.tag, oldSnippet: el.loc.source, newSnippet: '',
-                  description: `Remove direct slot "${slotName}" subtree on <${el.tag}>` });
-                return;
+                if (el.props.length > 1 || !el.children || el.children.length === 0) {
+                  handleSlotDirective(prop, el.tag, absLine, absCol, rawPropText);
+                } else {
+                  patches.push({
+                    file: filePath,
+                    line: templateStartLine + el.loc.start.line - 1,
+                    column: el.loc.start.line === 1 ? templateStartCol + el.loc.start.column - 1 : el.loc.start.column,
+                    targetTag: el.tag,
+                    oldSnippet: el.loc.source,
+                    newSnippet: '',
+                    description: `Remove direct slot "${slotName}" subtree on <${el.tag}>`,
+                  });
+                  return;
+                }
               }
             }
           }
@@ -609,6 +708,23 @@ export async function generatePatchPlan(options: PatchPlanOptions): Promise<Patc
     operationScope: { consumerUsages: 'supported-static-usages', targetDeclaration: 'not-included', forwarding: 'not-included', dynamicComponents: 'not-included' },
   };
 
+  // Forward discovery exclusions to coverage accounting
+  if (treeResult.diagnostics?.length) {
+    for (const d of treeResult.diagnostics) {
+      if (d.code === 'CONSUMER_SOURCE_READ_FAILED') {
+        coverage.failedCount++;
+        coverage.candidateCount++;
+        coverage.diagnostics.push({ file: d.filePath, code: d.code, message: d.reason });
+      } else if (d.code === 'CONSUMER_INPUT_UNSUPPORTED') {
+        coverage.unsupportedCount++;
+        coverage.candidateCount++;
+        coverage.diagnostics.push({ file: d.filePath, code: d.code, message: d.reason });
+      } else if (d.code === 'MAX_DEPTH_REACHED' || d.code === 'SCOPE_BOUNDARY' || d.code === 'CYCLE_TRUNCATED') {
+        coverage.diagnostics.push({ file: d.filePath, code: d.code, message: d.reason });
+      }
+    }
+  }
+
   // 2. For each consumer file, parse template / JSX and locate exact code replacements
   for (const consumerPath of [...consumerFiles].sort()) {
     const patchesBefore = allPatches.length;
@@ -730,6 +846,9 @@ export async function generatePatchPlan(options: PatchPlanOptions): Promise<Patc
       coverage.diagnostics.push({ file: consumerPath, code: 'CONSUMER_ANALYSIS_FAILED', message: error instanceof Error ? error.message : String(error) });
     }
   }
+
+  // Mathematically enforce the invariant candidateCount = analyzedCount + failedCount + unsupportedCount
+  coverage.candidateCount = coverage.analyzedCount + coverage.failedCount + coverage.unsupportedCount;
 
   return {
     component: absComponentPath,

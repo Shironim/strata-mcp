@@ -26,11 +26,12 @@ export function collectVuePatchOmissions(
         if (prop.type !== NodeTypes.DIRECTIVE) continue;
         if (target && (prop.name === 'bind' || prop.name === 'on') && !prop.arg) {
           add(prop, 'OBJECT_FORWARDING', 'Object binding/listener forwarding is not rewritten; review keys and $attrs manually.', 'unsupported');
-        } else if ((target || (targetParent && el.tag === 'template')) && prop.arg && prop.arg.type === NodeTypes.SIMPLE_EXPRESSION && !prop.arg.isStatic) {
+        } else if ((target || targetParent) && prop.arg && ('isStatic' in prop.arg ? !prop.arg.isStatic : true)) {
           add(prop, 'DYNAMIC_ARGUMENT', 'Dynamic directive or slot names are not rewritten.', 'unsupported');
         }
       }
-      for (const child of el.children) walk(child, target);
+      const isTargetOrSlotted = target || (targetParent && el.tag === 'template');
+      for (const child of el.children) walk(child, isTargetOrSlotted);
     } else if (node.type === NodeTypes.ROOT) {
       for (const child of node.children) walk(child, targetParent);
     }

@@ -5,6 +5,7 @@ import { collectFiles } from './collector';
 import { getCandidateNames } from './template';
 import { detectFramework } from './contract';
 import { escapeRegExp } from './patterns';
+import { isRenderedInContent } from './graph/downward-traversal';
 import { scanDynamicImportsAndGlobals } from './dynamic-imports';
 import type {
   UnusedComponentInfo,
@@ -52,13 +53,12 @@ export function isPagePath(filePath: string): boolean {
 }
 
 /**
- * Checks whether a component candidate name appears in file content.
+ * Checks whether a component candidate name appears as an active rendered tag or usage in file content.
+ * Prevents import-only declarations in script from falsely counting as component usage (FND-02).
  */
 function isComponentReferencedInContent(content: string, candidateNames: string[]): boolean {
   for (const cand of candidateNames) {
-    const escaped = escapeRegExp(cand);
-    const regex = new RegExp(`\\b${escaped}\\b|<${escaped}[\\s/>]|['"].*?${escaped}(?:\\.[a-z0-9]+)?['"]`);
-    if (regex.test(content)) return true;
+    if (isRenderedInContent(content, cand)) return true;
   }
   return false;
 }

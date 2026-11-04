@@ -32,11 +32,13 @@ export async function runCanonAudit(
   explicitFramework?: FrontendFramework,
   options?: CanonAuditOptions
 ): Promise<CodePatternDiagnostic[]> {
-  const fwEvidence = detectFrameworkWithEvidence(snapshot.file, content);
+  const fwEvidence = detectFrameworkWithEvidence(snapshot.file, content, options?.projectRoot);
   const fw = explicitFramework || fwEvidence.framework;
   const majorVersion = options?.majorVersion ?? fwEvidence.majorVersion;
   const mergedOptions: CanonAuditOptions = {
     ...options,
+    ...((options?.projectContext || options?.projectRoot || fwEvidence.projectContext?.ownerRoot)
+      ? { projectContext: options?.projectContext ?? fwEvidence.projectContext } : {}),
     ...(majorVersion !== undefined ? { majorVersion } : {}),
   };
   const handlers = frameworkRuleMap[fw] || [];

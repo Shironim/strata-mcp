@@ -10,8 +10,9 @@ export function formatMatchesAsText(matches: ResolvedMatch[]): string {
 
   return matches
     .map((m) => {
+      const usage = m.usageKind ? ` [${m.usageKind}]` : '';
       const directive = m.clientDirective ? ` [${m.clientDirective}]` : '';
-      return `${m.file}:${m.line}:${m.column}${directive} - ${m.snippet}`;
+      return `${m.file}:${m.line}:${m.column}${usage}${directive} - ${m.snippet}`;
     })
     .join('\n');
 }
@@ -19,12 +20,22 @@ export function formatMatchesAsText(matches: ResolvedMatch[]): string {
 function appendHeaderAndProps(contract: ComponentContract, lines: string[]): void {
   lines.push(`Component: ${contract.component} (${contract.framework})`);
   lines.push(`File: ${contract.filePath}`);
+  if (contract.projectContext) {
+    const context = contract.projectContext;
+    lines.push(`Project owner: ${context.ownerRoot ?? 'unverified'} (${context.status}); application=${context.applicationFramework ?? 'unverified'}; app-root=${context.appRoot ?? 'unverified'}`);
+    for (const issue of context.diagnostics) lines.push(`Ownership partial (${issue.code}): ${issue.reason}`);
+  }
 
   if (contract.renderBoundary) {
     const directiveStr = contract.renderBoundary.directive
       ? ` ('${contract.renderBoundary.directive}')`
       : '';
     lines.push(`Render Boundary: ${contract.renderBoundary.boundary}${directiveStr}`);
+    const evidence = contract.renderBoundary.evidence;
+    lines.push(evidence
+      ? `Boundary evidence: ${evidence.basis}/${evidence.resolution} (${evidence.method}): ${evidence.reason ?? 'No additional reason supplied.'}`
+      : 'Boundary evidence: unavailable; runtime render environment is unverified.');
+    lines.push('Hydration flag describes structural interpretation; runtime behavior is not verified.');
   }
 
   lines.push('');
@@ -138,6 +149,7 @@ function appendDependenciesAndTokens(contract: ComponentContract, lines: string[
         lines.push(`  - Composables: ${composables.join(', ')}`);
       }
     }
+    for (const issue of contract.stateDependencies.diagnostics ?? []) lines.push(`State dependency partial (${issue.code}): ${issue.reason}`);
   }
 
   if (contract.dataDependencies) {
@@ -386,6 +398,9 @@ export function formatContractAsText(contract: ComponentContract): string {
   const lines: string[] = [];
 
   appendHeaderAndProps(contract, lines);
+  for (const [name, metadata] of [['Nuxt page metadata', contract.nuxtPageMeta], ['Next segment config', contract.nextSegmentConfig]] as const) {
+    if (metadata) lines.push(`${name}: ${JSON.stringify(metadata)}`);
+  }
   appendModelsAndVariants(contract, lines);
   appendEmitsSlotsAndExposed(contract, lines);
   appendDependenciesAndTokens(contract, lines);
