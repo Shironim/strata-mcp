@@ -157,7 +157,7 @@ const findCodeToolDefinition: McpToolDefinition = {
           content: [
             {
               type: 'text',
-              text: isJson ? JSON.stringify(matches, null, 2) : formatMatchesAsText(matches) + (isTruncated ? `\n\n[Notice: Results truncated at max_results=${maxResults}. Gunakan parameter path/scope yang lebih spesifik atau sesuaikan max_results untuk melihat match lainnya.]` : ''),
+              text: isJson ? JSON.stringify(matches, null, 2) : formatMatchesAsText(matches) + (isTruncated ? `\n\n[Notice: Results truncated at max_results=${maxResults}. Use a more specific path/scope parameter or adjust max_results to view other matches.]` : ''),
             },
           ],
         };
@@ -178,7 +178,7 @@ const findCodeToolDefinition: McpToolDefinition = {
           content: [
             {
               type: 'text',
-              text: isJson ? JSON.stringify(matches, null, 2) : formatMatchesAsText(matches) + (isTruncated ? `\n\n[Notice: Results truncated at max_results=${maxResults}. Gunakan parameter path/scope yang lebih spesifik atau sesuaikan max_results untuk melihat match lainnya.]` : ''),
+              text: isJson ? JSON.stringify(matches, null, 2) : formatMatchesAsText(matches) + (isTruncated ? `\n\n[Notice: Results truncated at max_results=${maxResults}. Use a more specific path/scope parameter or adjust max_results to view other matches.]` : ''),
             },
           ],
         };
@@ -209,7 +209,7 @@ const findCodeToolDefinition: McpToolDefinition = {
           content: [
             {
               type: 'text',
-              text: isJson ? JSON.stringify(matches, null, 2) : notice() + formatMatchesAsText(matches) + (isTruncated ? `\n\n[Notice: Results truncated at max_results=${maxResults}. Gunakan parameter path/scope yang lebih spesifik atau sesuaikan max_results untuk melihat match lainnya.]` : ''),
+              text: isJson ? JSON.stringify(matches, null, 2) : notice() + formatMatchesAsText(matches) + (isTruncated ? `\n\n[Notice: Results truncated at max_results=${maxResults}. Use a more specific path/scope parameter or adjust max_results to view other matches.]` : ''),
             },
           ],
         };

@@ -93,7 +93,7 @@ const traceStateToolDefinition: McpToolDefinition = {
             tool: 'find_code',
             params: { action: 'map' },
           },
-          message: "Workspace belum diindeks oleh Strata. Jalankan 'strata init' terlebih dahulu di terminal atau panggil tool inisialisasi yang disetujui.",
+          message: "Workspace has not been indexed by Strata yet. Run 'strata init' first in the terminal or call the approved initialization tool.",
         };
         return {
           content: [

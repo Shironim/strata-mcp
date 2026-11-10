@@ -632,7 +632,7 @@ export function formatSymbolSliceAsText(result: SymbolSliceResult): string {
   if (result.isTruncated) {
     const lineCount = result.endLine - result.startLine + 1;
     lines.push(`\n⚠️ **Context Guard Notice:** Symbol spans ${lineCount} lines (exceeds 50-line dump threshold). Truncated to preview.`);
-    lines.push(`> [!TIP] Gunakan \`inspect_component\` dengan parameter \`path: "${result.filePath}"\`, \`source_range: { start_line: ${result.startLine}, end_line: ${result.endLine} }\` untuk membaca bagian yang diperlukan secara presisi tanpa context rot.\n`);
+    lines.push(`> [!TIP] Use \`inspect_component\` with parameters \`path: "${result.filePath}"\`, \`source_range: { start_line: ${result.startLine}, end_line: ${result.endLine} }\` to read the required section precisely without context rot.\n`);
   }
 
   lines.push('\n```typescript');
