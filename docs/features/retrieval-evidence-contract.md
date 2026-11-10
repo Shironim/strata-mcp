@@ -1,37 +1,37 @@
-# retrieval-evidence-contract — SSOT Bukti Kriptografis, Budgeting, & Paginasi Token
+# retrieval-evidence-contract — SSOT Cryptographic Evidence, Budgeting, & Token Pagination
 
 **Status:** Single Source of Truth (SSOT)  
-**Pemilik Fitur:** Context Budget & Evidence Engine (`src/engine/context-budget.ts`, `src/engine/retrieval-evidence.ts`)  
-**Terakhir Diperbarui:** 2026-11-11  
+**Feature Owner:** Context Budget & Evidence Engine (`src/engine/context-budget.ts`, `src/engine/retrieval-evidence.ts`)  
+**Last Updated:** 2026-11-11  
 
 ---
 
-## 1. Tujuan & Kebutuhan Bisnis
+## 1. Purpose & Business Requirements
 
-Salah satu kegagalan terbesar tool AI coding generasi pertama adalah:
-* **Context Flooding (Ledakan Token):** Tool mengembalikan payload ratusan kilobyte sekaligus yang membanjiri window context LLM, memicu error token limit atau membuat model lupa instruksi awal (*Lost in the Middle*).
-* **Silent Truncation:** Teks dipotong secara sembarangan di tengah baris atau di tengah JSON tanpa memberi tahu agent bahwa data tersebut belum lengkap.
-* **Halusinasi Kepastian:** Tool menyatakan bahwa pencarian selesai padahal sebagian direktori di-ignore atau terjadi error parsial.
-* **Solusi Kontrak Retrieval:**
-  Strata-MCP menegakkan batas hard budget byte (`max_bytes`), token paginasi deterministik (`continuation_token`), bukti kriptografis asal data (*provenance tracking*), dan pelaporan kelalaian eksplisit (*explicit omissions*).
+Common failure modes of first-generation AI coding tools include:
+* **Context Flooding:** Tools return hundreds of kilobytes of unconstrained payloads, flooding LLM context windows, exhausting token budgets, and causing attention dilution (*Lost in the Middle*).
+* **Silent Truncation:** Payloads are chopped arbitrarily mid-line or mid-JSON without notifying the agent that results are incomplete.
+* **Illusion of Completeness:** Tools report that a search completed cleanly even when directories were omitted or partial parse failures occurred.
+* **The Retrieval Contract Solution:**
+  Strata-MCP enforces strict byte budgets (`max_bytes`), deterministic pagination tokens (`continuation_token`), cryptographic provenance tracking (*provenance tracking*), and explicit omission reporting (*explicit omissions*).
 
 ---
 
-## 2. Spesifikasi Parameter Budget & Paginasi
+## 2. Budget & Pagination Parameter Specifications
 
-Semua tool di Strata-MCP memiliki parameter standar untuk mengendalikan ukuran respon:
+All Strata-MCP tools expose standardized parameters to regulate response volume:
 
-| Parameter | Tipe | Default | Deskripsi |
+| Parameter | Type | Default | Description |
 |---|---|---|---|
-| `max_bytes` | `integer` | `16384` (16 KiB) | Batas maksimal ukuran payload UTF-8 JSON hasil tool call (minimum 512 bytes). Jika data melebihi batas ini, Strata melakukan pemotongan teratur (*graceful pagination*) atau mengembalikan budget error eksplisit. |
-| `continuation_token` | `string` | `undefined` | Token kriptografis deterministik yang dikembalikan saat respon terpotong untuk mengambil halaman berikutnya. |
-| `include_structured` | `boolean` | `false` | Ketika `format: "text"`, atur ke `true` jika ingin menyertakan payload penuh `structuredContent` JSON. Default `false` untuk menghemat transport bandwidth. |
+| `max_bytes` | `integer` | `16384` (16 KiB) | Hard budget ceiling on UTF-8 JSON response payload size (minimum 512 bytes). If output exceeds this threshold, Strata applies graceful pagination or returns an actionable budget error. |
+| `continuation_token` | `string` | `undefined` | Deterministic cryptographic token returned when results are truncated, used to fetch the subsequent page. |
+| `include_structured` | `boolean` | `false` | In `format: "text"` mode, set to `true` to include full JSON `structuredContent`. Defaults to `false` to preserve transport bandwidth. |
 
 ---
 
-## 3. Struktur Objek Retrieval Evidence
+## 3. Retrieval Evidence Object Structure
 
-Setiap respon dari tool Strata menyertakan metadata bukti retrieval pada `structuredContent.retrieval`:
+Every Strata MCP response includes retrieval metadata within `structuredContent.retrieval`:
 
 ```json
 {
@@ -56,25 +56,25 @@ Setiap respon dari tool Strata menyertakan metadata bukti retrieval pada `struct
 }
 ```
 
-### Elemen-Elemen Kunci:
+### Key Elements:
 1. **`basis` (`'source' | 'derived' | 'indexed'`):**
-   * `'source'`: Fakta dibaca langsung dari baris kode sumber asli.
-   * `'derived'`: Fakta disimpulkan dari pola konvensi (misal: menebak nama controller dari route).
-   * `'indexed'`: Fakta diambil dari database graf terindeks (`graph.db`).
+   * `'source'`: Evidence read directly from raw source code lines.
+   * `'derived'`: Inferred from framework conventions (e.g., guessing controller names from route patterns).
+   * `'indexed'`: Retrieved from the indexed graph database (`graph.db`).
 2. **`status` (`'complete' | 'partial' | 'stale'`):**
-   * `'complete'`: Seluruh scope yang diminta berhasil dianalisis penuh tanpa ada kegagalan parse.
-   * `'partial'`: Terdapat file yang gagal di-parse atau dipotong oleh batas `limit`/`max_depth`.
-   * `'stale'`: File di disk telah berubah sejak pembacaan terakhir; meminta pengambilan ulang.
-3. **`omissions` (Daftar Kelalaian Eksplisit):**
-   Jika ada file yang dilewati karena parse error atau dynamic syntax, dicatat secara transparan dengan kode dan alasan (misal: `DYNAMIC_PROP_SPREAD`, `VUE_PARSE_FAILED`).
+   * `'complete'`: The requested scope was completely analyzed without parser errors.
+   * `'partial'`: Files encountered parser errors or were bounded by `limit`/`max_depth`.
+   * `'stale'`: Disk contents changed since the last index; prompts re-synchronization.
+3. **`omissions` (Explicit Omission List):**
+   When files are skipped due to parse errors or dynamic constructs, they are transparently recorded with diagnostic codes and reasons (e.g., `DYNAMIC_PROP_SPREAD`, `VUE_PARSE_FAILED`).
 
 ---
 
-## 4. Mekanisme Paginasi Token (`continuation_token`)
+## 4. Token Pagination Mechanics (`continuation_token`)
 
-Ketika koleksi data (misalnya daftar file pada `find_code(action: "map")` atau matches pencarian) melebihi batas `max_bytes`:
-1. Strata memotong koleksi pada batas item yang aman (tanpa merusak struktur sintaksis JSON).
-2. Menghasilkan respon berisi metadata:
+When collections (such as file lists in `find_code(action: "map")` or search matches) exceed `max_bytes`:
+1. Strata truncates the collection at a clean item boundary (without corrupting JSON syntax).
+2. Emits metadata indicating continuation availability:
    ```json
    {
      "budget": {
@@ -84,15 +84,15 @@ Ketika koleksi data (misalnya daftar file pada `find_code(action: "map")` atau m
      }
    }
    ```
-3. AI agent cukup mengulang pemanggilan tool dengan menyertakan:
+3. The AI agent repeats the tool call passing:
    `continuation_token: "eyJvZmZzZXQiOjUwLCJzZWVkIjoxMjM0NX0="`
-   untuk menerima halaman berikutnya secara deterministik tanpa duplikasi data.
+   to receive the subsequent page deterministically without duplicate entries.
 
 ---
 
-## 5. Rujukan Implementasi Kode
+## 5. Code Implementation References
 
 * **Context Budget Enforcer:** [`src/engine/context-budget.ts`](../../src/engine/context-budget.ts)
 * **Retrieval Evidence Formatter:** [`src/engine/retrieval-evidence.ts`](../../src/engine/retrieval-evidence.ts)
 * **Index Retrieval Tracker:** [`src/engine/index-retrieval-evidence.ts`](../../src/engine/index-retrieval-evidence.ts)
-* **Mcp Response Decorator:** [`src/tools/retrieval-response.ts`](../../src/tools/retrieval-response.ts)
+* **MCP Response Decorator:** [`src/tools/retrieval-response.ts`](../../src/tools/retrieval-response.ts)

@@ -1,103 +1,103 @@
-# audit_frontend — SSOT Topologi URL, Layouts, API Contracts, & Fullstack Bridge
+# audit_frontend — SSOT URL Topology, Layouts, API Contracts, & Fullstack Bridge
 
 **Status:** Single Source of Truth (SSOT)  
-**Pemilik Fitur:** Tool Call `audit_frontend` (`src/tools/audit-frontend.ts`)  
-**Terakhir Diperbarui:** 2026-11-11  
+**Feature Owner:** Tool Call `audit_frontend` (`src/tools/audit-frontend.ts`)  
+**Last Updated:** 2026-11-11  
 
 ---
 
-## 1. Tujuan & Kebutuhan Bisnis
+## 1. Purpose & Business Requirements
 
-Memahami arsitektur makro aplikasi frontend sering kali membingungkan bagi AI agent:
-* **Masalah Pengembang & AI Agent:**
-  * Tidak mengetahui sitemap URL rute yang ada di aplikasi beserta parameter dinamisnya (`[id]`, `[...slug]`).
-  * Tidak mengetahui hierarki layout yang membungkus setiap halaman.
-  * **Jurang Frontend–Backend:** Agent melihat form atau pemanggilan API di UI, tetapi bingung mencari controller/service mana di backend yang menangani request tersebut, memicu *grep* membabi buta di backend yang memboroskan puluhan ribu token.
-  * Komponen mati (*dead components*) atau store usang (*dead state*) menumpuk tanpa terdeteksi.
-* **Solusi `audit_frontend`:**
-  Menyajikan audit makro topologi URL rute dan rantai layout pembungkusnya, menginventarisasi seluruh kontrak pemanggilan API outbound beserta **`backendTargetHint`** (jembatan estafet ke **Septum-MCP** di backend), serta mendeteksi komponen dan state yang sudah tidak digunakan (*dead code*).
+Understanding the macro architecture of a frontend application is often challenging for AI agents:
+* **Developer & AI Agent Problems:**
+  * Unaware of the route URL sitemap in the application along with dynamic parameters (`[id]`, `[...slug]`).
+  * Unaware of the layout hierarchy wrapping each page.
+  * **Frontend–Backend Divide:** Agents identify a form or API call in the UI, but struggle to locate which controller or service handles that request on the backend, triggering blind grepping across backend files and wasting tens of thousands of tokens.
+  * Dead components or obsolete stores accumulate undetected.
+* **The `audit_frontend` Solution:**
+  Provides a macro audit of route URL topology and nested layout chains, inventories all outbound API call contracts along with **`backendTargetHint`** (a direct handoff bridge to **Septum-MCP** on the backend), and detects unused components and state (*dead code*).
 
 ---
 
-## 2. Spesifikasi Input (Parameter & Aliasing)
+## 2. Input Specifications (Parameters & Aliasing)
 
-| Parameter | Tipe | Wajib? | Deskripsi & Aliasing |
+| Parameter | Type | Required? | Description & Aliasing |
 |---|---|---|---|
-| `path` | `string` | Opsional | Direktori root proyek (default: `"."`, alias: `target_path`, `targetPath`). |
-| `target` | `'routes' \| 'api-contracts' \| 'dead-components' \| 'dead-state' \| 'all'` | Opsional | Target audit spesifik (default: `'all'`). |
-| `view` | `'summary' \| 'full' \| 'tree'` | Opsional | Tampilan representasi rute untuk `target: "routes"` (default: `'summary'`). |
-| `prefix` | `string` | Opsional | Filter awalan rute URL (misal: `"/dashboard"`, `"/api"`). |
-| `framework` | `string` | Opsional | Petunjuk framework: `'next-app'`, `'next-pages'`, `'nuxt'`, `'astro'`, `'sveltekit'`, `'inertia'`, `'vue-router'`. |
-| `scope_path` | `string` | Opsional | Sub-direktori atau workspace scope (misal: `"apps/web"`) untuk menghindari scan seluruh monorepo. |
-| `include_pages`| `boolean` | Opsional | Mengikutsertakan file page/view dalam audit dead-components (default: `false`). |
-| `exclude_dirs` | `string[]` | Opsional | Daftar nama direktori untuk diabaikan. |
-| `format` | `'text' \| 'json'` | Opsional | Format keluaran (default: `'text'`, alias: `output_format`). |
+| `path` | `string` | Optional | Project root directory (default: `"."`, aliases: `target_path`, `targetPath`). |
+| `target` | `'routes' \| 'api-contracts' \| 'dead-components' \| 'dead-state' \| 'all'` | Optional | Specific audit target (default: `'all'`). |
+| `view` | `'summary' \| 'full' \| 'tree'` | Optional | Representation view for `target: "routes"` (default: `'summary'`). |
+| `prefix` | `string` | Optional | Route URL prefix filter (e.g., `"/dashboard"`, `"/api"`). |
+| `framework` | `string` | Optional | Framework hint: `'next-app'`, `'next-pages'`, `'nuxt'`, `'astro'`, `'sveltekit'`, `'inertia'`, `'vue-router'`. |
+| `scope_path` | `string` | Optional | Sub-directory or workspace scope (e.g., `"apps/web"`) to avoid scanning an entire monorepo. |
+| `include_pages`| `boolean` | Optional | Include page/view files in dead-components audit (default: `false`). |
+| `exclude_dirs` | `string[]` | Optional | List of directory names to ignore. |
+| `format` | `'text' \| 'json'` | Optional | Output format (default: `'text'`, alias: `output_format`). |
 
 ---
 
-## 3. Empat Target Audit Utama
+## 3. Four Core Audit Targets
 
-### A. Topologi Rute & Layouts (`target: "routes"`)
-* Memindai file-based routing:
+### A. Route Topology & Layouts (`target: "routes"`)
+* Scans file-based routing:
   * Next.js App Router (`app/**/page.tsx`, `layout.tsx`)
   * Next.js Pages Router (`pages/**/*.tsx`, `_app.tsx`)
   * Nuxt 3 (`pages/**/*.vue`, `layouts/*.vue`)
   * SvelteKit (`src/routes/**/+page.svelte`, `+layout.svelte`)
   * Astro (`src/pages/**/*.astro`)
-* Mengekstrak parameter dinamis (`:id`, `*slug`), middleware, dan rantai **Nested Layout** pembungkusnya.
+* Extracts dynamic parameters (`:id`, `*slug`), middleware, and wrapping **Nested Layout** chains.
 
 ### B. Outbound API Contracts & Fullstack Bridge (`target: "api-contracts"`)
-* Menginventarisasi seluruh pemanggilan HTTP keluar:
+* Inventories all outbound HTTP calls:
   * Axios (`axios.get/post/put/delete`)
   * Native `fetch()`
   * TanStack Query / SWR
   * Inertia.js (`useForm`, `router.post`)
   * Nuxt `$fetch` / `useFetch`
-* Mengekstrak method, URL endpoint, field payload form, serta file dan baris pemanggil.
-* **Sintesis `backendTargetHint`:** Menerjemahkan endpoint REST atau named route Ziggy menjadi simbol controller backend (misal: `POST /api/v1/cadets` &rarr; `CadetController@store`).
+* Extracts HTTP methods, URL endpoints, form payload fields, and caller file/line coordinates.
+* **`backendTargetHint` Synthesis:** Translates REST endpoints or Ziggy named routes into backend controller symbols (e.g., `POST /api/v1/cadets` &rarr; `CadetController@store`).
 
-### C. Komponen Mati (`target: "dead-components"`)
-* Mendeteksi komponen UI yang tidak pernah di-import atau dirender di bagian mana pun dalam workspace.
+### C. Dead Components (`target: "dead-components"`)
+* Detects UI components that are never imported or rendered anywhere across the workspace.
 
-### D. State Mati (`target: "dead-state"`)
-* Mendeteksi store (Pinia/Zustand), Context, atau Composable yang tidak memiliki konsumen (*readers* maupun *mutators*).
+### D. Dead State (`target: "dead-state"`)
+* Detects stores (Pinia/Zustand), Contexts, or Composables that have no active consumers (*neither readers nor mutators*).
 
 ---
 
-## 4. Jembatan ke Backend: Pola "Fullstack Estafet" ke Septum-MCP
+## 4. Backend Bridge: "Fullstack Handoff" Pattern to Septum-MCP
 
-Fitur ini menjadi jembatan utama antara Strata-MCP (Frontend) dan Septum-MCP (Backend):
+This feature serves as the primary bridge between Strata-MCP (Frontend) and Septum-MCP (Backend):
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
-│ 1. SISI FRONTEND (Strata-MCP)                                          │
+│ 1. FRONTEND SIDE (Strata-MCP)                                          │
 │    audit_frontend(target: "api-contracts")                             │
-│    Hasil:                                                              │
+│    Result:                                                             │
 │    - Endpoint: POST /api/v1/cadets                                     │
 │    - Payload Fields: [name, batch_id, status]                          │
 │    - backendTargetHint: "CadetController@store"                        │
 └───────────────────────────────────┬────────────────────────────────────┘
-                                    │ (Estafetkan Hint ke Septum)
+                                    │ (Handoff Hint to Septum)
                                     ▼
 ┌────────────────────────────────────────────────────────────────────────┐
-│ 2. SISI BACKEND (Septum-MCP)                                           │
+│ 2. BACKEND SIDE (Septum-MCP)                                           │
 │    septum_slice(query: "CadetController@store", max_depth: 5)          │
-│    Hasil:                                                              │
+│    Result:                                                             │
 │    - Ingress: routes/api.php                                           │
 │    - Controller: CadetController.php@store                             │
-│    - FormRequest: StoreCadetRequest.php (Rule validasi batch_id)       │
+│    - FormRequest: StoreCadetRequest.php (batch_id validation rules)    │
 │    - Database: Eloquent Model Cadet::create()                          │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Dampak Penghematan Token:**
-Task fullstack end-to-end yang biasanya menghabiskan 40.000–50.000 token karena agent melakukan grep membabi buta di backend, dapat diselesaikan hanya dengan **~1.500–2.500 token**.
+**Token Savings Impact:**
+An end-to-end fullstack task that typically consumes 40,000–50,000 tokens due to blind backend grepping can be resolved in just **~1,500–2,500 tokens**.
 
 ---
 
-## 5. Struktur Output & Contoh Respon
+## 5. Output Structure & Example Responses
 
-### Contoh Output `target: "routes"`:
+### Example Output for `target: "routes"`:
 ```text
 Frontend Routes Topology:
 Framework: Nuxt 3 / Vue Router
@@ -115,7 +115,7 @@ Route: /catalog/:id
 Total Routes: 2
 ```
 
-### Contoh Output `target: "api-contracts"`:
+### Example Output for `target: "api-contracts"`:
 ```text
 API Contracts Audit:
 Total Endpoints: 2
@@ -133,11 +133,11 @@ Total Endpoints: 2
 
 ---
 
-## 6. Rujukan Implementasi Kode
+## 6. Code Implementation References
 
-* **Katalog Definisi Tool:** [`src/tools/catalog.ts`](../../src/tools/catalog.ts)
-* **Handler Utama:** [`src/tools/audit-frontend.ts`](../../src/tools/audit-frontend.ts)
+* **Tool Definition Catalog:** [`src/tools/catalog.ts`](../../src/tools/catalog.ts)
+* **Primary Handler:** [`src/tools/audit-frontend.ts`](../../src/tools/audit-frontend.ts)
 * **API Contract Engine:** [`src/engine/api-contract.ts`](../../src/engine/api-contract.ts)
 * **Routes Scanner:** [`src/engine/routes.ts`](../../src/engine/routes.ts)
-* **Audit Dead Components:** [`src/engine/audit.ts`](../../src/engine/audit.ts)
-* **Audit Dead State:** [`src/engine/storage/state-storage.ts`](../../src/engine/storage/state-storage.ts)
+* **Dead Components Audit:** [`src/engine/audit.ts`](../../src/engine/audit.ts)
+* **Dead State Audit:** [`src/engine/storage/state-storage.ts`](../../src/engine/storage/state-storage.ts)

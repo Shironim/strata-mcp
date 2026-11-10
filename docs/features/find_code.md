@@ -1,68 +1,68 @@
-# find_code — SSOT Pencarian Struktural Berbasis AST & Inventori Frontend
+# find_code — SSOT AST-Based Structural Search & Frontend Inventory
 
 **Status:** Single Source of Truth (SSOT)  
-**Pemilik Fitur:** Tool Call `find_code` (`src/tools/find-code.ts`)  
-**Terakhir Diperbarui:** 2026-11-11  
+**Feature Owner:** Tool Call `find_code` (`src/tools/find-code.ts`)  
+**Last Updated:** 2026-11-11  
 
 ---
 
-## 1. Tujuan & Kebutuhan Bisnis
+## 1. Purpose & Business Requirements
 
-Pencarian kode teks biasa (`grep`, `ripgrep`, regex) sering kali gagal pada kode frontend modern:
-* **Kelemahan Grep Biasa:**
-  * Terkecoh oleh pemecahan baris (*multi-line formatting*), perbedaan spasi, atau jenis tanda kutip (`'` vs `"` vs `` ` ``).
-  * Terkecoh oleh perbedaan penamaan komponen antara PascalCase (`<UserAvatar>`) dan kebab-case (`<user-avatar>`).
-  * **Tidak mampu mencari "Absence of Code":** Grep tidak bisa mencari komponen yang *lupa mengisi prop tertentu*.
-  * Menjelajahi folder baru dengan membaca seluruh file menghabiskan kuota token secara masif.
-* **Solusi `find_code`:**
-  Memanfaatkan mesin **`ast-grep` (Rust + Tree-sitter)** untuk pencarian pola sintaksis struktural yang kebal format baris, pencarian adopsi komponen beserta deteksi prop yang dihilangkan (*omission*), dan penyediaan peta inventori file terikat batas (*bounded inventory mapping*) tanpa membaca isi body file.
+Plain-text search tools (`grep`, `ripgrep`, regex) frequently fail on modern frontend codebases:
+* **Limitations of Standard Grep:**
+  * Thrown off by line wraps (*multi-line formatting*), whitespace variations, or quote types (`'` vs `"` vs `` ` ``).
+  * Thrown off by casing conventions between PascalCase (`<UserAvatar>`) and kebab-case (`<user-avatar>`).
+  * **Cannot search for "Absence of Code":** Grep cannot find components where developers *forgot to provide a specific prop*.
+  * Exploring a new directory by reading entire files rapidly exhausts context token budgets.
+* **The `find_code` Solution:**
+  Leverages the **`ast-grep` engine (Rust + Tree-sitter)** for structural syntax pattern matching immune to line breaks, component adoption tracking with prop omission detection (`omission`), and bounded file inventory mapping (`action: "map"`) without reading file bodies.
 
 ---
 
-## 2. Spesifikasi Input (Parameter & Aliasing)
+## 2. Input Specifications (Parameters & Aliasing)
 
-| Parameter | Tipe | Wajib? | Deskripsi & Aliasing |
+| Parameter | Type | Required? | Description & Aliasing |
 |---|---|---|---|
-| `path` | `string` | Opsional | Direktori atau file target pencarian (default: root, alias: `file_path`, `filePath`, `target_path`). |
-| `pattern` | `string` | Bersyarat | Pola AST pattern (misal: `"ref($$$)"`, `"computed($$$)"`, `"console.log($$$)"`). Alias: `query`, `search`. |
-| `action` | `'search' \| 'map'` | Opsional | Tindakan: `'search'` (default) atau `'map'` (memetakan inventori file tanpa membaca isi bodi). |
-| `mode` | `'ast' \| 'auto' \| 'literal'` | Opsional | Mode pencarian pattern: `'ast'` (default struktural), `'literal'` (substring persis per baris), atau `'auto'` (AST dengan fallback literal jika syntax parse error). |
-| `component` | `string` | Bersyarat | Nama komponen yang dicari adopsinya (misal: `"BaseButton"` atau `"base-button"`). Alias: `component_name`. |
-| `prop_name` | `string` | Opsional | Nama prop untuk dianalisis bersama `component` (misal: `"variant"`). Alias: `prop`. |
-| `prop_presence`| `'present' \| 'omitted'` | Opsional | Filter keberadaan prop: `'present'` (default, render yang mengisi prop) atau `'omitted'` (render yang **tidak** mengisi prop). |
-| `rule_yaml` | `string` | Opsional | Definisi lengkap aturan relasional YAML ast-grep. |
-| `code` | `string` | Opsional | Cuplikan kode untuk diuji polanya secara in-memory (tanpa menyentuh disk, alias: `code_snippet`). |
-| `scope` | `'template' \| 'script' \| 'both'` | Opsional | Cakupan pencarian komponen: `'template'`, `'script'`, atau `'both'` (default). |
-| `limit` | `integer` | Opsional | Batas maksimal path file yang dikembalikan untuk `action: "map"` (default: `100`, max: `500`). |
-| `offset` | `integer` | Opsional | Offset awal untuk pagination stabil pada `action: "map"` (default: `0`). |
-| `exclude_dirs` | `string[]` | Opsional | Daftar nama direktori untuk diabaikan (misal: `["storage", "legacy"]`). |
-| `format` | `'text' \| 'json'` | Opsional | Format keluaran (default: `'text'`, alias: `output_format`). |
+| `path` | `string` | Optional | Search target directory or file (default: root, aliases: `file_path`, `filePath`, `target_path`). |
+| `pattern` | `string` | Conditional | Structural AST pattern (e.g., `"ref($$$)"`, `"computed($$$)"`, `"console.log($$$)"`). Aliases: `query`, `search`. |
+| `action` | `'search' \| 'map'` | Optional | Action: `'search'` (default) or `'map'` (maps file inventory without reading bodies). |
+| `mode` | `'ast' \| 'auto' \| 'literal'` | Optional | Pattern search mode: `'ast'` (default structural), `'literal'` (exact substring per line), or `'auto'` (AST with literal fallback on syntax parse error). |
+| `component` | `string` | Conditional | Component name for adoption search (e.g., `"BaseButton"` or `"base-button"`). Alias: `component_name`. |
+| `prop_name` | `string` | Optional | Prop name to analyze alongside `component` (e.g., `"variant"`). Alias: `prop`. |
+| `prop_presence`| `'present' \| 'omitted'` | Optional | Prop presence filter: `'present'` (default, renders supplying the prop) or `'omitted'` (renders **omitting** the prop). |
+| `rule_yaml` | `string` | Optional | Complete relational YAML ast-grep rule definition. |
+| `code` | `string` | Optional | Code snippet to test against patterns in-memory (without touching disk, alias: `code_snippet`). |
+| `scope` | `'template' \| 'script' \| 'both'` | Optional | Component search scope: `'template'`, `'script'`, or `'both'` (default). |
+| `limit` | `integer` | Optional | Maximum number of file paths returned for `action: "map"` (default: `100`, max: `500`). |
+| `offset` | `integer` | Optional | Starting offset for stable pagination under `action: "map"` (default: `0`). |
+| `exclude_dirs` | `string[]` | Optional | List of directory names to ignore (e.g., `["storage", "legacy"]`). |
+| `format` | `'text' \| 'json'` | Optional | Output format (default: `'text'`, alias: `output_format`). |
 
 ---
 
-## 3. Tiga Mode Operasi Utama
+## 3. Three Primary Operating Modes
 
-### A. Pencarian Pola AST (`ast-grep`)
-* Menggunakan metavariables:
-  * `$$$` : Mencocokkan nol atau banyak argumen/statement.
-  * `$NAME` : Menangkap identifier tertentu.
-* **Kebal Whitespace & Multi-line:** Pola `ref($$$)` akan menemukan deklarasi `ref(0)` satu baris maupun `ref({\n  id: 1,\n  name: 'John'\n})` yang dipecah 10 baris.
-* **Relational Rules (YAML):** Mendukung kondisi canggih seperti `inside`, `has`, `precedes`, atau `follows` (misal: mencari pemanggilan API yang hanya terjadi di dalam fungsi `onMounted`).
+### A. AST Pattern Search (`ast-grep`)
+* Utilizes metavariables:
+  * `$$$` : Matches zero or more arguments/statements.
+  * `$NAME` : Captures specific identifiers.
+* **Whitespace & Multi-line Immunity:** The pattern `ref($$$)` matches single-line declarations like `ref(0)` as well as multi-line declarations like `ref({\n  id: 1,\n  name: 'John'\n})` across 10 lines.
+* **Relational Rules (YAML):** Supports advanced relational constraints such as `inside`, `has`, `precedes`, or `follows` (e.g., searching for API calls executed strictly inside `onMounted`).
 
-### B. Analisis Adopsi Komponen & Deteksi Prop Omission
-* **Dual-Convention Matching:** Mencari `component: "Alert"` otomatis menemukan `<Alert>`, `<alert>`, dan `<CustomAlert>` jika di-import sebagai alias (`import { Alert as CustomAlert }`).
-* **Prop Presence (`prop_presence: "present"`):** Menemukan semua render yang menyuplai prop, baik statis (`variant="danger"`) maupun dinamis (`:variant="type"`).
-* **Prop Omission (`prop_presence: "omitted"`):** Menemukan seluruh titik render yang **LUPA / TIDAK MENGISI** prop tersebut. Sangat berguna untuk audit breaking change saat sebuah prop baru diwajibkan di komponen bersama.
+### B. Component Adoption Analysis & Prop Omission Detection
+* **Dual-Convention Matching:** Searching for `component: "Alert"` automatically matches `<Alert>`, `<alert>`, and `<CustomAlert>` when imported as an alias (`import { Alert as CustomAlert }`).
+* **Prop Presence (`prop_presence: "present"`):** Finds all renders supplying the prop, whether static (`variant="danger"`) or dynamic (`:variant="type"`).
+* **Prop Omission (`prop_presence: "omitted"`):** Finds all render locations that **OMIT / FORGOT** the prop. Essential for auditing breaking changes when making a prop required across shared components.
 
 ### C. Bounded File Inventory (`action: "map"`)
-* Mengembalikan daftar file frontend dalam scope tertentu tanpa menelan body file (menghemat hingga 95% token).
-* Secara otomatis mengklasifikasikan domain, layer arsitektur (`page`, `component`, `layout`, `store`, `composable`), dan mendeteksi kandidat framework dari `package.json`.
+* Returns a scoped frontend file catalog without reading file bodies (saving up to 95% of tokens).
+* Automatically classifies domains, architectural layers (`page`, `component`, `layout`, `store`, `composable`), and detects framework candidates from `package.json`.
 
 ---
 
-## 4. Struktur Output & Contoh Respon
+## 4. Output Structure & Example Responses
 
-### Contoh A: Hasil Pencarian Prop Omission
+### Example A: Prop Omission Search Result
 ```text
 Prop query: {"component":"BaseButton","prop":"variant","presence":"omitted"}
 
@@ -76,7 +76,7 @@ Prop supply coverage: {"suppliedCount":8,"omittedCount":2,"dynamicForwarded":0}
 [Static search complete: 2 components omit the "variant" prop]
 ```
 
-### Contoh B: Hasil Bounded Inventory (`action: "map"`)
+### Example B: Bounded Inventory Result (`action: "map"`)
 ```text
 Frontend Map: /src/modules/checkout
 Framework Candidates: Vue 3, Nuxt
@@ -94,11 +94,11 @@ Files Inventory:
 
 ---
 
-## 5. Rujukan Implementasi Kode
+## 5. Code Implementation References
 
-* **Katalog Definisi Tool:** [`src/tools/catalog.ts`](../../src/tools/catalog.ts)
-* **Handler Utama:** [`src/tools/find-code.ts`](../../src/tools/find-code.ts)
-* **Engine Search:** [`src/engine/search.ts`](../../src/engine/search.ts)
-* **Engine AST Grep:** [`src/engine/astgrep.ts`](../../src/engine/astgrep.ts)
+* **Tool Definition Catalog:** [`src/tools/catalog.ts`](../../src/tools/catalog.ts)
+* **Primary Handler:** [`src/tools/find-code.ts`](../../src/tools/find-code.ts)
+* **Search Engine:** [`src/engine/search.ts`](../../src/engine/search.ts)
+* **AST Grep Engine:** [`src/engine/astgrep.ts`](../../src/engine/astgrep.ts)
 * **Prop Intent Search:** [`src/engine/search-intent.ts`](../../src/engine/search-intent.ts)
 * **Frontend Map Engine:** [`src/engine/frontend-map.ts`](../../src/engine/frontend-map.ts)

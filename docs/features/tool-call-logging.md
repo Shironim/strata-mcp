@@ -1,38 +1,38 @@
-# Logging pemanggilan tool Strata
+# Strata Tool Call Logging
 
-Kontrak logging lokal untuk enam tool MCP. Owner implementasi: `src/engine/telemetry.ts`;
-integrasi: `src/mcp.ts`; regresi: `tests/telemetry.test.ts`.
+Local logging contract for the six MCP tools. Implementation owner: `src/engine/telemetry.ts`;
+integration: `src/mcp.ts`; regressions: `tests/telemetry.test.ts`.
 
-## Penilaian data yang masuk log
+## Logged Data Evaluation
 
-| Data | Keputusan dan kegunaan |
+| Data | Decision and Purpose |
 | --- | --- |
-| Timestamp UTC, tool, status, durasi | Catat setiap pemanggilan yang mencapai dispatcher, termasuk handler error, worker exception, dan unknown tool. Durasi mengukur eksekusi internal sebelum logging, bukan latensi jaringan/client. |
-| Action/view/target/direction/refactor_type | Normalisasi ke `action`, hanya jika nilainya terdaftar dalam enum schema tool. Mode yang tidak diberikan dan tidak punya default schema dapat absen. |
-| Trace/session ID | Pertahankan ID yang diberikan caller, maksimal 64 karakter. Tidak membuat session ID atau menebak identitas pengguna. |
-| Input | Maksimal 16 nama parameter; string menjadi `{bytes: N}`, nilai lain `{type: ...}`. Source, pola pencarian, path, dan nilai input tidak disalin mentah. |
-| `metrics.bytes_out` | Jumlah byte UTF-8 semua blok teks hasil akhir. Tidak termasuk envelope dan structured content. |
-| `metrics.lines_out` | Jumlah baris tiap blok teks, dijumlahkan. Teks kosong menyumbang nol; newline terakhir menghasilkan baris kosong. |
-| `metrics.estimated_tokens` | `Math.round(bytes_out / 4)`. Perkiraan teks saja, bukan tokenizer/model usage atau total token structured content. |
-| `metrics.response_bytes` | Byte UTF-8 serialisasi JSON objek hasil MCP, termasuk structured content; tidak termasuk framing JSON-RPC. Menggunakan hasil setelah `enforceResponseLimit`. |
-| `bloat_alert` | `true` mulai 16 KiB `response_bytes`; dapat aktif walaupun teks pendek jika structured content besar. |
-| `metrics.items_found` | Pertahankan ekstraksi yang sudah tersedia per tool. Dapat absen; tidak menganggap jumlah item sebagai jumlah seluruh node, coverage, atau relevansi. |
-| Output digest | Default `preview_disabled`, atau `empty_output` jika tidak ada teks non-whitespace. `STRATA_LOG_PREVIEW=1` mengaktifkan cuplikan head/omission/tail maksimal 300 karakter setelah whitespace dirapikan. |
-| Error | Code maksimal 64 karakter dan message maksimal 384 karakter (128 saat fallback budget log). Stack tidak disimpan. Pesan error tetap dapat memuat path atau potongan input dari upstream. |
-| Full source/AST/output, stack, environment, credential | Tidak ditambahkan ke log. Preview opt-in dan error message perlu diperlakukan sebagai data proyek yang dapat sensitif. |
+| UTC Timestamp, tool, status, duration | Recorded for every invocation reaching the dispatcher, including handler errors, worker exceptions, and unknown tools. Duration measures internal execution prior to logging, not network/client transport latency. |
+| Action/view/target/direction/refactor_type | Normalized to `action` only if the value belongs to the tool schema's enum. Unspecified modes without schema defaults may be absent. |
+| Trace/session ID | Preserves caller-supplied IDs up to 64 characters. Never invents synthetic session IDs or guesses user identities. |
+| Input | Maximum 16 parameter names; strings logged as `{bytes: N}`, other values as `{type: ...}`. Source code, search patterns, paths, and raw values are never copied raw. |
+| `metrics.bytes_out` | Total UTF-8 bytes across all final text blocks. Excludes protocol envelope and structured content. |
+| `metrics.lines_out` | Total line count across all text blocks combined. Empty text yields zero; trailing newlines produce a blank line. |
+| `metrics.estimated_tokens` | `Math.round(bytes_out / 4)`. Rough text estimate only, not exact tokenizer/model usage or structured content volume. |
+| `metrics.response_bytes` | Total UTF-8 bytes of serialized MCP result JSON, including structured content; excludes JSON-RPC framing. Computed after `enforceResponseLimit`. |
+| `bloat_alert` | `true` once `response_bytes` exceeds 16 KiB; may trigger even with brief text if structured content is large. |
+| `metrics.items_found` | Preserves tool-specific item extraction where available. May be absent; item count does not imply total nodes, full coverage, or relevance. |
+| Output digest | Defaults to `preview_disabled`, or `empty_output` if there is no non-whitespace text. `STRATA_LOG_PREVIEW=1` enables a sanitized head/omission/tail snippet of at most 300 characters. |
+| Error | Error code up to 64 characters and message up to 384 characters (128 characters during fallback budget logging). Stack traces are excluded. Error messages may retain paths or upstream input snippets. |
+| Full source/AST/output, stack, environment, credentials | Never added to logs. Opt-in previews and error messages must be treated as potentially sensitive project data. |
 
-## Sink dan lifecycle
+## Sink and Lifecycle
 
-- Satu event JSON Lines per tool call pada `<workspace>/.strata/strata.log`; hanya jika `.strata/` sudah ada. Root mengikuti hasil worker, explicit root, session root hint, lalu cwd sebagai fallback.
-- Tanpa metadata logging tambahan di respons MCP atau stdout. Stderr mengeluarkan satu warning dengan prioritas error, bloat, kemudian slow (`duration_ms >= 250`). Semua metrik tetap tersedia dalam event.
-- File baru dibuat dengan mode `0600` (tetap mengikuti dukungan OS). File lama tidak diubah permission-nya.
-- Rotasi dilakukan sebelum append akan melampaui 2 MiB; satu backup `.strata/strata.log.1` menggantikan backup sebelumnya. Jika rotasi gagal, append dilewati agar kegagalan rotasi tidak menyebabkan pertumbuhan tanpa batas.
-- Logger mempertahankan I/O sinkron existing; tidak memerlukan flush saat shutdown. Kontrak ini tidak menjanjikan zero-latency, fsync durability, atau koordinasi rotasi beberapa proses pada root yang sama.
-- Error serialisasi, stderr sinkron, dan filesystem tidak boleh menggagalkan respons tool. Jika stderr gagal secara sinkron, file sink tetap dicoba. Logging best-effort: event dapat hilang saat I/O gagal atau proses dihentikan.
-- Scaffold `strata init` sudah menulis `.strata/` ke `.gitignore` dan `*` ke `.strata/.gitignore`; tidak diperlukan perubahan scaffold.
-- Pemanggilan fungsi library/CLI langsung serta request yang ditolak SDK sebelum dispatcher tidak tercakup. Ringkasan `strata stats` membaca log aktif, tanpa menggabungkan `.1`.
+- One JSON Lines event per tool call written to `<workspace>/.strata/strata.log`; only when `.strata/` already exists. Root resolution prefers worker result, explicit root, session root hint, with cwd as final fallback.
+- No additional logging metadata injected into MCP responses or stdout. Stderr emits single warnings prioritizing error, bloat, then slow execution (`duration_ms >= 250`). All metrics remain available in the event.
+- New log files are created with `0600` permissions (subject to OS capabilities). Existing files retain their permissions.
+- Rotation executes before an append would push file size past 2 MiB; a single backup file `.strata/strata.log.1` replaces any previous backup. If rotation fails, the append is skipped to prevent unbounded file growth.
+- Logger retains existing synchronous I/O; no shutdown flush required. This contract does not promise zero-latency, fsync durability, or multi-process rotation coordination on the same root.
+- Serialization errors, synchronous stderr writes, and filesystem issues never fail a tool response. If stderr fails synchronously, the file sink is still attempted. Logging is best-effort: events may drop during I/O failures or process termination.
+- The `strata init` scaffolding writes `.strata/` to `.gitignore` and `*` to `.strata/.gitignore`; no scaffold modifications required.
+- Direct CLI/library function calls and SDK-rejected requests prior to dispatcher entry are not captured. The `strata stats` summary inspects the active log without merging `.1`.
 
-## Pemantauan
+## Monitoring
 
 ```sh
 tail -f .strata/strata.log
@@ -42,24 +42,24 @@ jq 'select(.status == "error") | {tool, error}' .strata/strata.log
 strata stats . --json
 ```
 
-Atur `STRATA_LOG_PREVIEW=1` pada environment proses MCP server dan restart proses itu untuk mengaktifkan preview.
-Build baru juga memerlukan restart client/server yang masih menjalankan artefak lama.
+Set `STRATA_LOG_PREVIEW=1` in the MCP server process environment and restart the server to activate previews.
+New builds require restarting active client/server sessions running legacy artifacts.
 
-## Verifikasi
+## Verification
 
-Regresi meliputi JSONL/UTF-8, metrik respons lengkap, ambang bloat tepat 16 KiB,
-digest dan opt-in, rotasi dengan backup lama, isolasi kegagalan sink, serta pemanggilan
-keenam tool lewat dispatcher berikut handler error, unknown tool, dan worker rejection.
-Tes kompatibilitas mempertahankan masking input dan aturan tidak membuat `.strata/` otomatis.
-Hasil tes, build, dan stdio lokal tidak membuktikan client MCP aktif telah memuat versi ini.
+Regressions verify JSONL/UTF-8 compliance, complete response metrics, exact 16 KiB bloat threshold,
+output digests and opt-in toggles, rotation replacing old backups, sink failure isolation, and dispatcher
+routing across all six tools including handler errors, unknown tools, and worker rejections.
+Compatibility tests enforce input masking and ensure `.strata/` is never auto-created on unindexed workspaces.
+Local test, build, and stdio results do not prove active MCP clients have loaded this version.
 
-Hasil lokal 2026-11-04:
+Local results 2026-11-04:
 
-- **59 pass, 0 fail** pada `tests/telemetry.test.ts`, `tests/memory/telemetry.test.ts`,
+- **59 pass, 0 fail** on `tests/telemetry.test.ts`, `tests/memory/telemetry.test.ts`,
   `tests/observability-stats.test.ts`, `tests/integration/mcp-server-protocol.test.ts`,
-  `tests/mcp/root-boundaries.test.ts`, `tests/cli/init.test.ts`, dan `tests/cli/init-audit-fixes.test.ts`.
-- `bun run typecheck` dan `bun run build` lulus.
-- Smoke MCP stdio memakai SDK client dan `dist/mcp.js` pada workspace sementara:
-  satu `find_code(action: map)` sukses dan satu unknown tool menghasilkan dua event;
-  `response_bytes` cocok dengan hasil yang diterima client. Workspace sementara dihapus sesudah pemeriksaan.
-- `git diff --check` lulus. Full suite, benchmark overhead, dan rotasi serentak lintas proses belum diuji.
+  `tests/mcp/root-boundaries.test.ts`, `tests/cli/init.test.ts`, and `tests/cli/init-audit-fixes.test.ts`.
+- `bun run typecheck` and `bun run build` pass.
+- Smoke MCP stdio tested via SDK client and `dist/mcp.js` on temporary workspaces:
+  one successful `find_code(action: map)` and one unknown tool produced two events;
+  `response_bytes` matched data received by client. Temporary workspaces removed following inspection.
+- `git diff --check` passes. Full suite, overhead benchmarks, and concurrent cross-process rotations not yet tested.

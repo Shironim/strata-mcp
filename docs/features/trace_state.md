@@ -1,84 +1,84 @@
-# trace_state — SSOT Pelacak Arus State Management & Composables
+# trace_state — SSOT State Management & Composables Flow Tracer
 
 **Status:** Single Source of Truth (SSOT)  
-**Pemilik Fitur:** Tool Call `trace_state` (`src/tools/trace-state.ts`)  
-**Terakhir Diperbarui:** 2026-11-11  
+**Feature Owner:** Tool Call `trace_state` (`src/tools/trace-state.ts`)  
+**Last Updated:** 2026-11-11  
 
 ---
 
-## 1. Tujuan & Kebutuhan Bisnis
+## 1. Purpose & Business Requirements
 
-State reaktif (Pinia, Zustand, Redux, Context, dan Composables) adalah sumber kebenaran data aplikasi frontend.
-* **Masalah Pengembang & AI Agent:**
-  * Saat mengubah struktur data store atau me-rename fungsi pada composable, agent tidak tahu siapa yang sekadar membaca data (*readers*) dan siapa yang memodifikasinya (*mutators*).
-  * Terjadi *race condition* atau re-render loop ketika mutasi state terjadi di luar jalur yang diharapkan.
-  * Composables bersarang (*multi-hop composables*) menyembunyikan ketergantungan asli dari komponen akhir.
-* **Solusi `trace_state`:**
-  Menganalisis arus reaktivitas secara semantis lintas file: membedakan peran konsumen menjadi `mutators` (pemanggil action / setter) dan `readers` (penampil data / watcher), mencatat properti yang dibaca dan action yang dipanggil, serta melacak rantai pemanggilan bersarang (*multi-hop cascading*).
+Reactive state (Pinia, Zustand, Redux, Context, and Composables) serves as the source of truth for frontend application data:
+* **Developer & AI Agent Problems:**
+  * When changing store data structures or renaming composable functions, agents cannot tell which components merely read data (*readers*) and which modify it (*mutators*).
+  * Race conditions or infinite re-render loops emerge when state mutations happen outside anticipated pathways.
+  * Nested composables (*multi-hop composables*) obscure original dependencies from leaf UI components.
+* **The `trace_state` Solution:**
+  Analyzes cross-file reactivity flow semantically: segregating consumers into `mutators` (action / setter callers) and `readers` (data displayers / watchers), recording accessed properties and invoked actions, and tracing multi-hop cascading chains (*multi-hop cascading*).
 
 ---
 
-## 2. Spesifikasi Input (Parameter & Aliasing)
+## 2. Input Specifications (Parameters & Aliasing)
 
-| Parameter | Tipe | Wajib? | Deskripsi & Aliasing |
+| Parameter | Type | Required? | Description & Aliasing |
 |---|---|---|---|
-| `identifier` | `string` | **Ya** | Nama identifier state, store, context, atau composable (misal: `"useCartStore"`, `"useAuth"`, `"CartContext"`). Alias: `state`, `state_name`, `store`, `store_name`, `composable`, `name`, `symbol`. |
-| `path` | `string` | Opsional | Direktori root proyek atau file komponen spesifik (default: `"."`, alias: `target_path`, `file_path`, `filePath`). |
-| `depth` | `number` | Opsional | Kedalaman penelusuran: `1` untuk direct consumers; `>1` untuk multi-hop call chain (default: `1`, alias: `max_depth`). |
-| `role` | `'all' \| 'mutators' \| 'readers'` | Opsional | Filter peran konsumen: `'all'` (default), `'mutators'` (hanya pengubah state), atau `'readers'` (hanya pembaca state). |
-| `direction` | `'consumers' \| 'dependencies' \| 'both'` | Opsional | Arah pelacakan untuk multi-hop: `'consumers'` (ke atas/pemakai), `'dependencies'` (ke bawah/pondasi store ini), atau `'both'` (default: `'both'`). |
-| `format` | `'text' \| 'json'` | Opsional | Format keluaran (default: `'text'`, alias: `output_format`). |
+| `identifier` | `string` | **Yes** | Identifier name of the state, store, context, or composable (e.g., `"useCartStore"`, `"useAuth"`, `"CartContext"`). Aliases: `state`, `state_name`, `store`, `store_name`, `composable`, `name`, `symbol`. |
+| `path` | `string` | Optional | Project root directory or target component file (default: `"."`, aliases: `target_path`, `file_path`, `filePath`). |
+| `depth` | `number` | Optional | Traversal depth: `1` for direct consumers; `>1` for multi-hop call chains (default: `1`, alias: `max_depth`). |
+| `role` | `'all' \| 'mutators' \| 'readers'` | Optional | Consumer role filter: `'all'` (default), `'mutators'` (state writers only), or `'readers'` (state readers only). |
+| `direction` | `'consumers' \| 'dependencies' \| 'both'` | Optional | Traversal direction for multi-hop: `'consumers'` (upwards to users), `'dependencies'` (downwards to foundational stores), or `'both'` (default: `'both'`). |
+| `format` | `'text' \| 'json'` | Optional | Output format (default: `'text'`, alias: `output_format`). |
 
 ---
 
-## 3. Cara Kerja Teknis & Algoritma
+## 3. Technical Mechanics & Algorithm
 
-### A. Klasifikasi Akses Semantis (Read vs Write vs Watch)
-Strata tidak melakukan text grep sederhana, melainkan membedah AST TypeScript/JSX/Vue untuk menentukan `access_mode`:
+### A. Semantic Access Classification (Read vs Write vs Watch)
+Strata avoids crude regex matching, decomposing TypeScript/JSX/Vue ASTs to classify `access_mode`:
 1. **`write` (Mutator):**
-   * Pemanggilan action / method mutasi yang cocok dengan pola kata kerja: `set*`, `update*`, `delete*`, `add*`, `remove*`, `mutate*`, `trigger*`, `toggle*`, `reset*`, `dispatch*`, `$patch*`.
-   * Setter hasil destructuring: `const [count, setCount] = useState()` &rarr; pemanggilan `setCount` dicatat sebagai `write`.
+   * Action / mutation method calls matching standard mutation verb prefixes: `set*`, `update*`, `delete*`, `add*`, `remove*`, `mutate*`, `trigger*`, `toggle*`, `reset*`, `dispatch*`, `$patch*`.
+   * Destructured state setters: `const [count, setCount] = useState()` &rarr; invocations of `setCount` are recorded as `write`.
 2. **`read` (Reader):**
-   * Pengambilan property untuk dirender: `computed(() => store.totalPrice)` atau `useSelector(s => s.items)`.
+   * Property accesses evaluated for rendering: `computed(() => store.totalPrice)` or `useSelector(s => s.items)`.
 3. **`watch` (Subscriber):**
-   * Pemanggilan `watch(() => store.user, ...)` atau dependency array pada `useEffect`.
+   * Reactive subscriptions such as `watch(() => store.user, ...)` or `useEffect` dependency array entries.
 
-### B. Pelacakan Properti & Action Spesifik
-* **`accessedProperties`:** Menyimpan daftar field spesifik yang disentuh (misal: `["items", "subtotal", "discountCode"]`). Ini memungkinkan agent mengetahui apakah perubahan field tertentu akan mempengaruhi komponen tersebut.
-* **`actionsCalled`:** Menyimpan daftar method mutasi yang dieksekusi (misal: `["addItem", "clearCart"]`).
-* **`usageSnippet` & `lineNumber`:** Menyimpan cuplikan kode dan nomor baris persis dari lokasi pemanggilan.
+### B. Property & Action Tracking
+* **`accessedProperties`:** Records specific fields accessed (e.g., `["items", "subtotal", "discountCode"]`), allowing agents to know if altering a specific property impacts that component.
+* **`actionsCalled`:** Records mutation methods executed (e.g., `["addItem", "clearCart"]`).
+* **`usageSnippet` & `lineNumber`:** Captures exact source code snippets and line numbers of call sites.
 
-### C. Pemindaian Ekspresi Template Vue SFC
-Strata mengekstrak binding yang berada langsung di dalam `<template>` Vue SFC (misal: `<button @click="cartStore.checkout()">{{ cartStore.totalPrice }}</button>`), memetakan `checkout()` ke mutator dan `totalPrice` ke reader meskipun tidak ada variabel lokal di `<script>`.
+### C. Vue SFC Template Expression Scanning
+Strata extracts bindings placed directly inside Vue SFC `<template>` blocks (e.g., `<button @click="cartStore.checkout()">{{ cartStore.totalPrice }}</button>`), correctly mapping `checkout()` to mutator and `totalPrice` to reader even when local variables are absent in `<script>`.
 
 ### D. Multi-Hop Chaining (`depth: 2+`)
-Melacak rantai ketergantungan bertingkat:
-* `useCartStore` &rarr; di-import oleh `useCheckoutSession` &rarr; di-import oleh `CheckoutModal.vue`.
-* Dengan `direction: "both"`, agent dapat melihat seluruh pohon silsilah dependensi state.
+Traces hierarchical dependency chains:
+* `useCartStore` &rarr; imported by `useCheckoutSession` &rarr; imported by `CheckoutModal.vue`.
+* With `direction: "both"`, agents see the entire lineage tree of state dependencies.
 
 ---
 
-## 4. Dukungan Bahasa & Framework
+## 4. Language & Framework Support
 
 * **Vue 3 & Nuxt (Pinia, Composables):**
   * Pinia stores (`defineStore`).
   * Nuxt auto-imported composables/stores.
-  * Vue composables kustom (`use*.ts`).
+  * Custom Vue composables (`use*.ts`).
 * **React & Next.js (Zustand, Redux Toolkit, Context, Hooks):**
   * Zustand selector patterns: `useStore(state => state.items)`.
-  * Redux Toolkit: `useSelector` (reader) dan `useDispatch` / `dispatch()` (mutator).
-  * React Context: `<Context.Provider>` dan `useContext()`.
+  * Redux Toolkit: `useSelector` (reader) and `useDispatch` / `dispatch()` (mutator).
+  * React Context: `<Context.Provider>` and `useContext()`.
   * TanStack Query: `useQuery` (reader) vs `useMutation` (mutator).
 * **Inertia.js:**
   * Router triggers: `router.post()`, `router.put()`, `router.delete()`.
 * **Svelte:**
-  * Svelte 5 Runes (`$state`), universal shared state modules, dan Svelte Context.
+  * Svelte 5 Runes (`$state`), universal shared state modules, and Svelte Context.
 
 ---
 
-## 5. Struktur Output & Contoh Respon
+## 5. Output Structure & Example Responses
 
-### Format Teks Default (`format: "text"`):
+### Default Text Format (`format: "text"`):
 ```text
 State Impact Analysis for: useCartStore [Engine: sqlite-graph-cache | 12ms | cache hit]
 Total Dependent Components/Pages: 3
@@ -99,7 +99,7 @@ Total Dependent Components/Pages: 3
 Summary: 1 mutator site, 2 reader sites. Multi-hop cascading available with depth: 2.
 ```
 
-### Format Terstruktur JSON (`structuredContent`):
+### Structured JSON Format (`structuredContent`):
 ```json
 {
   "identifier": "useCartStore",
@@ -138,10 +138,10 @@ Summary: 1 mutator site, 2 reader sites. Multi-hop cascading available with dept
 
 ---
 
-## 6. Rujukan Implementasi Kode
+## 6. Code Implementation References
 
-* **Katalog Definisi Tool:** [`src/tools/catalog.ts`](../../src/tools/catalog.ts)
-* **Handler Utama:** [`src/tools/trace-state.ts`](../../src/tools/trace-state.ts)
+* **Tool Definition Catalog:** [`src/tools/catalog.ts`](../../src/tools/catalog.ts)
+* **Primary Handler:** [`src/tools/trace-state.ts`](../../src/tools/trace-state.ts)
 * **Storage & Multi-Hop Engine:** [`src/engine/storage/state-storage.ts`](../../src/engine/storage/state-storage.ts)
 * **Vue State Dependency Parser:** [`src/engine/parsers/state-dependency.ts`](../../src/engine/parsers/state-dependency.ts)
 * **React State Dependency Parser:** [`src/engine/parsers/react-state-dependency.ts`](../../src/engine/parsers/react-state-dependency.ts)

@@ -1,79 +1,79 @@
 # lifecycle-hooks — SSOT Agent Lifecycle Hooks & Closed-Loop Refactoring
 
 **Status:** Single Source of Truth (SSOT)  
-**Pemilik Fitur:** Lifecycle Hooks System (`.agents/hooks/`, `.agents/hooks.json`)  
-**Terakhir Diperbarui:** 2026-11-11  
+**Feature Owner:** Lifecycle Hooks System (`.agents/hooks/`, `.agents/hooks.json`)  
+**Last Updated:** 2026-11-11  
 
 ---
 
-## 1. Tujuan & Kebutuhan Bisnis
+## 1. Purpose & Business Requirements
 
-Ketika AI agent melakukan perubahan kode pada proyek berskala besar:
-* **Masalah Cache Stale:** Database indeks arsitektur (seperti `graph.db` di Strata atau `septum.db` di Septum) menjadi usang (*out-of-sync*) seketika setelah agent mengedit sebuah file. Jika agent tidak menjalankan re-index, giliran (*turn*) berikutnya akan membaca data kadaluarsa dan memicu halusinasi.
-* **Pelanggaran Batas Arsitektur:** Agent sering kali secara tidak sengaja membuat impor terlarang (*forbidden dependency*) atau dependensi melingkar (*circular dependency*) saat menambahkan baris impor baru.
-* **Solusi Lifecycle Hooks:**
-  Menyediakan mekanisme pencegahan (*pre-tool guard*) dan sinkronisasi otomatis (*post-tool sync*) yang terpicu secara instan di latar belakang setiap kali agent memanggil tool edit file (`write_file`, `edit_file`, dsb.), menciptakan **Siklus Refactoring Tertutup (*Closed-Loop Self-Healing Workflow*)**.
+When AI agents modify code across large-scale repositories:
+* **Stale Cache Dilemma:** Architectural index databases (such as `graph.db` in Strata or `septum.db` in Septum) fall out-of-sync immediately after an agent modifies a file. If the agent does not re-index, subsequent turns operate on stale data and hallucinate invalid references.
+* **Architectural Boundary Violations:** Agents frequently introduce forbidden dependencies or circular import chains when adding new import statements.
+* **The Lifecycle Hooks Solution:**
+  Provides automated pre-tool validation (*pre-tool guard*) and post-tool synchronization (*post-tool sync*) triggered silently in the background whenever an agent invokes file-editing tools (`write_file`, `edit_file`, etc.), establishing a **Closed-Loop Self-Healing Workflow**.
 
 ---
 
-## 2. Arsitektur & Cara Kerja Hooks
+## 2. Architecture & Hook Flow
 
-Konfigurasi hooks didefinisikan secara deklaratif di `.agents/hooks.json` dan didistribusikan ke direktori masing-masing agent:
+Hooks are declared in `.agents/hooks.json` and mirrored into respective agent configuration directories:
 
 ```
-[Agent Ingin Mengubah File]
+[Agent Intends to Modify a File]
            │
            ▼
 ┌─────────────────────────────────────────────────────────────┐
 │ 1. PRE-TOOL-USE HOOK (septum-pre-write.sh)                 │
-│    - Mencegat payload sebelum file ditulis                 │
-│    - Validasi batas modul & larangan circular import        │
-│    - Jika melanggar: Tolak operasi dengan feedback jelas    │
+│    - Intercepts payload before file is written to disk      │
+│    - Validates module boundaries & circular import rules    │
+│    - If violated: Aborts operation with clear feedback      │
 └──────────────────────────┬──────────────────────────────────┘
-                           │ (Lolos Validasi)
+                           │ (Validation Passes)
                            ▼
 ┌─────────────────────────────────────────────────────────────┐
-│ 2. FILE TERTULIS KE DISK (write_file / edit_file)           │
+│ 2. FILE WRITTEN TO DISK (write_file / edit_file)            │
 └──────────────────────────┬──────────────────────────────────┘
                            │
                            ▼
 ┌─────────────────────────────────────────────────────────────┐
 │ 3. POST-TOOL-USE HOOK (strata-post-write.sh)                │
-│    - Mencegat path file yang baru diubah                   │
-│    - Jika berekstensi frontend (.vue, .tsx, .svelte, dll)   │
-│    - Eksekusi "strata sync <workspace>" background (<20ms) │
-│    - graph.db langsung FRESH untuk turn agent berikutnya   │
+│    - Intercepts path of modified file                       │
+│    - Checks for frontend extensions (.vue, .tsx, .svelte)   │
+│    - Runs background "strata sync <workspace>" (<20ms)      │
+│    - graph.db is instantly FRESH for next agent turn        │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 3. Detail Skrip Hook
+## 3. Hook Script Details
 
-### A. `strata-post-write.sh` (Auto Delta-Sync Frontend)
-* **Lokasi:** `.agents/hooks/strata-post-write.sh` (didistribusikan ke `.gemini/hooks/`, `.claude/hooks/`, `.codex/hooks/`).
-* **Mekanisme Ekstraksi Input:**
-  Mampu membaca path file yang diubah dari environment variable (`CLAUDE_FILE_PATH`), argument `$1`, atau parsing stream stdin JSON dari harness agent menggunakan runtime `node`, `bun`, `python3`, atau fallback `sed`.
-* **Eksekusi:**
-  Jika file berekstensi `.vue`, `.astro`, `.svelte`, `.tsx`, `.jsx`, `.ts`, atau `.js`:
+### A. `strata-post-write.sh` (Frontend Auto Delta-Sync)
+* **Location:** `.agents/hooks/strata-post-write.sh` (mirrored to `.gemini/hooks/`, `.claude/hooks/`, `.codex/hooks/`).
+* **Input Extraction Mechanism:**
+  Extracts the modified file path from environment variables (`CLAUDE_FILE_PATH`), CLI argument `$1`, or JSON stdin stream from the agent harness using available runtimes (`node`, `bun`, `python3`, or fallback `sed`).
+* **Execution:**
+  If the file matches `.vue`, `.astro`, `.svelte`, `.tsx`, `.jsx`, `.ts`, or `.js`:
   ```bash
   strata sync "$WORKSPACE_ROOT" --json
   ```
-  Menjalankan incremental delta-sync secara instan ($<20$ milidetik) sehingga `graph.db` selalu 100% mutakhir.
+  Runs an incremental delta sync in $<20$ milliseconds, keeping `graph.db` 100% current.
 
-### B. `septum-pre-write.sh` & `septum-post-write.sh` (Backend Boundary Guard)
-* **Pre-Write:** Menguji *proposed imports* terhadap aturan arsitektur di `septum.db`. Mencegah dependensi melingkar sebelum file ditulis.
-* **Post-Write:** Memperbarui tabel simbol backend di `septum.db`.
+### B. `septum-pre-write.sh` & `septum-post-write.sh` (Backend Boundary Guards)
+* **Pre-Write:** Validates proposed imports against architectural rules in `septum.db`. Prevents circular imports before changes hit disk.
+* **Post-Write:** Updates backend symbol tables in `septum.db`.
 
 ---
 
-## 4. Dukungan AI Agent & Harness
+## 4. AI Agent & Harness Support
 
-Sistem hook Strata-MCP dirancang agnostik dan mendukung berbagai ekosistem AI coding agent:
+Strata-MCP's hook integration is client-agnostic and supports major AI coding environments:
 
-| AI Agent | Folder Konfigurasi | Dukungan Hook |
+| AI Agent | Configuration Path | Hook Capabilities |
 |---|---|---|
-| **Google Antigravity** | `.gemini/` | Native MCP stdio transport + Pre/PostToolUse hooks |
+| **Google Antigravity** | `.gemini/` | Native MCP stdio transport + Pre/PostToolUse lifecycle hooks |
 | **Claude Code & Desktop** | `.claude/` | Event-driven lifecycle hooks (`PostToolUse`) |
 | **OpenAI Codex Agent** | `.codex/` | Hooks shell execution engine |
 | **Roo Code / Cline / OpenCode** | `.agents/` / `opencode/` | Standard matcher config via `.agents/hooks.json` |
@@ -81,17 +81,17 @@ Sistem hook Strata-MCP dirancang agnostik dan mendukung berbagai ekosistem AI co
 
 ---
 
-## 5. Manfaat bagi AI Agent
+## 5. Benefits for AI Agents
 
 1. **Closed-Loop Self-Healing:**
-   Agent dapat merencanakan perubahan (`generate_patch_plan`), mengeksekusi edit (`edit_file`), dan secara otomatis memverifikasi hasil kontrak (`inspect_component`) tanpa pernah membaca data cache usang.
-2. **Zero Manual Overhead:** Developer manusia dan AI agent tidak perlu mengingat untuk mengetik perintah `strata sync` secara manual di terminal.
-3. **Pencegahan Regresi Otomatis:** Hook pre-write mencegah kode yang merusak aturan modularitas masuk ke dalam sistem.
+   Agents can formulate a refactoring plan (`generate_patch_plan`), apply file edits (`edit_file`), and immediately inspect updated contracts (`inspect_component`) without ever operating on stale cache data.
+2. **Zero Manual Overhead:** Human developers and AI agents never need to remember to run `strata sync` in the terminal manually.
+3. **Automated Regression Prevention:** Pre-write hooks intercept violations before code that breaks architectural rules is written to disk.
 
 ---
 
-## 6. Rujukan Implementasi Kode
+## 6. Code Implementation References
 
-* **Manifest Hook:** [`.agents/hooks.json`](../../.agents/hooks.json)
-* **Skrip Strata Post-Write:** [`.agents/hooks/strata-post-write.sh`](../../.agents/hooks/strata-post-write.sh)
-* **Engine Sinkronisasi:** [`src/engine/storage/delta-sync.ts`](../../src/engine/storage/delta-sync.ts)
+* **Hook Manifest:** [`.agents/hooks.json`](../../.agents/hooks.json)
+* **Strata Post-Write Script:** [`.agents/hooks/strata-post-write.sh`](../../.agents/hooks/strata-post-write.sh)
+* **Sync Engine:** [`src/engine/storage/delta-sync.ts`](../../src/engine/storage/delta-sync.ts)

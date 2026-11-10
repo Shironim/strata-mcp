@@ -1,29 +1,29 @@
-# storage-and-delta-sync — SSOT Database graph.db & Mesin Delta Sync
+# storage-and-delta-sync — SSOT graph.db Database & Delta Sync Engine
 
 **Status:** Single Source of Truth (SSOT)  
-**Pemilik Fitur:** Engine Penyimpanan & Sinkronisasi (`src/engine/storage/`)  
-**Terakhir Diperbarui:** 2026-11-11  
+**Feature Owner:** Storage & Synchronization Engine (`src/engine/storage/`)  
+**Last Updated:** 2026-11-11  
 
 ---
 
-## 1. Tujuan & Kebutuhan Bisnis
+## 1. Purpose & Business Requirements
 
-Aplikasi frontend berskala menengah hingga besar dapat memiliki ratusan hingga ribuan file komponen.
-* **Tantangan Performa:**
-  * Mem-parse AST seluruh file setiap kali ada panggilan tool membutuhkan waktu beberapa detik (menghambat respon interaktif LLM).
-  * Menyimpan seluruh teks file ke memori memboroskan RAM.
-  * Cache yang tidak cerdas akan menyajikan data usang (*stale*) jika sebuah file tipe (`types.ts`) atau barrel file (`index.ts`) berubah.
-* **Solusi Storage & Delta Sync:**
-  Menyediakan database relasional tertanam (*embedded*) **SQLite (`.strata/graph.db`)** dengan mode **WAL (*Write-Ahead Logging*)** berkecepatan tinggi, dipadukan dengan algoritma **Incremental Delta-Sync** dua lapis (mtime + streaming SHA-256) dan *transitive reverse invalidation*.
+Medium to large frontend applications can easily span hundreds or thousands of component files:
+* **Performance Challenges:**
+  * Re-parsing complete file ASTs on every tool invocation takes multiple seconds (severely degrading interactive LLM response times).
+  * Retaining complete source text in memory wastes RAM.
+  * Naive caching serves stale data whenever a shared type file (`types.ts`) or barrel re-export (`index.ts`) changes.
+* **The Storage & Delta Sync Solution:**
+  Provides a high-speed embedded relational database **SQLite (`.strata/graph.db`)** operating in **WAL (Write-Ahead Logging)** mode, coupled with a two-tier **Incremental Delta-Sync** algorithm (mtime + streaming SHA-256) and *transitive reverse invalidation*.
 
 ---
 
-## 2. Arsitektur Database SQLite (`.strata/graph.db`)
+## 2. SQLite Database Architecture (`.strata/graph.db`)
 
-Database diinisialisasi secara otomatis saat perintah `strata init` dijalankan:
-* Lokasi file: `<workspace_root>/.strata/graph.db`
-* Terisolasi dari Git: Folder `.strata` otomatis dilengkapi file `.gitignore` (`*`).
-* **PRAGMA Performa Tinggi:**
+The database is initialized automatically during `strata init`:
+* File location: `<workspace_root>/.strata/graph.db`
+* Isolated from Git: The `.strata` directory is automatically scaffolded with a `.gitignore` containing `*`.
+* **High-Performance PRAGMAs:**
   ```sql
   PRAGMA journal_mode = WAL;
   PRAGMA synchronous = NORMAL;
@@ -35,7 +35,7 @@ Database diinisialisasi secara otomatis saat perintah `strata init` dijalankan:
 
 ---
 
-## 3. Skema Tabel Relasional
+## 3. Relational Table Schema
 
 ```
            ┌──────────────┐
@@ -49,81 +49,81 @@ Database diinisialisasi secara otomatis saat perintah `strata init` dijalankan:
 └─────────────┘ └──────────────┘ └────────────┘ └────────────┘ └───────────────────┘
 ```
 
-| Tabel | Kolom Kunci | Peran & Isi Data |
+| Table | Primary Columns | Role & Stored Data |
 |---|---|---|
-| **`files`** | `id`, `path`, `framework`, `mtime`, `size`, `content_hash`, `is_page`, `is_layout`, `render_boundary` | Master katalog file, hash konten, dan status hidrasi rendering. |
-| **`components`** | `id`, `file_id`, `name`, `contract_json` | Kontrak publik komponen (props, emits, slots, models) dalam JSON. |
-| **`edges`** | `id`, `parent_file_id`, `child_file_id`, `import_type`, `is_rendered`, `payload_json` | Graf relasi pemanggilan: parent merender child, passed props, dan context. |
-| **`state_deps`** | `id`, `file_id`, `kind`, `identifier`, `access_mode`, `line_number`, `usage_snippet`, `accessed_properties` | Pelacakan reaktivitas (Pinia/Zustand/Composable), mode read/write/watch. |
-| **`routes`** | `id`, `url_path`, `file_id`, `type`, `params_json`, `layout_chain_json` | Pemetaan URL rute, parameter dinamis, dan rantai layout pembungkus. |
-| **`file_dependencies`** | `file_id`, `dependency_path`, `content_hash`, `is_external` | Pemetaan dependensi tipe/barrel file untuk pelacakan perubahan lintas file. |
-| **`meta`** | `key`, `value` | Metadata internal: `cache_version`, `config_fingerprint`, `sync_generation`. |
+| **`files`** | `id`, `path`, `framework`, `mtime`, `size`, `content_hash`, `is_page`, `is_layout`, `render_boundary` | Master file catalog, content hashes, and hydration rendering boundaries. |
+| **`components`** | `id`, `file_id`, `name`, `contract_json` | Public component contracts (props, emits, slots, models) stored as structured JSON. |
+| **`edges`** | `id`, `parent_file_id`, `child_file_id`, `import_type`, `is_rendered`, `payload_json` | Graph relation edges: parent renders child, passed props, and context provision. |
+| **`state_deps`** | `id`, `file_id`, `kind`, `identifier`, `access_mode`, `line_number`, `usage_snippet`, `accessed_properties` | Reactivity tracking (Pinia/Zustand/Composable), access mode (read/write/watch). |
+| **`routes`** | `id`, `url_path`, `file_id`, `type`, `params_json`, `layout_chain_json` | Route URL mapping, dynamic parameters, and wrapping nested layout chains. |
+| **`file_dependencies`** | `file_id`, `dependency_path`, `content_hash`, `is_external` | Shared types / barrel file dependencies for cross-file change invalidation. |
+| **`meta`** | `key`, `value` | Internal metadata: `cache_version`, `config_fingerprint`, `sync_generation`. |
 
 ---
 
-## 4. Algoritma Incremental Delta-Sync
+## 4. Incremental Delta-Sync Algorithm
 
-Setiap kali tool Strata dipanggil, `syncWorkspace()` dijalankan secara otomatis (*Just-In-Time Preflight*):
+Whenever a Strata tool is called, `syncWorkspace()` runs automatically (*Just-In-Time Preflight*):
 
 ```
-[Agent Memanggil Tool Strata]
+[Agent Invokes a Strata Tool]
                │
                ▼
-   [JIT Preflight Check] ──► syncWorkspace()
+    [JIT Preflight Check] ──► syncWorkspace()
                │
-               ├── 1. Fast Fingerprint (Cek mtime & size disk)
-               │      └── Jika berubah: Hitung streaming SHA-256 hash
+               ├── 1. Fast Fingerprint (Check filesystem mtime & size)
+               │      └── If modified: Compute streaming SHA-256 hash
                │
-               ├── 2. Klasifikasi Perubahan (Compare vs graph.db)
-               │      ├── UNCHANGED  ──► Lewati (0 ms)
-               │      ├── ADDED      ──► Parse AST file baru saja
-               │      ├── MODIFIED   ──► Re-parse file & dependensi terdampak
-               │      └── DELETED    ──► Hapus via ON DELETE CASCADE
+               ├── 2. Change Classification (Compare against graph.db)
+               │      ├── UNCHANGED  ──► Skip (0 ms)
+               │      ├── ADDED      ──► Parse AST of new file only
+               │      ├── MODIFIED   ──► Re-parse affected file & downstream dependents
+               │      └── DELETED    ──► Remove via ON DELETE CASCADE
                │
-               └── 3. Transitive Invalidation (Cek file_dependencies)
-                      └── Jika types.ts / index.ts berubah, re-parse konsumennya
+               └── 3. Transitive Invalidation (Check file_dependencies)
+                      └── If types.ts / index.ts changed, re-parse dependent consumers
                │
                ▼
-[Eksekusi Query Tool dengan Data 100% Fresh (< 50ms)]
+[Execute Tool Query with 100% Fresh Data (< 50ms)]
 ```
 
-### A. Dua Lapis Pemeriksaan (*Stat + Streaming Hash*)
-1. **Lapis 1 (In-Memory Fast Check):** Memeriksa `mtimeMs` dan `size` file. Jika sama persis dengan cache, file langsung dilewati (*zero overhead*).
-2. **Lapis 2 (Kriptografis):** Jika `mtime` berubah, Strata membaca streaming buffer 64 KB untuk menghitung hash SHA-256. Jika hash ternyata identik (hanya save ulang tanpa ubah karakter), file tidak di-parse ulang.
+### A. Two-Tier Verification (*Stat + Streaming Hash*)
+1. **Tier 1 (In-Memory Fast Check):** Compares `mtimeMs` and `size`. If identical to cached values, the file is skipped immediately (*zero overhead*).
+2. **Tier 2 (Cryptographic Hash):** If `mtime` changed, Strata reads a 64 KB streaming buffer to calculate the SHA-256 hash. If identical (e.g., re-saved without text edits), AST parsing is bypassed.
 
-### B. Penghapusan Bersih via `ON DELETE CASCADE`
-Semua tabel anak (`components`, `edges`, `state_deps`, `routes`, `file_dependencies`) memiliki foreign key constraint:
+### B. Clean Deletion via `ON DELETE CASCADE`
+All child tables (`components`, `edges`, `state_deps`, `routes`, `file_dependencies`) specify foreign key constraints:
 ```sql
 REFERENCES files(id) ON DELETE CASCADE
 ```
-Ketika sebuah file dihapus dari workspace, menghapus 1 baris di tabel `files` akan **otomatis membersihkan seluruh edge, state dependencies, dan hierarki pohon terkait** tanpa meninggalkan data sampah (*orphan records*).
+When a file is removed from the workspace, deleting 1 row from `files` **automatically cascades and purges all associated edges, state dependencies, and tree hierarchies** without leaving orphan records.
 
-### C. Transitive Invalidation (Tipe & Barrel Files)
-Jika developer mengubah file `types.ts` (yang di-import oleh `UserProfile.vue`):
-1. Hash `types.ts` dicatat di tabel `file_dependencies`.
-2. Saat `types.ts` berubah, Strata mendeteksi mismatch hash pada dependensi `UserProfile.vue`.
-3. `UserProfile.vue` otomatis ditandai sebagai **`stale`** dan ikut di-reparse ulang agar kontrak props-nya selalu mutakhir.
+### C. Transitive Invalidation (Types & Barrel Files)
+If a developer alters `types.ts` (imported by `UserProfile.vue`):
+1. The hash of `types.ts` is tracked in `file_dependencies`.
+2. When `types.ts` changes, Strata flags a hash mismatch on `UserProfile.vue`'s dependencies.
+3. `UserProfile.vue` is automatically marked **`stale`** and re-parsed so its prop contracts remain current.
 
-### D. Perubahan Konfigurasi Global (`config_fingerprint`)
-Jika file `tsconfig.json`, `jsconfig.json`, atau alias path berubah:
-* Strata mendeteksi perbedaan hash `config_fingerprint`.
-* Memicu *full rebuild* secara otomatis dan aman untuk memastikan resolusi alias konsisten di seluruh graf.
+### D. Global Configuration Tracking (`config_fingerprint`)
+If `tsconfig.json`, `jsconfig.json`, or path aliases change:
+* Strata detects a differing `config_fingerprint` hash.
+* Triggers an automatic, clean full rebuild to guarantee consistent alias resolution across the entire graph.
 
 ---
 
-## 5. Keamanan & Ketahanan Data (*Crash-Resilience*)
+## 5. Data Security & Crash Resilience
 
 1. **Staged Sync via Temp Tables:**
-   Proses sinkronisasi dilakukan di dalam `TEMP TABLE` SQLite (`temp.sync_files`, `temp.sync_verify`). Jika proses dihentikan mendadak di tengah jalan, database utama tidak akan rusak (*anti-corruption*).
+   Synchronization mutations stage into SQLite `TEMP TABLE` structures (`temp.sync_files`, `temp.sync_verify`). If a process terminates abruptly, the main database remains uncorrupted (*anti-corruption*).
 2. **WAL Concurrency & Busy Timeout:**
-   * Pembacaan (*read queries*) tidak memblokir penulisan (*write sync*).
-   * Timeout 15 detik (`busy_timeout = 15000`) dengan mekanisme auto-retry untuk mencegah error kunci SQLite.
+   * Reader queries do not block writer synchronizations.
+   * A 15-second busy timeout (`busy_timeout = 15000`) with auto-retry handles transient lock contention cleanly.
 
 ---
 
-## 6. Rujukan Implementasi Kode
+## 6. Code Implementation References
 
-* **Skema Database & Registry:** [`src/engine/storage/schema.ts`](../../src/engine/storage/schema.ts)
+* **Database Schema & Registry:** [`src/engine/storage/schema.ts`](../../src/engine/storage/schema.ts)
 * **Delta Sync Engine:** [`src/engine/storage/delta-sync.ts`](../../src/engine/storage/delta-sync.ts)
 * **Staged Sync Algorithm:** [`src/engine/storage/staged-sync.ts`](../../src/engine/storage/staged-sync.ts)
 * **State Storage Queries:** [`src/engine/storage/state-storage.ts`](../../src/engine/storage/state-storage.ts)
