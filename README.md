@@ -61,6 +61,8 @@ Run `strata init` in your project root to set up MCP configuration and AI agent 
 strata init
 ```
 
+Every `strata init` rebuilds the complete graph index in `.strata/graph.db`, including unchanged source files. Run it again after local parser changes. Normal `strata sync` remains incremental; release compatibility follows the Strata package version without a separate cache revision counter.
+
 You can target a specific AI harness directly:
 
 ```bash
@@ -81,10 +83,10 @@ Strata provides 6 tools via the Model Context Protocol (MCP):
 |---|---|
 | **`find_code`** | Search structural code patterns across templates and scripts without loading entire files into context |
 | **`inspect_component`** | Extract public component interfaces (props, emits, slots, state) and retrieve specific code slices |
-| **`get_component_tree`** | Inspect component hierarchies, parent-child trees, and find all callers of a component |
-| **`trace_state`** | Trace reactive state dependencies and locate all components reading or mutating a given state store |
+| **`get_component_tree`** | Inspect component hierarchies and discovered caller candidates within the analyzed scope |
+| **`trace_state`** | Find static state references and reader/mutator candidates within the analyzed scope |
 | **`audit_frontend`** | Scan application routes, outbound HTTP API calls, and detect unused reactive state |
-| **`generate_patch_plan`** | Generate safe refactoring plans when renaming props, events, or component names across consumers |
+| **`generate_patch_plan`** | Generate hash-bound proposals for supported static prop, event, model, and slot usages; review coverage and verify after editing |
 
 ---
 
@@ -95,7 +97,7 @@ Strata provides 6 tools via the Model Context Protocol (MCP):
 | Command | Description |
 |---|---|
 | `strata serve` | Start the MCP server over stdio for AI coding agents |
-| `strata init [dir]` | Initialize agent rules, skills, and graph cache |
+| `strata init [dir]` | Initialize agent rules and skills, and rebuild the complete graph index |
 | `strata sync [dir]` | Update the `.strata/graph.db` index with file changes |
 | `strata stats [dir]` | View MCP performance telemetry (latency, request counts, errors) |
 
@@ -113,6 +115,10 @@ Strata provides 6 tools via the Model Context Protocol (MCP):
 | `strata patch <file>` | Generate refactoring plans for prop or event renames |
 
 ---
+
+## Project Documentation
+
+Start with the [feature documentation](docs/features/README.md) for feature requirements, Single Source of Truth (SSOT) specifications, architectural design, and retrieval contracts.
 
 ## Development
 
