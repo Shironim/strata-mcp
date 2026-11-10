@@ -3,6 +3,7 @@ import type { ToolCallResponse } from '../tools/types';
 import { hashRetrievalIdentity } from './retrieval-evidence';
 
 export const MINIMUM_RESPONSE_BUDGET_BYTES = 512;
+export const DEFAULT_RESPONSE_BUDGET_BYTES = 16 * 1024;
 export const RESERVED_ENVELOPE_BYTES = 256;
 
 export interface ContextBudgetOptions {
@@ -236,12 +237,22 @@ export function applyContextBudget<T>(
   };
 }
 
+export interface PaginatedPageContext {
+  path: string;
+  offset: number;
+  end: number;
+  total: number;
+  hasMore: boolean;
+  continuationToken?: string;
+}
+
 export interface ResponseBudgetOptions {
   tool: string;
   maxBytes?: number;
   continuationToken?: string;
   format?: 'text' | 'json';
   collectionPaths?: string[];
+  formatText?: (data: Record<string, any>, page: PaginatedPageContext) => string | undefined;
   render?: (result: ToolCallResponse) => ToolCallResponse;
   tokenContext: {
     tool: string;
@@ -294,10 +305,34 @@ function budgetRejection(code: string, maxBytes: number, requiredBytes: number, 
 }
 
 /** Final guard for transport failures that bypass the analysis handler. Excludes JSON-RPC framing. */
-export function enforceResponseLimit(result: ToolCallResponse, maxBytes: unknown): ToolCallResponse {
+export function enforceResponseLimit(result: ToolCallResponse, maxBytes: unknown = DEFAULT_RESPONSE_BUDGET_BYTES): ToolCallResponse {
   if (typeof maxBytes !== 'number' || !Number.isSafeInteger(maxBytes) || maxBytes < MINIMUM_RESPONSE_BUDGET_BYTES) return result;
   const bytes = measureResponseBytes(result);
   return bytes <= maxBytes ? result : budgetRejection('BUDGET_RESPONSE_TOO_LARGE', maxBytes, bytes, result);
+}
+
+function formatPaginatedCollectionFallback(path: string, pageItems: unknown[], page: PaginatedPageContext): string {
+  const header = `${path} (showing ${page.offset + 1}-${page.end} of ${page.total})`;
+  if (pageItems.length === 0) return `${header}\n(No items in this page)`;
+  const lines = pageItems.map((item) => {
+    if (!item || typeof item !== 'object') return `- ${String(item)}`;
+    const rec = item as Record<string, any>;
+    const file = rec.file ?? rec.filePath ?? rec.path;
+    const line = rec.line ?? rec.startLine ?? rec.lineNumber;
+    const col = rec.column ?? rec.startColumn;
+    const name = rec.name ?? rec.identifier ?? rec.symbol ?? rec.oldName;
+    const snippet = rec.snippet ?? rec.usageSnippet ?? rec.description;
+    if (file && line !== undefined) {
+      const loc = `${file}:${line}${col !== undefined ? `:${col}` : ''}`;
+      return snippet ? `${loc} - ${snippet}` : name ? `${loc} (${name})` : loc;
+    }
+    if (file && name) return `- ${name}: ${file}${rec.kind ? ` [${rec.kind}]` : ''}`;
+    if (file) return `- ${file}${rec.roleHint ? ` [${rec.roleHint}]` : ''}${rec.method && rec.endpoint ? ` (${rec.method} ${rec.endpoint})` : ''}`;
+    if (rec.endpoint) return `- ${rec.method ?? 'UNKNOWN'} ${rec.endpoint}`;
+    if (name) return `- ${name}${rec.kind ? ` (${rec.kind})` : ''}`;
+    return `- ${JSON.stringify(rec)}`;
+  });
+  return [header, ...lines].join('\n');
 }
 
 function getPath(data: Record<string, any>, path: string): unknown {
@@ -327,6 +362,12 @@ export function applyResponseBudget(result: ToolCallResponse, options: ResponseB
       : budgetRejection('BUDGET_RESPONSE_TOO_LARGE', maxBytes, bytes, candidate);
   };
   if (result.isError) return fitOrReject(render(result));
+
+  // Preserve exact source and legacy primary text when the complete response already fits.
+  if (!continuationToken) {
+    const complete = render(structuredClone(result));
+    if (maxBytes === undefined || measureResponseBytes(complete) <= maxBytes) return complete;
+  }
 
   const original = result.structuredContent ?? {};
   const paths = options.collectionPaths ?? [...TARGET_COLLECTION_KEYS].filter(key => Array.isArray(original[key])).slice(0, 1);
@@ -394,7 +435,7 @@ export function applyResponseBudget(result: ToolCallResponse, options: ResponseB
         data.nextOffset = end;
       }
     }
-    const budget = { maxBytes, estimatedBytes: 0, isTruncated: partial, consistency: 'selection-bound', ...(token ? { continuationToken: token } : {}) };
+    const budget = { maxBytes, estimatedBytes: 0, isTruncated: partial, consistency: 'selection-bound' };
     const retrieval = data.retrieval as any;
     if (retrieval) {
       retrieval.budget = budget;
@@ -413,7 +454,28 @@ export function applyResponseBudget(result: ToolCallResponse, options: ResponseB
           if (block.text.startsWith('Retrieval:')) return false;
           try { const parsed = JSON.parse(block.text); return !(parsed && Object.keys(parsed).length === 1 && parsed.retrieval); } catch { return true; }
         });
-        candidate.content = [{ type: 'text', text: JSON.stringify(data) }, ...extras];
+        let primaryText: string;
+        if (options.format === 'text') {
+          const pageContext: PaginatedPageContext = {
+            path,
+            offset: start,
+            end,
+            total: items.length,
+            hasMore,
+            continuationToken: token,
+          };
+          const formatted = options.formatText?.(data, pageContext);
+          const body = (formatted && formatted.trim().length > 0)
+            ? formatted
+            : formatPaginatedCollectionFallback(path, getPath(data, path) as unknown[], pageContext);
+          const pageNotice = partial
+            ? `\nPage: entries ${start + 1}-${end} of ${items.length}${hasMore ? `; more available via continuation_token` : ' (final page)'}`
+            : '';
+          primaryText = `${body}${pageNotice}`;
+        } else {
+          primaryText = JSON.stringify(data);
+        }
+        candidate.content = [{ type: 'text', text: primaryText }, ...extras];
       } else candidate.content = [...result.content, { type: 'text', text: JSON.stringify({ budget }) }];
       rendered = render(candidate);
       const bytes = measureResponseBytes(rendered);

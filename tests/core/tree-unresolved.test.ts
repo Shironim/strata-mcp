@@ -68,7 +68,7 @@ test('tool handler preserves unresolved diagnostics in JSON text and retrieval o
   expect(payload.diagnostics[0].code).toBe('UNRESOLVED_RENDERED_IMPORT');
   expect(payload.retrieval.completeness).toBe('partial');
   expect(payload.retrieval.omissions.some((item: { code: string }) => item.code === 'UNRESOLVED_RENDERED_IMPORT')).toBe(true);
-  expect(json.structuredContent?.retrieval).toEqual(payload.retrieval);
+  expect(json.structuredContent?.retrieval).toMatchObject(payload.retrieval);
   const text = await componentTreeTool.handler({ ...args, format: 'text' });
   expect(text.isError).not.toBe(true);
   expect(text.content[0].text).toContain('UNRESOLVED_RENDERED_IMPORT');

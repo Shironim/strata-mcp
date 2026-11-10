@@ -77,7 +77,6 @@ export const IGNORED_DIRS = new Set([
 
   // Tooling, Scripts & Harness
   'scripts',
-  'tools',
 
   // Test Suites, Fixtures & Mocks (Non-domain test code)
   'tests',
@@ -118,6 +117,16 @@ export interface CollectOptions {
   domainOnly?: boolean;
 }
 
+export interface ExcludedDirectoryReport {
+  path: string;
+  reason: 'default-ignore' | 'hidden' | 'custom-exclude' | 'ignore-file' | 'read-error';
+}
+
+export interface CollectFilesReport {
+  files: string[];
+  excludedDirs: ExcludedDirectoryReport[];
+}
+
 export const INDEX_CONFIG_FILES = new Set(['package.json', 'tsconfig.json', 'jsconfig.json', '.gitignore', '.strataignore', 'nuxt.config.mjs', 'next.config.mjs', 'astro.config.mjs']);
 
 /**
@@ -151,12 +160,10 @@ export async function loadIgnorePatterns(dirPath: string): Promise<Set<string>> 
   return new Set((await loadIgnoreRules(dirPath)).filter(line => line && !line.startsWith('#')));
 }
 
-/**
- * Recursively collects all supported source files (.vue, .astro, .ts, .tsx, .js, .jsx) within a directory.
- */
-export async function* iterateFiles(
+async function* iterateFilesInternal(
   dirPath: string,
-  options?: CollectOptions
+  options?: CollectOptions,
+  excludedDirs?: ExcludedDirectoryReport[]
 ): AsyncGenerator<string> {
   dirPath = resolve(dirPath);
   const stat = await fs.stat(dirPath);
@@ -167,26 +174,26 @@ export async function* iterateFiles(
       .filter(Boolean)
   );
 
-  function isExcluded(entryName: string, relativePath: string): boolean {
+  function getExclusionReason(entryName: string, relativePath: string): ExcludedDirectoryReport['reason'] | null {
     const lower = entryName.toLowerCase();
+    for (const pattern of customExcludeSet) {
+      if (entryName === pattern || relativePath === pattern || relativePath.startsWith(`${pattern}/`)) return 'custom-exclude';
+    }
     if (options?.includeTests && (['tests', 'test', '__tests__', 'spec', 'specs', 'e2e', 'cypress', 'fixtures', 'mocks'].includes(lower))) {
       // Allowed via explicit option
-    } else if (options?.includeScripts && (['scripts', 'tools'].includes(lower))) {
+    } else if (options?.includeScripts && lower === 'scripts') {
       // Allowed via explicit option
     } else if (options?.includeDocs && (['docs', 'doc', 'documentation'].includes(lower))) {
       // Allowed via explicit option
     } else if (IGNORED_DIRS.has(entryName) || IGNORED_DIRS.has(lower)) {
-      return true;
+      return entryName.startsWith('.') ? 'hidden' : 'default-ignore';
     }
 
     if (entryName.startsWith('.') && entryName !== '.' && entryName !== '..' && !options?.includeConfigFiles) {
-      return true;
+      return 'hidden';
     }
 
-    for (const pattern of customExcludeSet) {
-      if (entryName === pattern || relativePath === pattern || relativePath.startsWith(`${pattern}/`)) return true;
-    }
-    return false;
+    return null;
   }
 
   type IgnoreContext = { base: string; matcher: Ignore };
@@ -215,7 +222,10 @@ export async function* iterateFiles(
       if (inherited.length && isIgnored(base, true, inherited)) return;
       inherited.push({ base, matcher: ignore().add(await loadIgnoreRules(base, options?.failOnReadError)) });
     }
-    if (inherited.length && isIgnored(dirPath, stat.isDirectory(), inherited)) return;
+    if (inherited.length && isIgnored(dirPath, stat.isDirectory(), inherited)) {
+      if (stat.isDirectory()) excludedDirs?.push({ path: '.', reason: 'ignore-file' });
+      return;
+    }
   }
   if (!stat.isDirectory()) { yield dirPath; return; }
 
@@ -254,6 +264,8 @@ export async function* iterateFiles(
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
       if (!options?.failOnReadError && (code === 'EACCES' || code === 'EPERM' || code === 'ENOENT')) {
+        const relDir = relative(dirPath, currentDir).replace(/\\/g, '/') || '.';
+        excludedDirs?.push({ path: relDir, reason: 'read-error' });
         return;
       }
       throw err;
@@ -261,13 +273,20 @@ export async function* iterateFiles(
     for (const entry of entries) {
       const fullPath = join(currentDir, entry.name);
       const relPath = relative(dirPath, fullPath).replace(/\\/g, '/');
+      const exclusionReason = getExclusionReason(entry.name, relPath);
 
-      if (isExcluded(entry.name, relPath)) continue;
+      if (exclusionReason) {
+        if (entry.isDirectory()) excludedDirs?.push({ path: relPath || entry.name, reason: exclusionReason });
+        continue;
+      }
       if (entry.isFile() && options?.includeConfigFiles && isConfigFile(entry.name)) {
         yield fullPath;
         continue;
       }
-      if (isIgnored(fullPath, entry.isDirectory(), contexts)) continue;
+      if (isIgnored(fullPath, entry.isDirectory(), contexts)) {
+        if (entry.isDirectory()) excludedDirs?.push({ path: relPath || entry.name, reason: 'ignore-file' });
+        continue;
+      }
 
       if (entry.isDirectory()) {
         yield* walk(fullPath, contexts);
@@ -286,8 +305,30 @@ export async function* iterateFiles(
   yield* walk(dirPath, inherited);
 }
 
+/**
+ * Recursively collects all supported source files (.vue, .astro, .ts, .tsx, .js, .jsx) within a directory.
+ */
+export async function* iterateFiles(
+  dirPath: string,
+  options?: CollectOptions
+): AsyncGenerator<string> {
+  yield* iterateFilesInternal(dirPath, options);
+}
+
 export async function collectFiles(dirPath: string, options?: CollectOptions): Promise<string[]> {
   const files: string[] = [];
   for await (const file of iterateFiles(dirPath, options)) files.push(file);
   return files;
+}
+
+export async function collectFilesWithReport(dirPath: string, options?: CollectOptions): Promise<CollectFilesReport> {
+  const files: string[] = [];
+  const rawExcluded: ExcludedDirectoryReport[] = [];
+  for await (const file of iterateFilesInternal(dirPath, options, rawExcluded)) files.push(file);
+  const seen = new Map<string, ExcludedDirectoryReport>();
+  for (const item of rawExcluded) {
+    if (!seen.has(item.path)) seen.set(item.path, item);
+  }
+  const excludedDirs = Array.from(seen.values()).sort((a, b) => a.path.localeCompare(b.path));
+  return { files, excludedDirs };
 }

@@ -11,7 +11,7 @@ import {
   formatMatchesAsText,
 } from '../engine/search';
 import { dumpSyntaxTree, executeAstGrep, isPatternParseError } from '../engine/astgrep';
-import { mapFrontendScope } from '../engine/frontend-map';
+import { mapFrontendScope, formatFrontendMapAsText } from '../engine/frontend-map';
 import { findByComponentProp } from '../engine/search-intent';
 import {
   parseSafePositiveInt,
@@ -20,7 +20,6 @@ import {
   resolveWorkspacePath,
 } from '../engine/path-resolver';
 import type { McpToolDefinition } from './types';
-import { checkRuntimeVersion, getCachedRuntimeVersion } from '../utils/version-check';
 
 const findCodeToolDefinition: McpToolDefinition = {
   ...TOOL_CATALOG[0],
@@ -80,18 +79,11 @@ const findCodeToolDefinition: McpToolDefinition = {
           offset: Number.isSafeInteger(args.offset) && args.offset >= 0 ? args.offset : 0,
           excludeDirs: parseStringList(args.exclude_dirs ?? args.excludeDirs),
         });
-        const runtimeVersion = getCachedRuntimeVersion();
-        void checkRuntimeVersion().catch(() => {});
-        const payload = { runtime_version: runtimeVersion, ...result };
-        let textOutput = isJson ? JSON.stringify(payload, null, 2) : formatFrontendMap(result);
-        if (!isJson && runtimeVersion.update_available) {
-          textOutput = `[Notice: Update available: v${runtimeVersion.server_version} -> v${runtimeVersion.latest_version}. Run: ${runtimeVersion.upgrade_command}]\n\n` + textOutput;
-        }
+        const payload = result;
+        let textOutput = isJson ? JSON.stringify(payload, null, 2) : formatFrontendMapAsText(result);
         return {
           structuredContent: payload,
           content: [{ type: 'text', text: textOutput }],
-          metadata: { runtime_version: runtimeVersion },
-          runtime_version: runtimeVersion,
         };
       } catch (err) {
         return { isError: true, content: [{ type: 'text', text: `Failed to map frontend scope: ${err instanceof Error ? err.message : String(err)}` }] };
@@ -242,35 +234,46 @@ const findCodeToolDefinition: McpToolDefinition = {
   },
 };
 
-export const findCodeTool: McpToolDefinition = withRetrievalEvidence(findCodeToolDefinition, args => {
-  const snippet = (args.code || args.code_snippet) ? String(args.code || args.code_snippet) : undefined;
-  const rawPath = args.path || args.file_path || args.filePath || args.target_path || args.targetPath;
-  const scope = snippet ? null : rawPath ? resolveWorkspacePath(String(rawPath)) : resolveProjectRoot();
-  const pattern = args.pattern || args.query || args.search;
-  const component = args.component || args.component_name || args.componentName;
-  const propName = args.prop_name ?? args.prop ?? args.propName;
-  const propPresence = args.prop_presence ?? args.propPresence;
-  const action = args.action === 'map' ? 'map' : args.action === 'dump_ast' || (!rawPath && snippet && !pattern && !args.rule_yaml) ? 'dump_ast' : 'search';
-  return {
-    workspace: scope ? findProjectRoot(scope) : null, scope, policy: `find-code-${action}-v1`,
-    ...(snippet ? { inputHash: hashRetrievalIdentity({ encoding: 'utf-8', content: snippet }) } : {}),
-    query: { action, pattern: pattern ? String(pattern) : null, component: component ? String(component) : null,
-      propName: propName !== undefined ? String(propName) : null,
-      propPresence: propName !== undefined || propPresence !== undefined ? String(propPresence ?? 'present') : null,
-      rule: args.rule_yaml ? String(args.rule_yaml) : null, language: args.language ?? (snippet ? 'ts' : null),
-      mode: pattern ? args.mode ?? 'ast' : null, componentScope: component && propName === undefined ? args.scope ?? 'both' : null,
-      limit: action === 'map' ? Math.min(500, parseSafePositiveInt(args.limit ?? args.max_results ?? args.maxResults, 100)!) : parseSafePositiveInt(args.max_results ?? args.maxResults, snippet ? 200 : undefined) ?? null,
-      offset: action === 'map' && Number.isSafeInteger(args.offset) && args.offset >= 0 ? args.offset : 0,
-      excludeDirs: parseStringList(args.exclude_dirs ?? args.excludeDirs) },
-  };
+export const findCodeTool: McpToolDefinition = withRetrievalEvidence(findCodeToolDefinition, {
+  describe: args => {
+    const snippet = (args.code || args.code_snippet) ? String(args.code || args.code_snippet) : undefined;
+    const rawPath = args.path || args.file_path || args.filePath || args.target_path || args.targetPath;
+    const scope = snippet ? null : rawPath ? resolveWorkspacePath(String(rawPath)) : resolveProjectRoot();
+    const pattern = args.pattern || args.query || args.search;
+    const component = args.component || args.component_name || args.componentName;
+    const propName = args.prop_name ?? args.prop ?? args.propName;
+    const propPresence = args.prop_presence ?? args.propPresence;
+    const action = args.action === 'map' ? 'map' : args.action === 'dump_ast' || (!rawPath && snippet && !pattern && !args.rule_yaml) ? 'dump_ast' : 'search';
+    return {
+      workspace: scope ? findProjectRoot(scope) : null, scope, policy: `find-code-${action}-v1`,
+      ...(snippet ? { inputHash: hashRetrievalIdentity({ encoding: 'utf-8', content: snippet }) } : {}),
+      query: { action, pattern: pattern ? String(pattern) : null, component: component ? String(component) : null,
+        propName: propName !== undefined ? String(propName) : null,
+        propPresence: propName !== undefined || propPresence !== undefined ? String(propPresence ?? 'present') : null,
+        rule: args.rule_yaml ? String(args.rule_yaml) : null, language: args.language ?? (snippet ? 'ts' : null),
+        mode: pattern ? args.mode ?? 'ast' : null, componentScope: component && propName === undefined ? args.scope ?? 'both' : null,
+        limit: action === 'map' ? Math.min(500, parseSafePositiveInt(args.limit ?? args.max_results ?? args.maxResults, 100)!) : parseSafePositiveInt(args.max_results ?? args.maxResults, snippet ? 200 : undefined) ?? null,
+        offset: action === 'map' && Number.isSafeInteger(args.offset) && args.offset >= 0 ? args.offset : 0,
+        excludeDirs: parseStringList(args.exclude_dirs ?? args.excludeDirs) },
+    };
+  },
+  formatText: (data, page) => {
+    if (page.path === 'files' && Array.isArray(data.files) && data.coverage) {
+      return formatFrontendMapAsText(data as any);
+    }
+    if (page.path === 'matches' && Array.isArray(data.matches)) {
+      const normalized = data.matches.map((match: any) => ({
+        ...match,
+        file: match.file ?? '<snippet>',
+        snippet: match.snippet ?? match.text ?? '',
+      }));
+      const prefix = data.fallbackReason === 'invalid_ast_pattern'
+        ? '[Notice: Invalid AST pattern; used exact literal line search.]\n'
+        : data.query && data.coverage?.propSupply
+          ? `Prop query: ${JSON.stringify(data.query)}\n`
+          : '';
+      return `${prefix}${formatMatchesAsText(normalized)}`;
+    }
+    return undefined;
+  },
 });
-
-function formatFrontendMap(result: Awaited<ReturnType<typeof mapFrontendScope>>): string {
-  return [
-    `Frontend map: ${result.root}`,
-    `Status: ${result.status}; ${result.coverage.returnedFiles}/${result.coverage.knownFiles} files returned (offset ${result.coverage.offset})`,
-    `Framework candidates: ${result.frameworkCandidates.map(item => item.name).join(', ') || 'unknown'} (${result.frameworkDetection})`,
-    ...result.files.map(file => `- ${file.path}${file.roleHint ? ` [${file.roleHint}; heuristic]` : ''}`),
-    `Extension coverage: ${Object.entries(result.coverage.extensions).filter(([, count]) => count > 0).map(([ext, count]) => `${ext}=${count}`).join(', ') || 'none'}`,
-  ].join('\n');
-}

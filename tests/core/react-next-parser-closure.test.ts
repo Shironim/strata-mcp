@@ -54,7 +54,7 @@ test('React namespace/default type imports and tsconfig aliases retain resolver 
   expect(result.props.map(prop => prop.name)).toEqual(['title','count']);
   expect(result.unresolvedTypes).toBeUndefined();
   expect(result.dependencies?.some(dep => dep.path === join(root,'tsconfig.json'))).toBe(true);
-  const response = await inspectComponentTool.handler({path:join(root,'Card.tsx'),project_root:root,resolve_globals:false,format:'json'});
+  const response = await inspectComponentTool.handler({path:join(root,'Card.tsx'),project_root:root,format:'json'});
   expect(response.isError).not.toBe(true);
   expect((response.structuredContent as any).dependencies.some((dep: any) => dep.path === join(root,'types/input.ts'))).toBe(true);
 }));

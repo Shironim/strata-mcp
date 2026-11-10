@@ -103,7 +103,6 @@ export const NON_DOMAIN_DIRS = new Set([
 
   // Tooling, harness & build scripts
   'scripts',
-  'tools',
 
   // Test suites, fixtures & mocks
   'tests',

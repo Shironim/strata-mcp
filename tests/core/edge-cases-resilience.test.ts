@@ -5,7 +5,6 @@ import { extractImports } from '../../src/engine/graph/path-helpers';
 import { closeAllDatabases, getWorkspaceDatabase } from '../../src/engine/storage/schema';
 import { syncWorkspace } from '../../src/engine/storage/delta-sync';
 import { queryUnusedComponentsFromDb } from '../../src/engine/storage/blast-radius';
-import { WorkspaceWatcher } from '../../src/engine/watcher';
 
 describe('Edge Cases & Unhappy Path Resilience Suite', () => {
   let tempDir: string;
@@ -26,64 +25,6 @@ describe('Edge Cases & Unhappy Path Resilience Suite', () => {
         // ignore on windows/busy locks
       }
     }
-  });
-
-  describe('Edge Case 1: Watcher Degradation & Fallback State', () => {
-    it('provides observable watcher status and marks degradation on failure', () => {
-      const db = getWorkspaceDatabase(tempDir, { enableWatcher: false });
-      let capturedError: Error | null = null;
-      const watcher = new WorkspaceWatcher(tempDir, db, {
-        debounceMs: 50,
-        onError: (err) => { capturedError = err; },
-      });
-
-      expect(typeof watcher.getStatus).toBe('function');
-      const initialStatus = watcher.getStatus();
-      expect(initialStatus.active).toBe(false);
-      expect(initialStatus.degraded).toBe(false);
-
-      // Simulate an OS inotify ENOSPC failure during start
-      (watcher as any).handleWatchError(new Error('ENOSPC: System limit for number of file watchers reached'));
-      
-      const degradedStatus = watcher.getStatus();
-      expect(degradedStatus.degraded).toBe(true);
-      expect(degradedStatus.mode).toBe('degraded');
-      expect(watcher.isDegraded()).toBe(true);
-      expect(capturedError).not.toBeNull();
-      expect(capturedError?.message).toContain('ENOSPC');
-
-      watcher.close();
-      expect(watcher.getStatus().mode).toBe('closed');
-    });
-
-    it('gracefully handles polling fallback when native watcher fails', async () => {
-      const db = getWorkspaceDatabase(tempDir, { enableWatcher: false });
-      let syncNotified = false;
-      const watcher = new WorkspaceWatcher(tempDir, db, {
-        debounceMs: 50,
-        fallbackPolling: true,
-        pollingIntervalMs: 100,
-        onSyncComplete: () => { syncNotified = true; },
-      });
-
-      // Trigger fallback to polling
-      (watcher as any).enablePollingFallback();
-      expect(watcher.getStatus().mode).toBe('polling');
-      expect(watcher.getStatus().active).toBe(true);
-
-      // Create a new component file
-      const compPath = join(tempDir, 'PolledComponent.vue');
-      writeFileSync(compPath, '<template><div>Polled</div></template>');
-
-      // Wait for poll tick
-      await new Promise((r) => setTimeout(r, 250));
-
-      const rows = db.query('SELECT path FROM files WHERE path = ?').all(compPath);
-      expect(rows.length).toBe(1);
-
-      watcher.close();
-      expect(watcher.getStatus().active).toBe(false);
-    });
   });
 
   describe('Edge Case 2: Dynamic Imports & Indirection Resolution', () => {

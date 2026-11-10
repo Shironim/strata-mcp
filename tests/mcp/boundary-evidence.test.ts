@@ -25,7 +25,7 @@ for(const sample of samples) {
       const path=join(root,sample.file);await mkdir(join(path,'..'),{recursive:true});
       await writeFile(join(root,'package.json'),JSON.stringify({dependencies:sample.dependencies}));
       await writeFile(path,sample.code);
-      const args={path,project_root:root,format:'json',resolve_globals:false};
+      const args={path,project_root:root,format:'json',};
       const full=await inspectComponentTool.handler(args);expect(full.isError).not.toBe(true);
       const data=full.structuredContent as any;
       expect(data.framework).toBe(sample.framework);
@@ -58,7 +58,7 @@ test('resolved local directive evidence is not downgraded and exact source views
     const path=join(root,'Card.tsx');await writeFile(join(root,'package.json'),'{"dependencies":{"react":"19.0.0"}}');
     await writeFile(path,"'use client'; export default ()=> <p/>");
     for(const extra of [{},{response_detail:'summary'},{source_range:{start_line:1,end_line:1}}]) {
-      const result=await inspectComponentTool.handler({path,project_root:root,format:'json',resolve_globals:false,...extra});
+      const result=await inspectComponentTool.handler({path,project_root:root,format:'json',...extra});
       expect(result.isError).not.toBe(true);
       expect((result.structuredContent as any).retrieval.omissions.some((item:any)=>item.code.startsWith('RENDER_BOUNDARY_'))).toBe(false);
     }

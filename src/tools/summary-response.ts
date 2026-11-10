@@ -12,9 +12,9 @@ function collectSafetyDetails(data: Record<string, unknown>) {
     if (Array.isArray(value)) { value.forEach((item, index) => visit(item, `${path}[${index}]`)); return; }
     const item = value as Record<string, unknown>;
     for (const [key, child] of Object.entries(item)) {
-      if (!path && ['retrieval', 'coverage', 'diagnostics', 'propImpact', 'cost'].includes(key)) continue;
+      if (!path && ['retrieval', 'coverage', 'diagnostics', 'propImpact'].includes(key)) continue;
       const nextPath = path ? `${path}.${key}` : key;
-      if (/warning|diagnostic|omission|violation|limitation|unresolvedFields|unresolvedTypes|reactivitySmells|propsDrilling/i.test(key)) {
+      if (/warning|diagnostic|omission|violation|limitation|unresolvedFields|unresolvedTypes|propsDrilling/i.test(key)) {
         if (child !== undefined && child !== null && (!Array.isArray(child) || child.length))
           details.push({ path: nextPath, file: item.filePath ?? item.file, value: child });
       } else visit(child, nextPath);
@@ -65,6 +65,7 @@ export function summarizeToolResponse(result: ToolCallResponse, tool: string, ar
     ? data.boundaryContracts.slice(0, 10).map((b: any) => ({
         method: b.method,
         endpoint: b.targetEndpoint,
+        ...(b.source === 'imported-composable' ? { source: b.source, viaComposable: b.viaComposable } : {}),
       }))
     : undefined;
   const formCount = Array.isArray(data.formContracts) ? data.formContracts.length : undefined;
@@ -84,7 +85,17 @@ export function summarizeToolResponse(result: ToolCallResponse, tool: string, ar
     isTruncated: true,
     ...(retrieval ? { retrieval } : {}),
     ...Object.fromEntries(['coverage', 'diagnostics', 'query', 'inputFreshness'].filter(key => data[key] !== undefined).map(key => [key, data[key]])),
-    ...(impact ? { propImpact: { ...impact, props: impact.props.map(({ usages, omissions, ...prop }: Record<string, unknown>) => prop) } } : {}),
+    ...(impact ? { propImpact: {
+      status: impact.status,
+      target: impact.target,
+      scope: impact.scope,
+      freshness: impact.freshness,
+      inputIdentity: impact.inputIdentity,
+      renderConsumerCount: impact.renderConsumerCount,
+      unknownConsumerCount: impact.unknownConsumerCount,
+      diagnostics: impact.diagnostics,
+      props: impact.props.map(({ usages, omissions, ...prop }: Record<string, unknown>) => prop),
+    } } : {}),
   };
   return { ...result, structuredContent, content: [{ type: 'text', text: JSON.stringify(structuredContent) }] };
 }

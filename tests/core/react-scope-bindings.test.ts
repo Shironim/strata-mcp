@@ -108,7 +108,7 @@ test('inspect summary retains unresolved React use resource evidence', async () 
     const path=join(root,'Card.tsx');
     await writeFile(path,`import {use} from 'react'; export default function Card(){const value=use(UserPromise); return <div/>}`);
     for(const response_detail of ['full','summary']) {
-      const response=await inspectComponentTool.handler({path,project_root:root,format:'json',response_detail,resolve_globals:false});
+      const response=await inspectComponentTool.handler({path,project_root:root,format:'json',response_detail,});
       expect(response.isError).not.toBe(true);
       expect((response.structuredContent as any).retrieval.omissions.some((item:any)=>item.code==='REACT_USE_RESOURCE_UNVERIFIED')).toBe(true);
     }

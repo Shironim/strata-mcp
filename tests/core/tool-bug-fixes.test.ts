@@ -7,7 +7,6 @@ import { sliceSymbol } from '../../src/engine/slicer';
 import { traceStateTool } from '../../src/tools/trace-state';
 import { auditFrontendTool } from '../../src/tools/audit-frontend';
 import { generatePatchPlan } from '../../src/engine/patch-plan';
-import { auditDesignTokens } from '../../src/engine/style-audit';
 import { findComponentUsage, formatMatchesAsText } from '../../src/engine/search';
 import { extractVueContract } from '../../src/engine/parsers/contract-vue';
 import { getWorkspaceDatabase, closeWorkspaceDatabase } from '../../src/engine/storage/schema';
@@ -195,63 +194,6 @@ import Unused from './Unused.vue';
       expect(candidateCount).toBe(analyzedCount + failedCount + unsupportedCount);
       expect(analyzedCount).toBe(analyzedWithPatchCount + analyzedWithoutPatchCount);
       expect(plan.totalPatches).toBeGreaterThan(0);
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-
-  // -------------------------------------------------------------------------
-  // WARN-03: A11y input-label pairing & WCAG 44px touch target preservation
-  // -------------------------------------------------------------------------
-  it('WARN-03: flags inputs without associated labels and preserves WCAG 44px touch targets', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'strata-warn03-'));
-    try {
-      // Input with ID but NO matching label
-      writeFileSync(join(root, 'NoLabel.vue'), `
-<template>
-  <div>
-    <input id="unlabeled-input" type="text" />
-  </div>
-</template>
-      `);
-
-      // Input with ID AND matching label
-      writeFileSync(join(root, 'WithLabel.vue'), `
-<template>
-  <div>
-    <label for="labeled-input">Username</label>
-    <input id="labeled-input" type="text" />
-  </div>
-</template>
-      `);
-
-      // legitimate WCAG touch target vs arbitrary size
-      writeFileSync(join(root, 'TouchTarget.vue'), `
-<template>
-  <button class="min-h-[44px] min-w-[44px]">Accessible Touch</button>
-  <div class="min-h-[53px] w-[19px]">Arbitrary Dimension</div>
-</template>
-      `);
-
-      const audit = await auditDesignTokens({ targetPath: root });
-
-      // 1. A11y: NoLabel.vue must be flagged
-      const unlabeledViolation = audit.a11yViolations.find(v => v.file.includes('NoLabel.vue'));
-      expect(unlabeledViolation).toBeDefined();
-      expect(unlabeledViolation?.issue).toContain('unlabeled-input');
-
-      // 2. A11y: WithLabel.vue must NOT be flagged
-      const withLabelViolation = audit.a11yViolations.find(v => v.file.includes('WithLabel.vue'));
-      expect(withLabelViolation).toBeUndefined();
-
-      // 3. Design Tokens: min-h-[44px] and min-w-[44px] must NOT be flagged
-      const tokens = audit.arbitraryTokens.map(t => t.token);
-      expect(tokens.some(t => t.includes('min-h-[44px]'))).toBe(false);
-      expect(tokens.some(t => t.includes('min-w-[44px]'))).toBe(false);
-
-      // 4. Design Tokens: arbitrary dimensions like min-h-[53px] MUST be flagged
-      expect(tokens.some(t => t.includes('min-h-[53px]'))).toBe(true);
-      expect(tokens.some(t => t.includes('w-[19px]'))).toBe(true);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

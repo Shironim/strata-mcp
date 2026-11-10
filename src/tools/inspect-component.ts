@@ -10,17 +10,14 @@ import { sliceSymbol, formatSymbolSliceAsText } from '../engine/slicer';
 import {
   auditEventHandlers,
   formatEventHandlerAuditAsText,
-  detectReactivitySmells,
-  formatReactivitySmellsAsText,
 } from '../engine/reactivity';
 import { extractComponentContract, formatContractAsText } from '../engine/contract';
 import { extractComponentOutline, formatOutlineAsText } from '../engine/outline';
 import { resolveWorkspacePath, findProjectRoot, PROJECT_ROOT_MARKERS, parseSafePositiveInt } from '../engine/path-resolver';
 import { getSourceLineRange, readSourceSnapshot, readSourceRef, sliceSourceSnapshot, readSourceFile } from '../engine/source-file';
 import { sourceRetrievalEvidence, derivedRetrievalEvidence, formatRetrievalEvidence } from '../engine/retrieval-evidence';
-import { mapSourceFile } from '../engine/source-map';
+import { mapSourceFile, formatSourceMapAsText } from '../engine/source-map';
 import { parseSfc } from '../engine/splitter';
-import { runCanonAudit } from '../engine/canon';
 import { inspectVueTreeInput } from '../engine/graph/vue-tree-input';
 import { loadAliasConfigWithDependencies } from '../engine/resolver';
 import { analyzePropImpact, formatPropImpactAsText } from '../engine/prop-impact';
@@ -132,17 +129,26 @@ const inspectComponentToolDefinition: McpToolDefinition = {
           complete: result.status === 'complete' && !templateIssue, selectionReason: 'Source regions of the explicitly requested file, bounded by max_regions and parser capability.',
           omissions: [...result.diagnostics.map(d => ({ code: d.code, reason: d.message })), ...result.unsupported.map(reason => ({ code: 'UNSUPPORTED_CAPABILITY', reason }))],
         });
-        return { structuredContent: { ...result, retrieval }, content: [{ type: 'text', text: isJson ? JSON.stringify({ ...result, retrieval }, null, 2) : `${formatSourceMap(result)}\n${formatRetrievalEvidence(retrieval)}` }] };
+        return { structuredContent: { ...result, retrieval }, content: [{ type: 'text', text: isJson ? JSON.stringify({ ...result, retrieval }, null, 2) : `${formatSourceMapAsText(result)}\n${formatRetrievalEvidence(retrieval)}` }] };
       }
 
       if (args.view === 'source' && args.source_ref) {
         const { snapshot, content } = await readSourceSnapshot(filePath);
         const source = sliceSourceSnapshot(snapshot, content, args.source_ref);
+        const wantsStructured = isJson || Boolean(args.include_structured || args.includeStructured);
         const retrieval = await sourceRetrievalEvidence({ workspace: targetPathHint ? resolveWorkspacePath(targetPathHint) : findProjectRoot(filePath), snapshot,
           policy: 'exact-source-ref-v1', query: { source_ref: args.source_ref }, complete: true, selectionReason: 'Exact hash-bound source reference explicitly requested by the caller.' });
-        return { structuredContent: { file: filePath, source_ref: args.source_ref, source, retrieval }, content: isJson
-          ? [{ type: 'text', text: JSON.stringify({ file: filePath, source_ref: args.source_ref, source, retrieval }, null, 2) }]
-          : [{ type: 'text', text: source }, { type: 'text', text: formatRetrievalEvidence(retrieval) }] };
+        return {
+          structuredContent: {
+            file: filePath,
+            source_ref: args.source_ref,
+            ...(wantsStructured ? { source } : {}),
+            retrieval,
+          },
+          content: isJson
+            ? [{ type: 'text', text: JSON.stringify({ file: filePath, source_ref: args.source_ref, source, retrieval }, null, 2) }]
+            : [{ type: 'text', text: source }, { type: 'text', text: formatRetrievalEvidence(retrieval) }],
+        };
       }
       if (args.view === 'source') {
         return { isError: true, content: [{ type: 'text', text: "'view: source' requires a source_ref returned by 'view: map'." }] };
@@ -173,18 +179,42 @@ const inspectComponentToolDefinition: McpToolDefinition = {
           };
         }
         const selected = getSourceLineRange(snapshot, content, startLine, endLine);
+        const actualStartLine = selected.lineRange.startLine;
+        const actualEndLine = selected.lineRange.endLine;
         const source = await readSourceRef(filePath, selected.ref);
-        const retrieval = await sourceRetrievalEvidence({ workspace: targetPathHint ? resolveWorkspacePath(targetPathHint) : findProjectRoot(filePath), snapshot,
-          policy: 'inclusive-line-range-v1', query: { startLine, endLine, expectedHash: expectedHash ?? null }, complete: true,
-          selectionReason: 'Inclusive source line range explicitly requested by the caller.' });
+        const wantsStructured = isJson || Boolean(args.include_structured || args.includeStructured);
+        const clampNote = selected.clamped ? `clamped to EOF (L${actualEndLine}; requested L${endLine})` : undefined;
+        const retrieval = await sourceRetrievalEvidence({
+          workspace: targetPathHint ? resolveWorkspacePath(targetPathHint) : findProjectRoot(filePath),
+          snapshot,
+          policy: 'inclusive-line-range-v1',
+          query: {
+            startLine: actualStartLine,
+            endLine: actualEndLine,
+            ...(selected.clamped ? { requestedEndLine: endLine } : {}),
+            expectedHash: expectedHash ?? null,
+          },
+          complete: true,
+          selectionReason: clampNote
+            ? `Inclusive source line range explicitly requested by the caller (${clampNote}).`
+            : 'Inclusive source line range explicitly requested by the caller.',
+        });
+        const rangeMeta = {
+          file: filePath,
+          startLine: actualStartLine,
+          endLine: actualEndLine,
+          ...(selected.clamped ? { clamped: true, requestedEndLine: endLine } : {}),
+          source_ref: selected.ref,
+          retrieval,
+        };
         return {
           content: [{
             type: 'text',
             text: isJson
-              ? JSON.stringify({ file: filePath, startLine, endLine, source_ref: selected.ref, source, retrieval }, null, 2)
+              ? JSON.stringify({ ...rangeMeta, source }, null, 2)
               : source,
           }, ...(!isJson ? [{ type: 'text' as const, text: formatRetrievalEvidence(retrieval) }] : [])],
-          structuredContent: { file: filePath, startLine, endLine, source_ref: selected.ref, source, retrieval },
+          structuredContent: wantsStructured ? { ...rangeMeta, source } : rangeMeta,
         };
       }
 
@@ -217,9 +247,7 @@ const inspectComponentToolDefinition: McpToolDefinition = {
             type: 'text',
             text: isJson
               ? JSON.stringify({ file: filePath, blocks, retrieval }, null, 2)
-              : [`Vue SFC blocks in ${filePath}:`, ...blocks.map(block =>
-                  `- Block ${block.index} (${block.type}): lines ${block.sourceStartLine}-${block.sourceEndLine}; content starts at ${block.startLine}:${block.startColumn}, ends before ${block.endLine}:${block.endColumn}`),
-                'Use source_range with inclusive start_line/end_line to retrieve exact file lines.', formatRetrievalEvidence(retrieval)].join('\n'),
+              : `${formatSfcSectionsAsText(filePath, blocks)}\n${formatRetrievalEvidence(retrieval)}`,
           }],
         };
       }
@@ -229,7 +257,6 @@ const inspectComponentToolDefinition: McpToolDefinition = {
         const primary = await readSourceSnapshot(filePath);
         const outlineResult = await extractComponentOutline(filePath, {
           path: filePath,
-          maxFunctionLines: args.max_function_lines ? Number(args.max_function_lines) : undefined,
         });
 
         let configFingerprint: string | undefined;
@@ -251,7 +278,7 @@ const inspectComponentToolDefinition: McpToolDefinition = {
           workspace: targetPathHint ? resolveWorkspacePath(targetPathHint) : findProjectRoot(filePath),
           snapshot: primary.snapshot,
           policy: 'component-outline-v1',
-          query: { maxFunctionLines: args.max_function_lines ? Number(args.max_function_lines) : null },
+          query: {},
           complete: false,
           selectionReason: 'Requested symbol outline and derived cross-file mappings; analyzer may read additional source versions.',
           dependencies: outlineResult.dependencies,
@@ -291,8 +318,10 @@ const inspectComponentToolDefinition: McpToolDefinition = {
             ],
           };
         }
+        const wantsStructured = isJson || Boolean(args.include_structured || args.includeStructured);
+        const { code: _omittedCode, ...resultWithoutCode } = result;
         return {
-          structuredContent: { ...result, retrieval },
+          structuredContent: { ...(wantsStructured ? result : resultWithoutCode), retrieval },
           content: [
             {
               type: 'text',
@@ -302,9 +331,7 @@ const inspectComponentToolDefinition: McpToolDefinition = {
         };
       }
 
-      // Sub-action B: Public interface contract with reactivity smells & optional event handler audit
-      const inferProps = args.infer_props !== false && args.inferProps !== false;
-      const resolveGlobals = args.resolve_globals !== false && args.resolveGlobals !== false;
+      // Sub-action B: Public interface contract with optional event handler audit
       const auditEvents = Boolean(args.audit_events || args.auditEvents);
       const wsRoot = targetPathHint ? resolveWorkspacePath(targetPathHint) : resolveProjectOwnership(filePath).ownerRoot ?? findProjectRoot(filePath);
 
@@ -318,7 +345,7 @@ const inspectComponentToolDefinition: McpToolDefinition = {
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         omissions = [];
         primary = await readSourceSnapshot(filePath);
-        contract = await extractComponentContract(filePath, primary.content, { inferProps, resolveGlobals, workspaceRoot: wsRoot });
+        contract = await extractComponentContract(filePath, primary.content, { workspaceRoot: wsRoot });
         const boundaryOmission = renderBoundaryOmission(contract.renderBoundary);
         if (boundaryOmission) omissions.push(boundaryOmission);
         omissions.push(...(contract.projectContext?.diagnostics ?? []));
@@ -347,18 +374,6 @@ const inspectComponentToolDefinition: McpToolDefinition = {
               reason: templateIssue.reason,
             });
           }
-        }
-
-        // Detect Reactivity Smells directly as first-class diagnostics
-        const reactivitySmells = await detectReactivitySmells({ path: filePath });
-        contract.reactivitySmells = reactivitySmells;
-
-        try {
-          contract.patternDiagnostics = await runCanonAudit(primary.snapshot, primary.content,
-            contract.framework === 'vue-composable' ? 'vue' : contract.framework as import('../types').FrontendFramework,
-            { projectContext: contract.projectContext, projectRoot: wsRoot });
-        } catch (error) {
-          omissions.push({ code: 'PATTERN_AUDIT_FAILED', reason: error instanceof Error ? error.message : String(error) });
         }
 
         if (auditEvents) {
@@ -442,7 +457,7 @@ const inspectComponentToolDefinition: McpToolDefinition = {
           workspace: wsRoot,
           snapshot: primary.snapshot,
           policy: 'component-contract-v1',
-          query: { inferProps, resolveGlobals, auditEvents, impact },
+          query: { auditEvents, impact },
           complete: omissions.length === 0,
           selectionReason: 'Derived public component contract and diagnostics for the explicitly requested file.',
           omissions,
@@ -496,7 +511,7 @@ const inspectComponentToolDefinition: McpToolDefinition = {
         content: [
           {
             type: 'text',
-            text: isJson ? JSON.stringify({ ...contract, retrieval }, null, 2) : contractText,
+            text: isJson ? JSON.stringify({ ...contract, retrieval }) : contractText,
           },
         ],
       };
@@ -510,21 +525,44 @@ const inspectComponentToolDefinition: McpToolDefinition = {
   },
 };
 
-export const inspectComponentTool: McpToolDefinition = withRetrievalEvidence(inspectComponentToolDefinition);
-
-function formatSourceMap(result: Awaited<ReturnType<typeof mapSourceFile>>): string {
-  const lines = [`${result.framework} map: ${result.snapshot.file}`, `Status: ${result.status}`];
-  for (const item of result.regions) {
-    const range = item.lineRange ? `${item.lineRange.startLine}-${item.lineRange.endLine}` : 'empty';
-    lines.push(`- ${item.kind}${item.name ? ` ${item.name}` : ''}: lines ${range} (source_ref ${item.ref.sha256.slice(0, 12)}:${item.ref.startOffset}-${item.ref.endOffset})`);
-    for (const child of item.children ?? []) {
-      const childRange = child.lineRange ? `${child.lineRange.startLine}-${child.lineRange.endLine}` : 'empty';
-      lines.push(`  - ${child.kind}: lines ${childRange} (source_ref ${child.ref.sha256.slice(0, 12)}:${child.ref.startOffset}-${child.ref.endOffset})`);
-    }
-  }
-  for (const diagnostic of result.diagnostics) lines.push(`! ${diagnostic.code}: ${diagnostic.message}`);
-  if (result.coverage?.truncated || result.coverage?.childRegionsTruncated) lines.push(`Truncated: ${JSON.stringify(result.coverage)}`);
-  if (result.unsupported.length) lines.push(`Unsupported: ${result.unsupported.join(', ')}`);
-  return lines.join('\n');
+function formatSfcSectionsAsText(
+  filePath: string,
+  blocks: Array<{
+    index: number;
+    type: string;
+    sourceStartLine: number;
+    sourceEndLine: number;
+    startLine: number;
+    startColumn: number;
+    endLine: number;
+    endColumn: number;
+  }>
+): string {
+  return [
+    `Vue SFC blocks in ${filePath}:`,
+    ...blocks.map(
+      block =>
+        `- Block ${block.index} (${block.type}): lines ${block.sourceStartLine}-${block.sourceEndLine}; content starts at ${block.startLine}:${block.startColumn}, ends before ${block.endLine}:${block.endColumn}`
+    ),
+    'Use source_range with inclusive start_line/end_line to retrieve exact file lines.',
+  ].join('\n');
 }
+
+export const inspectComponentTool: McpToolDefinition = withRetrievalEvidence(inspectComponentToolDefinition, {
+  formatText: (data, page) => {
+    if (page.path === 'functions' && Array.isArray(data.functions)) {
+      return formatOutlineAsText(data as any);
+    }
+    if (page.path === 'regions' && Array.isArray(data.regions) && data.snapshot) {
+      return formatSourceMapAsText(data as any);
+    }
+    if (page.path === 'blocks' && Array.isArray(data.blocks) && data.file) {
+      return formatSfcSectionsAsText(String(data.file), data.blocks);
+    }
+    if (page.path === 'propImpact.props' && Array.isArray(data.props) && data.propImpact) {
+      return [formatContractAsText(data as any), formatPropImpactAsText(data.propImpact)].filter(Boolean).join('\n\n');
+    }
+    return undefined;
+  },
+});
 

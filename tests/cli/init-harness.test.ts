@@ -1,11 +1,11 @@
 import { afterEach, expect, test } from 'bun:test';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { setupHarnessConfigs } from '../../src/cli/mcp-configs';
-import { handleStrataInit } from '../../src/cli/commands/init';
+import { detectExistingHarnesses, detectProjectProfile, handleStrataInit } from '../../src/cli/commands/init';
 import { closeAllDatabases } from '../../src/engine/storage/schema';
 import { TOOL_CATALOG } from '../../src/tools/catalog';
-import { STRATA_FRONTEND_RULE, STRATA_INSPECT_SKILL } from '../../src/cli/templates';
+import { STRATA_FRONTEND_RULE, STRATA_INSPECT_SKILL, STRATA_TS_RULE, STRATA_TS_SKILL } from '../../src/cli/templates';
 import { STRATA_INSTRUCTIONS } from '../../src/instructions';
 
 const roots: string[] = [];
@@ -81,7 +81,7 @@ test('handleStrataInit initializes project, agent artifacts, and harness config'
 
   expect(existsSync(join(root, '.strata'))).toBe(true);
   expect(existsSync(join(root, 'CLAUDE.md'))).toBe(true);
-  expect(existsSync(join(root, '.claude', 'commands', 'strata-inspect.md'))).toBe(true);
+  expect(existsSync(join(root, '.claude', 'commands', 'use-strata.md'))).toBe(true);
   expect(existsSync(join(root, '.mcp.json'))).toBe(true);
   expect(existsSync(join(root, '.claude', 'settings.json'))).toBe(true);
   expect(existsSync(join(root, '.claude', 'rules'))).toBe(false);
@@ -117,9 +117,15 @@ test('handleStrataInit initializes Google Antigravity with .gemini and GEMINI.md
   expect(existsSync(join(root, '.strata'))).toBe(true);
   expect(existsSync(join(root, 'GEMINI.md'))).toBe(true);
   expect(existsSync(join(root, '.gemini', 'rules', 'strata-frontend.md'))).toBe(true);
-  expect(existsSync(join(root, '.gemini', 'skills', 'strata-inspect', 'SKILL.md'))).toBe(true);
+  expect(existsSync(join(root, '.gemini', 'skills', 'use-strata', 'SKILL.md'))).toBe(true);
   expect(existsSync(join(root, '.gemini', 'mcp_config.json'))).toBe(true);
   expect(existsSync(join(root, '.gemini', 'hooks.json'))).toBe(true);
+
+  const geminiRule = readFileSync(join(root, '.gemini', 'rules', 'strata-frontend.md'), 'utf8');
+  const geminiMd = readFileSync(join(root, 'GEMINI.md'), 'utf8');
+  expect(geminiRule).toBe(STRATA_FRONTEND_RULE);
+  expect(geminiMd).not.toContain('Tool Routing Matrix');
+  expect(geminiMd).toContain('.gemini/rules/strata-frontend.md');
 
   const geminiConfig = JSON.parse(readFileSync(join(root, '.gemini', 'mcp_config.json'), 'utf8'));
   expect(geminiConfig.mcpServers?.strata?.command).toBe('strata');
@@ -176,7 +182,7 @@ test('handleStrataInit initializes OpenAI Codex with AGENTS.md, config.toml, ski
   expect(existsSync(join(root, 'AGENTS.md'))).toBe(true);
   expect(existsSync(join(root, '.codex', 'config.toml'))).toBe(true);
   expect(existsSync(join(root, '.codex', 'rules'))).toBe(false);
-  expect(existsSync(join(root, '.codex', 'skills', 'strata-inspect', 'SKILL.md'))).toBe(true);
+  expect(existsSync(join(root, '.codex', 'skills', 'use-strata', 'SKILL.md'))).toBe(true);
   expect(existsSync(join(root, '.codex', 'hooks', 'strata-post-write.sh'))).toBe(true);
   expect(existsSync(join(root, '.codex', 'hooks.json'))).toBe(true);
 
@@ -198,7 +204,7 @@ test('handleStrataInit initializes OpenCode in opencode folder with skills, hook
   expect(existsSync(join(root, 'AGENTS.md'))).toBe(true);
   expect(existsSync(join(root, 'opencode.json'))).toBe(true);
   expect(existsSync(join(root, 'opencode', 'rules'))).toBe(false);
-  expect(existsSync(join(root, 'opencode', 'skills', 'strata-inspect', 'SKILL.md'))).toBe(true);
+  expect(existsSync(join(root, 'opencode', 'skills', 'use-strata', 'SKILL.md'))).toBe(true);
   expect(existsSync(join(root, 'opencode', 'hooks', 'strata-post-write.sh'))).toBe(true);
   expect(existsSync(join(root, 'opencode', 'hooks.json'))).toBe(true);
 });
@@ -217,8 +223,77 @@ test('handleStrataInit initializes .agents general harness with skills, hooks, a
   expect(existsSync(join(root, 'AGENTS.md'))).toBe(true);
   expect(existsSync(join(root, '.agents', 'mcp.json'))).toBe(true);
   expect(existsSync(join(root, '.agents', 'rules'))).toBe(false);
-  expect(existsSync(join(root, '.agents', 'skills', 'strata-inspect', 'SKILL.md'))).toBe(true);
+  expect(existsSync(join(root, '.agents', 'skills', 'use-strata', 'SKILL.md'))).toBe(true);
   expect(existsSync(join(root, '.agents', 'hooks', 'strata-post-write.sh'))).toBe(true);
   expect(existsSync(join(root, '.agents', 'hooks.json'))).toBe(true);
+});
+
+test('multi-harness init deduplicates identical Antigravity rule and skill copies and skips GEMINI.md', async () => {
+  const root = tempDir();
+  writeFileSync(join(root, 'package.json'), '{"name":"vue-app","dependencies":{"vue":"3"}}');
+  writeFileSync(join(root, 'App.vue'), '<template><div>Test</div></template>');
+
+  await handleStrataInit({
+    cwd: root,
+    harness: 'all',
+    yes: true,
+  });
+
+  const agentsDoc = readFileSync(join(root, 'AGENTS.md'), 'utf8');
+  const geminiRule = readFileSync(join(root, '.gemini', 'rules', 'strata-frontend.md'), 'utf8');
+  expect(agentsDoc).toBe(STRATA_FRONTEND_RULE);
+  expect(geminiRule).not.toBe(STRATA_FRONTEND_RULE);
+  expect(geminiRule).toContain('AGENTS.md');
+  expect(geminiRule).toContain('strata-mcp');
+  expect(geminiRule).toContain('inspect_component');
+  expect(existsSync(join(root, 'GEMINI.md'))).toBe(false);
+  expect(existsSync(join(root, '.agents', 'skills', 'use-strata', 'SKILL.md'))).toBe(true);
+  expect(existsSync(join(root, '.gemini', 'skills', 'use-strata', 'SKILL.md'))).toBe(false);
+});
+
+test('non-UI TypeScript project receives concise TS/JS guidance instead of Vue/Nuxt/Pinia rules', async () => {
+  const root = tempDir();
+  writeFileSync(join(root, 'package.json'), JSON.stringify({
+    name: 'spector-mcp',
+    devDependencies: { typescript: '^5.0.0', '@types/node': '^22.0.0' },
+  }));
+  writeFileSync(join(root, 'tsconfig.json'), '{"compilerOptions":{"strict":true}}');
+  mkdirSync(join(root, 'src'), { recursive: true });
+  writeFileSync(join(root, 'src', 'index.ts'), 'export function main() { return 1; }\n');
+
+  const profile = await detectProjectProfile(root);
+  expect(profile.isUiProject).toBe(false);
+
+  await handleStrataInit({
+    cwd: root,
+    harness: 'all',
+    yes: true,
+  });
+
+  const agentsDoc = readFileSync(join(root, 'AGENTS.md'), 'utf8');
+  const skillDoc = readFileSync(join(root, '.agents', 'skills', 'use-strata', 'SKILL.md'), 'utf8');
+  expect(agentsDoc).toBe(STRATA_TS_RULE);
+  expect(skillDoc).toBe(STRATA_TS_SKILL);
+  expect(agentsDoc).not.toMatch(/Pinia|Nuxt|Svelte|Astro|Inertia|Zustand/i);
+  expect(skillDoc).not.toMatch(/Pinia|Nuxt|Svelte|Astro|Inertia|Zustand|v-model/i);
+});
+
+test('init without --harness scopes automatically to detected workspace client folders', async () => {
+  const root = tempDir();
+  writeFileSync(join(root, 'package.json'), '{"name":"cli-app"}');
+  mkdirSync(join(root, '.claude'), { recursive: true });
+
+  expect(detectExistingHarnesses(root)).toEqual(['claude']);
+
+  await handleStrataInit({
+    cwd: root,
+    yes: true,
+  });
+
+  expect(existsSync(join(root, 'CLAUDE.md'))).toBe(true);
+  expect(existsSync(join(root, '.mcp.json'))).toBe(true);
+  expect(existsSync(join(root, '.gemini'))).toBe(false);
+  expect(existsSync(join(root, '.codex'))).toBe(false);
+  expect(existsSync(join(root, 'opencode.json'))).toBe(false);
 });
 

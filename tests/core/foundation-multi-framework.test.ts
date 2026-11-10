@@ -13,7 +13,6 @@ import { SvelteDocumentAdapter } from '../../src/adapters/svelte';
 import { JsxDocumentAdapter } from '../../src/adapters/jsx';
 import { ScriptDocumentAdapter } from '../../src/adapters/script';
 import { mapSourceFile } from '../../src/engine/source-map';
-import { runCanonAudit } from '../../src/engine/canon';
 import { readSourceRef, readSourceSnapshot } from '../../src/engine/source-file';
 import { extractComponentContract } from '../../src/engine/contract';
 
@@ -315,189 +314,6 @@ let x = ;
   });
 
   // =========================================================================
-  // 5. Canonical Diagnostic Engine (Happy, Unhappy, Edge Cases, Negative Tests)
-  // =========================================================================
-  describe('Canonical Diagnostic Engine (Fact -> Smell -> Canon)', () => {
-    test('Happy Path: SolidJS props destructuring anti-pattern detected', async () => {
-      const testDir = await fs.mkdtemp(join(tmpdir(), 'strata-canon-sol-'));
-      const filePath = join(testDir, 'Bad.tsx');
-      const code = `export function BadComponent(props: any) {
-  const { count, active } = props;
-  return <div>{count}</div>;
-}`;
-
-      try {
-        await fs.writeFile(filePath, code, 'utf8');
-        const { snapshot, content } = await readSourceSnapshot(filePath);
-
-        const diags = await runCanonAudit(snapshot, content, 'solid');
-        expect(diags.length).toBe(1);
-
-        const d = diags[0];
-        expect(d.ruleId).toBe('solid/no-props-destructure');
-        expect(d.severity).toBe('error');
-        expect(d.category).toBe('reactivity');
-        expect(d.smell.title).toContain('Props Destructuring');
-        expect(d.canon.summary).toContain('props.count');
-
-        // Ground Truth Fact Verification
-        const sliced = await readSourceRef(filePath, d.fact.ref);
-        expect(sliced).toBe('const { count, active } = props;');
-      } finally {
-        await fs.rm(testDir, { recursive: true, force: true });
-      }
-    });
-
-    test('Negative Test (No False Positive): SolidJS direct prop access is NOT flagged', async () => {
-      const testDir = await fs.mkdtemp(join(tmpdir(), 'strata-canon-sol-ok-'));
-      const filePath = join(testDir, 'Good.tsx');
-      const code = `export function GoodComponent(props: any) {
-  return <div>{props.count}</div>;
-}`;
-
-      try {
-        await fs.writeFile(filePath, code, 'utf8');
-        const { snapshot, content } = await readSourceSnapshot(filePath);
-
-        const diags = await runCanonAudit(snapshot, content, 'solid');
-        expect(diags).toEqual([]);
-      } finally {
-        await fs.rm(testDir, { recursive: true, force: true });
-      }
-    });
-
-    test('Happy Path: Vue direct prop mutation via v-model detected', async () => {
-      const testDir = await fs.mkdtemp(join(tmpdir(), 'strata-canon-vue-'));
-      const filePath = join(testDir, 'Child.vue');
-      const code = `<script setup>const props = defineProps(['foo']);</script>
-<template><input v-model="props.foo" /></template>`;
-
-      try {
-        await fs.writeFile(filePath, code, 'utf8');
-        const { snapshot, content } = await readSourceSnapshot(filePath);
-
-        const diags = await runCanonAudit(snapshot, content, 'vue');
-        expect(diags.length).toBe(1);
-        expect(diags[0].ruleId).toBe('vue/no-prop-mutation');
-        expect(diags[0].severity).toBe('error');
-
-        const sliced = await readSourceRef(filePath, diags[0].fact.ref);
-        expect(sliced).toBe('v-model="props.foo"');
-      } finally {
-        await fs.rm(testDir, { recursive: true, force: true });
-      }
-    });
-
-    test('Negative Test: Vue 3.5+ reactive props destructuring is NOT flagged (No false positive)', async () => {
-      const testDir = await fs.mkdtemp(join(tmpdir(), 'strata-vue35-'));
-      const filePath = join(testDir, 'ModernVue.vue');
-      const code = `<script setup lang="ts">
-const { count = 0 } = defineProps<{ count?: number }>();
-</script>
-<template><div>{count}</div></template>`;
-
-      try {
-        // Mock package.json declaring Vue 3.5.13
-        await fs.writeFile(
-          join(testDir, 'package.json'),
-          JSON.stringify({ dependencies: { vue: '^3.5.13' } })
-        );
-        await fs.writeFile(filePath, code, 'utf8');
-        const { snapshot, content } = await readSourceSnapshot(filePath);
-
-        const diags = await runCanonAudit(snapshot, content, 'vue');
-        // Vue 3.5+ should NOT flag defineProps destructure!
-        expect(diags.find(d => d.ruleId === 'vue/no-props-destructure')).toBeUndefined();
-      } finally {
-        await fs.rm(testDir, { recursive: true, force: true });
-      }
-    });
-
-    test('Happy Path: Next.js event handler in Server Component detected', async () => {
-      const testDir = await fs.mkdtemp(join(tmpdir(), 'strata-rsc-'));
-      const filePath = join(testDir, 'ServerComp.tsx');
-      // No 'use client' directive
-      const code = `export default function ServerComp() {
-  return <button onClick={() => console.log('click')}>Action</button>;
-}`;
-
-      try {
-        await fs.writeFile(filePath, code, 'utf8');
-        const { snapshot, content } = await readSourceSnapshot(filePath);
-
-        const diags = await runCanonAudit(snapshot, content, 'next');
-        expect(diags.length).toBe(1);
-        expect(diags[0].ruleId).toBe('next/rsc-event-handler');
-        expect(diags[0].severity).toBe('error');
-      } finally {
-        await fs.rm(testDir, { recursive: true, force: true });
-      }
-    });
-
-    test('Negative Test: Next.js Client Component with "use client" is NOT flagged', async () => {
-      const testDir = await fs.mkdtemp(join(tmpdir(), 'strata-client-ok-'));
-      const filePath = join(testDir, 'ClientComp.tsx');
-      const code = `'use client';
-export default function ClientComp() {
-  return <button onClick={() => console.log('ok')}>Action</button>;
-}`;
-
-      try {
-        await fs.writeFile(filePath, code, 'utf8');
-        const { snapshot, content } = await readSourceSnapshot(filePath);
-
-        const diags = await runCanonAudit(snapshot, content, 'next');
-        expect(diags).toEqual([]);
-      } finally {
-        await fs.rm(testDir, { recursive: true, force: true });
-      }
-    });
-
-    test('Edge Case: Diagnostic filtering by category, severity, and maxDiagnostics', async () => {
-      const testDir = await fs.mkdtemp(join(tmpdir(), 'strata-filter-'));
-      const filePath = join(testDir, 'MultiSmell.svelte');
-      const code = `<script>
-export let propA = 1;
-export let propB = 2;
-$: sum = propA + propB;
-</script>`;
-
-      try {
-        await fs.writeFile(filePath, code, 'utf8');
-        const { snapshot, content } = await readSourceSnapshot(filePath);
-
-        // Filter: maxDiagnostics = 1
-        const capped = await runCanonAudit(snapshot, content, 'svelte', { maxDiagnostics: 1 });
-        expect(capped.length).toBe(1);
-
-        // Filter: severity = 'error' (these are warnings, so 0 returned)
-        const errors = await runCanonAudit(snapshot, content, 'svelte', { severity: 'error' });
-        expect(errors.length).toBe(0);
-
-        // Filter: category = 'legacy-syntax'
-        const legacy = await runCanonAudit(snapshot, content, 'svelte', { category: 'legacy-syntax' });
-        expect(legacy.length).toBe(3);
-      } finally {
-        await fs.rm(testDir, { recursive: true, force: true });
-      }
-    });
-
-    test('Unhappy Path: Empty file content returns empty diagnostics without error', async () => {
-      const testDir = await fs.mkdtemp(join(tmpdir(), 'strata-empty-diag-'));
-      const filePath = join(testDir, 'Empty.tsx');
-      try {
-        await fs.writeFile(filePath, '', 'utf8');
-        const { snapshot, content } = await readSourceSnapshot(filePath);
-
-        const diags = await runCanonAudit(snapshot, content, 'react');
-        expect(diags).toEqual([]);
-      } finally {
-        await fs.rm(testDir, { recursive: true, force: true });
-      }
-    });
-  });
-
-  // =========================================================================
   // 6. Contract Integration & extractComponentContract (Regression Checks)
   // =========================================================================
   describe('Contract Integration & extractComponentContract', () => {
@@ -541,10 +357,10 @@ export function SolidButton() {
       }
     });
 
-    test('extractComponentContract embeds patternDiagnostics directly in contract', async () => {
+    test('extractComponentContract returns structural props without legacy pattern diagnostics', async () => {
       const testDir = await fs.mkdtemp(join(tmpdir(), 'strata-contract-diag-'));
       const filePath = join(testDir, 'SmellyVue.vue');
-      const code = `<script setup>const props = defineProps(['val']);</script>
+      const code = `<script setup>const props = defineProps({ val: String });</script>
 <template><input v-model="props.val" /></template>`;
 
       try {
@@ -552,9 +368,8 @@ export function SolidButton() {
         const contract = await extractComponentContract(filePath);
 
         expect(contract.framework).toBe('vue');
-        expect(contract.patternDiagnostics).toBeDefined();
-        expect(contract.patternDiagnostics?.length).toBeGreaterThan(0);
-        expect(contract.patternDiagnostics?.[0].ruleId).toBe('vue/no-prop-mutation');
+        expect(contract).not.toHaveProperty('patternDiagnostics');
+        expect(contract.props.some(prop => prop.name === 'val')).toBe(true);
       } finally {
         await fs.rm(testDir, { recursive: true, force: true });
       }

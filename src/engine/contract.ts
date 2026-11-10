@@ -1,9 +1,9 @@
-import { readSourceFile, readSourceSnapshot } from './source-file';
+import { readSourceFile } from './source-file';
+import { createDocumentAdapter } from '../adapters/factory';
 import { moduleDirective } from './parsers/ts-syntax';
 import { reactBindings } from './parsers/react-bindings';
 import { jsxDomEventName } from './parsers/jsx-events';
 import { isOwnedNextAppFile } from './project-ownership';
-import { runCanonAudit } from './canon';
 import { extractNuxtPageMeta, extractNextSegmentConfig } from './routes';
 import { existsSync, promises as fs, readFileSync } from 'node:fs';
 import { basename, extname, join, resolve, dirname } from 'node:path';
@@ -26,15 +26,12 @@ import type {
   ComponentModelContract,
   ComponentPropContract,
   ComponentSlotDetail,
-  ComponentStyleTokens,
   ComponentVariantsInfo,
   ContractOptions,
   DataDependencyInfo,
   FormContract,
   FormFieldContract,
   FrontendFramework,
-  GlobalSymbolInfo,
-  InferredPropDetail,
   RenderBoundaryInfo,
   ProjectOwnershipInfo,
   StateAccessMode,
@@ -52,7 +49,6 @@ import { extractSvelteContract } from './parsers/contract-svelte';
 import {
   extractStateDependencies,
   extractDataDependencies,
-  inferArrayItemShape,
 } from './parsers/state-dependency';
 
 // Re-export submodules for 100% backward compatibility
@@ -83,67 +79,12 @@ export type {
   FrameworkDetectionResult,
 };
 
-
-export function extractStyleTokens(content: string): ComponentStyleTokens | undefined {
-  const classRegex = /\b(?:class|className)\s*=\s*(?:["']([^"']+)["']|`([^`]+)`|\{["']([^"']+)["']\})/g;
-  const layoutTraps = new Set<string>();
-  const zIndices = new Set<string>();
-  const overflow = new Set<string>();
-  const positioning = new Set<string>();
-
-  for (const m of content.matchAll(classRegex)) {
-    const rawClasses = m[1] || m[2] || m[3] || '';
-    const tokens = rawClasses.split(/\s+/).filter(Boolean);
-
-    for (const t of tokens) {
-      if (/^overflow(?:-[xy])?-(?:hidden|clip|auto|scroll)$/.test(t)) {
-        overflow.add(t);
-        layoutTraps.add(t);
-      } else if (/^z-(?:0|10|20|30|40|50|auto|\[\S+\])$/.test(t)) {
-        zIndices.add(t);
-        if (t.startsWith('z-[') || t === 'z-50') {
-          layoutTraps.add(t);
-        }
-      } else if (/^(?:fixed|sticky|absolute|relative)$/.test(t)) {
-        positioning.add(t);
-        if (t === 'fixed' || t === 'sticky') {
-          layoutTraps.add(t);
-        }
-      } else if (/^(?:inset-0|pointer-events-none|modal|drawer)$/.test(t)) {
-        layoutTraps.add(t);
-      } else if (/^(?:backdrop-(?:blur|filter)(?:-\w+)?|transform|filter)$/.test(t)) {
-        layoutTraps.add(t);
-      }
-    }
-
-    const hasFixed = tokens.some((t) => t === 'fixed' || t === 'sticky');
-    const hasTransformOrBackdrop = tokens.some((t) =>
-      /^(?:transform|backdrop-(?:blur|filter)(?:-\w+)?|filter|scale-\d+|rotate-\d+|-?translate-[xy]-\S+)$/.test(t)
-    );
-    if (hasFixed && hasTransformOrBackdrop) {
-      layoutTraps.add('layout-clash:fixed-in-transform-stacking-context');
-    }
-  }
-
-  if (layoutTraps.size === 0 && zIndices.size === 0 && overflow.size === 0 && positioning.size === 0) {
-    return undefined;
-  }
-
-  return {
-    layoutTraps: Array.from(layoutTraps),
-    zIndices: Array.from(zIndices),
-    overflow: Array.from(overflow),
-    positioning: Array.from(positioning),
-  };
-}
-
 /**
  * Extracts Vue component contract from .vue source code.
  */
 
 import { extractLayoutStructure } from './layout-extractor';
 import { synthesizeBackendTargetHint } from './api-contract';
-import { analyzeBidirectionalTransport } from './transport-analyzer';
 
 export function extractRenderBoundary(
   filePath: string,
@@ -576,231 +517,6 @@ export function extractComponentVariants(
 }
 
 /**
- * Extracts out-of-band state and store dependencies (Pinia, Zustand, Redux, Context, inject).
- */
-
-export function inferPropsStructure(
-  content: string,
-  props: ComponentPropContract[]
-): InferredPropDetail[] {
-  const result: InferredPropDetail[] = [];
-
-  for (const p of props) {
-    const propName = p.name;
-    const propAccessRegex = new RegExp(
-      `(?:props\\.)?\\b${propName}(?:\\.value)?\\?\\.([A-Za-z0-9_$]+)|(?:props\\.)?\\b${propName}(?:\\.value)?\\.([A-Za-z0-9_$]+)`,
-      'g'
-    );
-
-    const propertiesMap = new Map<string, { type?: string; usage?: string }>();
-
-    for (const match of content.matchAll(propAccessRegex)) {
-      const property = match[1] || match[2];
-      if (
-        !property ||
-        property === 'value' ||
-        property === 'map' ||
-        property === 'filter' ||
-        property === 'forEach' ||
-        property === 'reduce' ||
-        property === 'length' ||
-        property === 'slice' ||
-        property === 'splice' ||
-        property === 'find' ||
-        property === 'findIndex' ||
-        property === 'includes' ||
-        property === 'some' ||
-        property === 'every'
-      ) {
-        continue;
-      }
-
-      let inferredType = 'any';
-      let usage: string | undefined;
-
-      const vForRegex = new RegExp(
-        `v-for=['"][^'"]*\\bin\\s+[^'"]*\\b${propName}[^'"]*\\.${property}`,
-        'i'
-      );
-      if (
-        vForRegex.test(content) ||
-        content.includes(`.${property}.map(`) ||
-        content.includes(`.${property}.length`) ||
-        content.includes(`:${property}="`)
-      ) {
-        const itemShape = inferArrayItemShape(content, propName, property);
-        inferredType = itemShape || 'Array<Object>';
-        usage = itemShape
-          ? 'used in v-for / list rendering (item fields mapped)'
-          : 'used in v-for / list rendering';
-      } else if (property === 'links' || property === 'meta') {
-        inferredType = property === 'links' ? 'Array' : 'Object';
-        usage = 'pagination / navigation metadata';
-      } else if (
-        property === 'total' ||
-        property === 'count' ||
-        property === 'page' ||
-        property === 'id' ||
-        property === 'price' ||
-        property.includes('harga') ||
-        property.includes('total')
-      ) {
-        inferredType = 'Number';
-        usage = 'numeric metric / identifier';
-      } else if (
-        content.includes(`v-model="${propName}.${property}"`) ||
-        content.includes(`v-model:`) ||
-        property === 'search' ||
-        property === 'query'
-      ) {
-        inferredType = 'String';
-        usage = 'bound to form input / filter';
-      } else if (
-        content.includes(`v-if="${propName}.${property}"`) ||
-        content.includes(`!${propName}.${property}`) ||
-        property.startsWith('is_') ||
-        property.startsWith('has_')
-      ) {
-        inferredType = 'Boolean';
-        usage = 'conditional flag';
-      }
-
-      if (
-        !propertiesMap.has(property) ||
-        (inferredType !== 'any' && propertiesMap.get(property)?.type === 'any')
-      ) {
-        propertiesMap.set(property, { type: inferredType, usage });
-      }
-    }
-
-    // Check if the root prop itself is directly iterated as an array (e.g. v-for="item in items" or items.map(...))
-    const directItemShape = inferArrayItemShape(content, propName);
-    if (directItemShape) {
-      propertiesMap.set('[]', {
-        type: directItemShape,
-        usage: 'directly iterated array (item fields mapped)',
-      });
-    }
-
-    if (propertiesMap.size > 0) {
-      result.push({
-        propName,
-        properties: Array.from(propertiesMap.entries()).map(([property, info]) => ({
-          property,
-          inferredType: info.type,
-          usageSnippet: info.usage,
-        })),
-      });
-    }
-  }
-
-  return result;
-}
-
-/**
- * Detects global, Ziggy, or auto-imported symbols called in the component.
- */
-export function detectGlobalSymbols(content: string): GlobalSymbolInfo[] {
-  const globals: GlobalSymbolInfo[] = [];
-  const foundNames = new Set<string>();
-
-  // 1. Detect Ziggy route helper: `route(...)`
-  if (/\broute\s*\([^)]*\)/.test(content)) {
-    if (!foundNames.has('route')) {
-      foundNames.add('route');
-      globals.push({
-        name: 'route',
-        category: 'ziggy-route',
-        hint: 'Ziggy Route Helper (Global)',
-      });
-    }
-  }
-
-  // 2. Detect Vue / Inertia / Nuxt special template/script globals
-  const specialGlobals = [
-    { pattern: /\$page\b/, name: '$page', hint: 'Inertia Shared Page Props' },
-    { pattern: /\$inertia\b/, name: '$inertia', hint: 'Inertia Router Instance' },
-    { pattern: /\$router\b/, name: '$router', hint: 'Vue Router Instance' },
-    { pattern: /\$route\b/, name: '$route', hint: 'Vue Current Route' },
-    { pattern: /\$attrs\b/, name: '$attrs', hint: 'Vue Fallthrough Attributes' },
-    { pattern: /\$slots\b/, name: '$slots', hint: 'Vue Slots' },
-    { pattern: /\$t\b/, name: '$t', hint: 'vue-i18n Translation Helper' },
-    { pattern: /\$pinia\b/, name: '$pinia', hint: 'Pinia Root Instance' },
-    { pattern: /\$config\b/, name: '$config', hint: 'Nuxt Runtime Config' },
-  ];
-
-  for (const sg of specialGlobals) {
-    if (sg.pattern.test(content) && !foundNames.has(sg.name)) {
-      foundNames.add(sg.name);
-      globals.push({
-        name: sg.name,
-        category: 'inferred-global',
-        hint: sg.hint,
-      });
-    }
-  }
-
-  // 3. Detect framework-level auto-imported composables (Nuxt, Vite unplugin-auto-import)
-  const commonFrontendAutoImports = [
-    { name: 'navigateTo', hint: 'Nuxt / Frontend Router Navigation Helper' },
-    { name: 'useFetch', hint: 'Nuxt / Universal Data Fetching Composable' },
-    { name: 'useLazyFetch', hint: 'Nuxt Lazy Data Fetching Composable' },
-    { name: 'useAsyncData', hint: 'Nuxt Async Data Fetching Composable' },
-    { name: 'useLazyAsyncData', hint: 'Nuxt Lazy Async Data Composable' },
-    { name: 'useState', hint: 'Nuxt SSR-Safe State Composable' },
-    { name: 'useRuntimeConfig', hint: 'Nuxt Runtime Config Composable' },
-    { name: 'useNuxtApp', hint: 'Nuxt Application Context Composable' },
-    { name: 'useCookie', hint: 'Nuxt SSR-Friendly Cookie Composable' },
-    { name: 'definePageMeta', hint: 'Nuxt Page Metadata Compiler Macro' },
-    { name: 'abortNavigation', hint: 'Nuxt Navigation Guard Abort Helper' },
-    { name: 'useHead', hint: 'Unhead / SEO Meta Composable' },
-    { name: 'useSeoMeta', hint: 'Nuxt SEO Meta Composable' },
-    { name: 'useRouter', hint: 'Vue Router Navigation Composable' },
-    { name: 'useRoute', hint: 'Vue Route Query & Params Composable' },
-    { name: 'useLocale', hint: 'i18n Locale Composable' },
-  ];
-
-  for (const cai of commonFrontendAutoImports) {
-    if (
-      new RegExp(`\\b${cai.name}\\s*\\(`).test(content) &&
-      !foundNames.has(cai.name) &&
-      !content.includes(`import { ${cai.name}`) &&
-      !content.includes(`import ${cai.name}`) &&
-      !content.includes(`const ${cai.name}`) &&
-      !content.includes(`function ${cai.name}`)
-    ) {
-      foundNames.add(cai.name);
-      globals.push({
-        name: cai.name,
-        category: 'auto-import',
-        hint: cai.hint,
-      });
-    }
-  }
-
-  // 4. Detect common global/auto-imported helper function calls
-  const helperCallMatches = content.matchAll(/\b(format[A-Z][A-Za-z0-9_$]+)\s*\(/g);
-  for (const m of helperCallMatches) {
-    const name = m[1];
-    if (
-      !foundNames.has(name) &&
-      !content.includes(`import { ${name}`) &&
-      !content.includes(`const ${name}`) &&
-      !content.includes(`function ${name}`)
-    ) {
-      foundNames.add(name);
-      globals.push({
-        name,
-        category: 'auto-import',
-        hint: 'Auto-Imported / Composable Helper',
-      });
-    }
-  }
-
-  return globals;
-}
-
-/**
  * Computes 1-based line number from a character offset.
  */
 function getLineFromOffset(content: string, offset: number): number {
@@ -1115,8 +831,6 @@ export function extractFormContracts(
 }
 
 export interface ExtractContractOptions {
-  inferProps?: boolean;
-  resolveGlobals?: boolean;
   path?: string;
   workspaceRoot?: string;
 }
@@ -1135,7 +849,7 @@ export async function extractComponentContract(
   const options: ExtractContractOptions =
     typeof explicitContentOrOptions === 'object'
       ? explicitContentOrOptions
-      : maybeOptions || { inferProps: true, resolveGlobals: true };
+      : maybeOptions || {};
 
   const content =
     explicitContent !== undefined
@@ -1195,30 +909,44 @@ export async function extractComponentContract(
   const workspaceRoot = options?.workspaceRoot || findProjectRoot(resolvedPath) || dirname(resolvedPath);
   try {
     const importedSymbols = extractImportedSymbols(resolvedPath, content);
+    const scriptBlocks = createDocumentAdapter(resolvedPath, content).getScriptBlocks();
     for (const [localName, importInfo] of importedSymbols.entries()) {
-      if (localName.startsWith('use') || importInfo.importedName.startsWith('use')) {
-        const composablePath = resolveModuleFilePath(resolvedPath, importInfo.sourceModule, workspaceRoot);
-        if (composablePath && existsSync(composablePath) && composablePath !== resolvedPath) {
-          const compContent = await readSourceFile(composablePath);
-          const compExt = extname(composablePath).toLowerCase();
-          const compFramework = compExt === '.vue' ? 'vue' : compExt === '.svelte' ? 'svelte' : compExt === '.astro' ? 'astro' : 'ts';
-          const compBoundaries = extractBoundaryContracts(compContent, compFramework);
-          if (compBoundaries.length > 0) {
-            for (const cb of compBoundaries) {
-              boundaryContracts.push({
-                ...cb,
-                source: 'imported-composable',
-                viaComposable: localName,
-              });
-            }
-            const compHash = createHash('sha256').update(compContent).digest('hex');
-            const canonCompPath = canonicalizePath(composablePath);
-            dependencies.set(canonCompPath, {
-              path: canonCompPath,
-              hash: compHash,
-              isExternal: false,
-            });
+      if (!localName.startsWith('use') && !importInfo.importedName.startsWith('use')) continue;
+      let called = false;
+      let shadowed = false;
+      for (const block of scriptBlocks) {
+        const ast = ts.createSourceFile(resolvedPath, block.content, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+        const visit = (node: ts.Node): void => {
+          if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === localName) called = true;
+          if ((ts.isParameter(node) || ts.isVariableDeclaration(node) || ts.isFunctionDeclaration(node))
+            && node.name && ts.isIdentifier(node.name) && node.name.text === localName) shadowed = true;
+          ts.forEachChild(node, visit);
+        };
+        visit(ast);
+      }
+      if (!called || shadowed) continue;
+      const composablePath = resolveModuleFilePath(resolvedPath, importInfo.sourceModule, workspaceRoot);
+      if (!composablePath || composablePath === resolvedPath || !existsSync(composablePath)) continue;
+      const compContent = await readSourceFile(composablePath);
+      const canonCompPath = canonicalizePath(composablePath);
+      // Track inspected modules even when no endpoint is found, so later edits invalidate the contract.
+      dependencies.set(canonCompPath, { path: canonCompPath, hash: createHash('sha256').update(compContent).digest('hex'), isExternal: false });
+      const ast = ts.createSourceFile(composablePath, compContent, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+      for (const statement of ast.statements) {
+        let hook: ts.FunctionDeclaration | ts.ArrowFunction | ts.FunctionExpression | undefined;
+        if (ts.isFunctionDeclaration(statement) && statement.body
+          && (statement.name?.text === importInfo.importedName
+            || (importInfo.importedName === 'default' && statement.modifiers?.some(m => m.kind === ts.SyntaxKind.DefaultKeyword)))) hook = statement;
+        if (ts.isVariableStatement(statement)) {
+          for (const declaration of statement.declarationList.declarations) {
+            if (ts.isIdentifier(declaration.name) && declaration.name.text === importInfo.importedName
+              && declaration.initializer && (ts.isArrowFunction(declaration.initializer) || ts.isFunctionExpression(declaration.initializer))) hook = declaration.initializer;
           }
+        }
+        if (!hook) continue;
+        const lineOffset = ast.getLineAndCharacterOfPosition(hook.getStart(ast)).line;
+        for (const cb of extractBoundaryContracts(hook.getText(ast), 'ts')) {
+          boundaryContracts.push({ ...cb, ...(cb.loc ? { loc: { ...cb.loc, line: cb.loc.line + lineOffset } } : {}), source: 'imported-composable', viaComposable: localName });
         }
       }
     }
@@ -1228,35 +956,6 @@ export async function extractComponentContract(
 
   const formContracts = extractFormContracts(content);
   const layoutStructure = extractLayoutStructure(resolvedPath, content, framework);
-  const transportContract = analyzeBidirectionalTransport(
-    boundaryContracts,
-    formContracts,
-    baseContract.props,
-    content
-  );
-
-  const shouldInferProps = options.inferProps !== false;
-  const shouldResolveGlobals = options.resolveGlobals !== false;
-
-  const inferredProps = shouldInferProps
-    ? inferPropsStructure(content, baseContract.props)
-    : undefined;
-  const globalSymbols = shouldResolveGlobals
-    ? detectGlobalSymbols(content)
-    : undefined;
-
-  let patternDiagnostics: any[] | undefined;
-  try {
-    const { snapshot } = await readSourceSnapshot(resolvedPath);
-    patternDiagnostics = await runCanonAudit(
-      snapshot,
-      content,
-      framework === 'vue-composable' ? 'vue' : framework,
-      { projectContext: detection.projectContext }
-    );
-  } catch {
-    // optional snapshot fallback
-  }
 
   const nuxtPageMeta = (framework === 'nuxt' || content.includes('definePageMeta'))
     ? extractNuxtPageMeta(content)
@@ -1281,16 +980,12 @@ export async function extractComponentContract(
     renderBoundary,
     stateDependencies,
     dataDependencies,
-    layoutStructure,
-    transportContract:
-      transportContract.egress.length > 0 || transportContract.ingress.length > 0
-        ? transportContract
+    layoutStructure:
+      layoutStructure && ((layoutStructure.rootWrapper && layoutStructure.rootWrapper.layoutTokens && layoutStructure.rootWrapper.layoutTokens.length > 0) || (layoutStructure.dynamicBindings && layoutStructure.dynamicBindings.length > 0) || (layoutStructure.visibilityDirectives && layoutStructure.visibilityDirectives.length > 0))
+        ? layoutStructure
         : undefined,
     boundaryContracts: boundaryContracts.length > 0 ? boundaryContracts : undefined,
     formContracts: formContracts.length > 0 ? formContracts : undefined,
-    inferredProps: inferredProps && inferredProps.length > 0 ? inferredProps : undefined,
-    globalSymbols: globalSymbols && globalSymbols.length > 0 ? globalSymbols : undefined,
-    patternDiagnostics: patternDiagnostics && patternDiagnostics.length > 0 ? patternDiagnostics : undefined,
     nuxtPageMeta,
     ...(nextSegmentConfig ? { nextSegmentConfig } : {}),
   };

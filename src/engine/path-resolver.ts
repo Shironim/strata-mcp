@@ -1,4 +1,4 @@
-import { existsSync, promises as fs, statSync } from 'node:fs';
+import { existsSync, promises as fs, statSync, readFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, normalize, resolve } from 'node:path';
 
 /**
@@ -92,6 +92,55 @@ export function findProjectRoot(fromPath: string): string {
   }
 
   return dirname(resolve(fromPath));
+}
+
+export const MONOREPO_ROOT_MARKERS = [
+  'pnpm-workspace.yaml',
+  'lerna.json',
+  'turbo.json',
+  'nx.json',
+];
+
+/**
+ * Searches upward for a monorepo root directory containing monorepo markers
+ * (pnpm-workspace.yaml, turbo.json, lerna.json, nx.json, or package.json with workspaces,
+ * or a root packages/ directory).
+ */
+export function findMonorepoRoot(fromPath: string): string | null {
+  try {
+    let dir = resolve(fromPath);
+    if (existsSync(dir) && !statSync(dir).isDirectory()) {
+      dir = dirname(dir);
+    }
+    while (true) {
+      for (const marker of MONOREPO_ROOT_MARKERS) {
+        if (existsSync(join(dir, marker))) {
+          return dir;
+        }
+      }
+      const pkgPath = join(dir, 'package.json');
+      if (existsSync(pkgPath)) {
+        try {
+          const content = JSON.parse(readFileSync(pkgPath, 'utf-8'));
+          if (content.workspaces) {
+            return dir;
+          }
+        } catch {
+          // ignore parse errors
+        }
+      }
+      if (existsSync(join(dir, 'packages')) && statSync(join(dir, 'packages')).isDirectory()) {
+        return dir;
+      }
+
+      const parent = dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+  } catch {
+    // Filesystem traversal error fallback
+  }
+  return null;
 }
 
 /**
@@ -250,15 +299,6 @@ export function parseSafePositiveInt(val: unknown, fallback?: number): number | 
 }
 
 /**
- * Safely parses a non-negative float (>= 0), preserving 0 and returning fallback if invalid or NaN.
- */
-export function parseSafeFloat(val: unknown, fallback?: number): number | undefined {
-  if (val === undefined || val === null || val === '') return fallback;
-  const n = Number(val);
-  return Number.isFinite(n) && n >= 0 ? n : fallback;
-}
-
-/**
  * Parses an array of strings or a comma-separated string into a clean string array.
  */
 export function parseStringList(val: unknown): string[] | undefined {
@@ -311,22 +351,15 @@ export function parseAliasMapInput(raw: unknown): Record<string, string> | undef
 }
 
 const AUDIT_TARGET_ALIASES: Record<string, string> = {
-  design: 'design-tokens',
-  bundle: 'bundle-health',
   api: 'api-contracts',
   apis: 'api-contracts',
-  archetype: 'archetype-drift',
 };
 
 export const VALID_AUDIT_TARGETS = new Set([
   'dead-components',
   'dead-state',
   'routes',
-  'similar-templates',
-  'design-tokens',
-  'bundle-health',
   'api-contracts',
-  'archetype-drift',
   'all',
 ]);
 

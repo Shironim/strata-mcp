@@ -1,6 +1,7 @@
 import { readSourceSnapshot } from '../source-file';
 import { inspectVueTreeInput } from './vue-tree-input';
 import { extractImports } from './path-helpers';
+import { extractPassedProps } from './props-drilling';
 import { existsSync, promises as fs, statSync, readFileSync } from "node:fs";
 import { basename, dirname, extname, join, normalize, resolve } from "node:path";
 import { collectFiles } from "../collector";
@@ -13,6 +14,8 @@ import {
   type AliasConfig,
 } from "../resolver";
 import { getWorkspaceDatabase } from "../database";
+import { isWorkspaceIndexed } from '../storage/schema';
+import { queryUpwardBlastRadiusFromDb } from '../storage/blast-radius';
 import type {
   ComponentTreeNode,
   ComponentTreeOptions,
@@ -21,13 +24,14 @@ import type {
   ContextDependencyNode,
   ContextDependencyRelation,
   EdgePayload,
+  PassedPropInfo,
 } from "../../types";
 import {
   findProjectRoot,
   isPageFile,
   resolveImportPath,
   resolveBarrelExport,
-} from "./resolution";
+} from "./path-helpers";
 import {
   normalizeScopeFilters,
   isPathInScope,
@@ -81,9 +85,136 @@ export async function getUpwardComponentTree(
   }
 
   const maxDepth = options.maxDepth !== undefined ? options.maxDepth : 3;
+  const limit = options.limit !== undefined ? options.limit : 20;
   const projectRoot = options.targetPath ? normalize(resolve(options.targetPath)) : findProjectRoot(entryPath);
-  const allFiles = (await collectFiles(projectRoot)).sort();
   const diagnostics: NonNullable<ComponentTreeResult['diagnostics']> = [];
+
+  // Fast Indexed Lookup via SQLite Graph DB (Reverse Dependency Indexing with cycle & limit detection)
+  if (isWorkspaceIndexed(projectRoot)) {
+    try {
+      const db = getWorkspaceDatabase(projectRoot);
+      const targetFile = db.query('SELECT id, is_page FROM files WHERE path = ?').get(normalize(entryPath)) as { id: number; is_page: number } | null;
+      if (targetFile) {
+        const edgeCount = (db.query('SELECT count(*) as count FROM edges WHERE child_file_id = ?').get(targetFile.id) as { count: number } | null)?.count ?? 0;
+        if (edgeCount > 0) {
+          const allConsumers = new Set<string>();
+          let maxDepthReached = 0;
+          let hasMore = false;
+          const scopeFilters = normalizeScopeFilters(options.scopeFilter);
+
+          const getParentEdges = db.prepare(`
+            SELECT p.path, p.is_page, e.import_type, e.is_rendered, f.content_hash
+            FROM edges e
+            JOIN files p ON e.parent_file_id = p.id
+            LEFT JOIN files f ON f.path = p.path
+            WHERE e.child_file_id = ?
+            ORDER BY p.path ASC
+          `);
+
+          const buildDbSubTree = (
+            filePath: string,
+            fileId: number,
+            isPage: boolean,
+            depth: number,
+            visitedInBranch: Set<string>
+          ): ComponentTreeNode => {
+            allConsumers.add(filePath);
+            if (depth > maxDepthReached) maxDepthReached = depth;
+            visitedInBranch.add(filePath);
+
+            const componentName = getDisambiguatedComponentName(filePath, isPage);
+            const isInDomain = isPathInScope(filePath, scopeFilters);
+
+            const node: ComponentTreeNode = {
+              component: componentName,
+              filePath,
+              depth,
+              isPage,
+              isExternalScope: !isInDomain ? true : undefined,
+              children: [],
+            };
+
+            if (!isInDomain) {
+              diagnostics.push({ code: 'SCOPE_BOUNDARY', filePath, sourceHash: null, depth,
+                reason: 'Upward node was not expanded because it is outside the requested scope filter.' });
+              return node;
+            }
+            if (depth >= maxDepth) {
+              diagnostics.push({ code: 'MAX_DEPTH_REACHED', filePath, sourceHash: null, depth,
+                reason: `Upward node was not expanded because max depth ${maxDepth} was reached; further consumers were not inspected.` });
+              return node;
+            }
+            if (allConsumers.size >= limit + 1) {
+              hasMore = true;
+              diagnostics.push({ code: 'UPWARD_RESULTS_TRUNCATED', filePath, sourceHash: null, depth,
+                reason: `Upward consumers limit (${limit}) reached; remaining consumers omitted.` });
+              return node;
+            }
+
+            const parents = getParentEdges.all(fileId) as Array<{ path: string; is_page: number; import_type: string; is_rendered: number; content_hash: string | null }>;
+            for (const parent of parents) {
+              if (allConsumers.size >= limit + 1) {
+                hasMore = true;
+                break;
+              }
+              const parentPath = normalize(parent.path);
+              const parentIsPage = parent.is_page === 1;
+              const isRendered = parent.is_rendered === 1;
+              const relationKind = parent.import_type === 'dynamic' ? 'dynamic-import' : isRendered ? 'render' : 'import';
+
+              if (visitedInBranch.has(parentPath)) {
+                diagnostics.push({
+                  code: 'CYCLE_TRUNCATED',
+                  filePath: parentPath,
+                  sourceHash: parent.content_hash ?? null,
+                  targetPath: parentPath,
+                  depth: depth + 1,
+                  reason: `Upward traversal stopped at consumer '${parentPath}' of '${filePath}' because this consumer already occurs in the current branch.`,
+                });
+                node.children.push({
+                  component: getDisambiguatedComponentName(parentPath, parentIsPage),
+                  filePath: parentPath,
+                  isPage: parentIsPage,
+                  isCircular: true,
+                  depth: depth + 1,
+                  isRendered,
+                  relationKind,
+                  children: [],
+                });
+                continue;
+              }
+
+              const parentFile = db.query('SELECT id FROM files WHERE path = ?').get(parentPath) as { id: number } | null;
+              if (parentFile) {
+                const parentNode = buildDbSubTree(parentPath, parentFile.id, parentIsPage, depth + 1, new Set(visitedInBranch));
+                parentNode.isRendered = isRendered;
+                parentNode.relationKind = relationKind;
+                node.children.push(parentNode);
+              }
+            }
+
+            return node;
+          };
+
+          const rootNode = buildDbSubTree(normalize(entryPath), targetFile.id, targetFile.is_page === 1, 0, new Set());
+
+          return {
+            root: rootNode,
+            totalComponents: allConsumers.size,
+            maxDepthReached,
+            direction: 'upward',
+            has_more: hasMore,
+            diagnostics,
+            propsDrilling: [],
+          };
+        }
+      }
+    } catch {
+      // Fallback to dynamic scan if database query encounters an issue
+    }
+  }
+
+  const allFiles = (await collectFiles(projectRoot)).sort();
 
   const autoDetectedAliases = await loadAliasConfig(entryPath);
   const explicitAliases = options.aliasMap
@@ -144,7 +275,13 @@ export async function getUpwardComponentTree(
     sourceFile: string,
     sourceContent: string,
     targetPath: string
-  ): { consumes: boolean; isRendered: boolean; relationKind: 'render' | 'import' | 'type' } | null {
+  ): {
+    consumes: boolean;
+    isRendered: boolean;
+    relationKind: 'render' | 'import' | 'type';
+    passedProps?: PassedPropInfo[];
+    isCascadingWrapper?: boolean;
+  } | null {
     if (sourceFile === targetPath) return null;
 
     // Check 1: Static and dynamic imports in source
@@ -165,10 +302,15 @@ export async function getUpwardComponentTree(
         }
         if (normalize(resolved) === targetPath) {
           const isRendered = isRenderedInContent(sourceContent, imp.alias || imp.name);
+          const candidateNames = getCandidateNames(imp.alias || imp.name);
+          const passedProps = extractPassedProps(sourceContent, candidateNames);
+          const isCascadingWrapper = passedProps.some((p) => p.isSpread || p.propName === '...spread' || p.propName === '...v-bind');
           return {
             consumes: true,
             isRendered,
             relationKind: isRendered ? 'render' : 'import',
+            passedProps: passedProps.length > 0 ? passedProps : undefined,
+            isCascadingWrapper: isCascadingWrapper || undefined,
           };
         }
       }
@@ -198,10 +340,14 @@ export async function getUpwardComponentTree(
       }
 
       if (isRenderedInContent(sourceContent, cand)) {
+        const passedProps = extractPassedProps(sourceContent, [cand]);
+        const isCascadingWrapper = passedProps.some((p) => p.isSpread || p.propName === '...spread' || p.propName === '...v-bind');
         return {
           consumes: true,
           isRendered: true,
           relationKind: 'render',
+          passedProps: passedProps.length > 0 ? passedProps : undefined,
+          isCascadingWrapper: isCascadingWrapper || undefined,
         };
       }
     }
@@ -211,6 +357,7 @@ export async function getUpwardComponentTree(
 
   const allConsumers = new Set<string>();
   let maxDepthReached = 0;
+  let hasMore = false;
 
   const scopeFilters = normalizeScopeFilters(options.scopeFilter);
 
@@ -248,8 +395,18 @@ export async function getUpwardComponentTree(
         reason: `Upward node was not expanded because max depth ${maxDepth} was reached; further consumers were not inspected.` });
       return node;
     }
+    if (allConsumers.size >= limit + 1) {
+      hasMore = true;
+      diagnostics.push({ code: 'UPWARD_RESULTS_TRUNCATED', filePath: normPath, sourceHash: null, depth,
+        reason: `Upward consumers limit (${limit}) reached; remaining consumers omitted.` });
+      return node;
+    }
 
     for (const [sourceFile, sourceContent] of fileContents) {
+      if (allConsumers.size >= limit + 1) {
+        hasMore = true;
+        break;
+      }
       const consumption = fileConsumesTarget(sourceFile, sourceContent, normPath);
       if (consumption) {
         if (visitedInBranch.has(sourceFile)) {
@@ -268,6 +425,8 @@ export async function getUpwardComponentTree(
         );
         parentNode.isRendered = consumption.isRendered;
         parentNode.relationKind = consumption.relationKind;
+        if (consumption.passedProps) parentNode.passedProps = consumption.passedProps;
+        if (consumption.isCascadingWrapper) parentNode.isCascadingWrapper = true;
         node.children.push(parentNode);
       }
     }
@@ -282,6 +441,7 @@ export async function getUpwardComponentTree(
     totalComponents: allConsumers.size,
     maxDepthReached,
     direction: 'upward',
+    has_more: hasMore,
     diagnostics,
     propsDrilling: [],
   };

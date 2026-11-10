@@ -64,6 +64,10 @@ inputSchema: {
         enum: ['text', 'json'],
         description: 'Output format (default: "text" for token efficiency, alias: output_format)',
       },
+      include_structured: {
+        type: 'boolean',
+        description: 'When format is "text", set to true to include the full structuredContent JSON payload (default: false to eliminate transport duplication)',
+      },
       max_results: {
         type: 'number',
         description: 'Maximum matches to return (default: 200)',
@@ -78,7 +82,8 @@ inputSchema: {
       max_bytes: {
         type: 'integer',
         minimum: 512,
-        description: 'Hard limit for the full UTF-8 JSON tool result, including metadata and content/structuredContent duplication; excludes JSON-RPC framing. Pages one selected collection, or returns an explicit budget error when atomic data/metadata cannot fit. Minimum 512 bytes permits a compact error, not every successful result.',
+        default: 16384,
+        description: 'Default 16384 bytes (16 KiB). Hard limit for the full UTF-8 JSON tool result, including metadata and content/structuredContent duplication; excludes JSON-RPC framing. Pages one selected collection, or returns an explicit budget error when atomic data/metadata cannot fit. Minimum 512 bytes permits a compact error, not every successful result.',
       },
       continuation_token: {
         type: 'string',
@@ -145,39 +150,29 @@ inputSchema: {
         description:
           'When true on Vue components, audits template-to-script reactivity integrity for broken and dead event handlers',
       },
-      infer_props: {
-        type: 'boolean',
-        description:
-          'When true (default), deeply infers object prop sub-properties (.data, .links, etc.) and data shapes from template and script AST',
-      },
       impact: {
         type: 'string', enum: ['none', 'summary', 'full'],
         description: 'Optional contract-only per-prop impact scan (default none). Vue static template consumer counts, usage counts, static render omissions, candidates and rename/remove risk per prop. summary omits locations; full includes hash-bound usage/omission refs. Scope uses project_root; for component-level hierarchy across pages, use get_component_tree(direction: "upward").',
       },
-      resolve_globals: {
-        type: 'boolean',
-        description:
-          'When true (default), identifies un-imported global symbols, Ziggy route() helpers, and auto-imported composables',
-      },
       outline: {
         type: 'boolean',
         description:
-          'When true, extracts full symbol outline of all functions, methods, and computed properties with exact line ranges, cross-file callee targets, and complexity smells (alias: include_outline)',
-      },
-      max_function_lines: {
-        type: 'number',
-        description:
-          'Line count threshold for high-complexity warning (default: 300)',
+          'When true, extracts full symbol outline of all functions, methods, and computed properties with exact line ranges, cross-file callee targets,  (alias: include_outline)',
       },
       format: {
         type: 'string',
         enum: ['text', 'json'],
         description: 'Output format: text or json (default: "text", alias: output_format)',
       },
+      include_structured: {
+        type: 'boolean',
+        description: 'When format is "text", set to true to include the full structuredContent JSON payload (default: false to eliminate transport duplication)',
+      },
       max_bytes: {
         type: 'integer',
         minimum: 512,
-        description: 'Hard limit for the full UTF-8 JSON tool result, including metadata and content/structuredContent duplication; excludes JSON-RPC framing. Pages one selected collection, or returns an explicit budget error when atomic data/metadata cannot fit. Minimum 512 bytes permits a compact error, not every successful result.',
+        default: 16384,
+        description: 'Default 16384 bytes (16 KiB). Hard limit for the full UTF-8 JSON tool result, including metadata and content/structuredContent duplication; excludes JSON-RPC framing. Pages one selected collection, or returns an explicit budget error when atomic data/metadata cannot fit. Minimum 512 bytes permits a compact error, not every successful result.',
       },
       continuation_token: {
         type: 'string',
@@ -230,15 +225,24 @@ inputSchema: {
         description:
           'When true (default), displays props and data bindings passed down to child components [props: childProp <- parentExpr]',
       },
+      limit: {
+        type: 'number',
+        description: 'Maximum items to return for upward traversal blast radius (default: 20)',
+      },
       format: {
         type: 'string',
-        enum: ['text', 'json'],
-        description: 'Output format: text (indented tree) or json (default: "text", alias: output_format)',
+        enum: ['text', 'json', 'mermaid'],
+        description: 'Output format: text (indented tree), json, or mermaid (Mermaid flowchart diagram) (default: "text", alias: output_format)',
+      },
+      include_structured: {
+        type: 'boolean',
+        description: 'When format is "text", set to true to include the full structuredContent JSON payload (default: false to eliminate transport duplication)',
       },
       max_bytes: {
         type: 'integer',
         minimum: 512,
-        description: 'Hard limit for the full UTF-8 JSON tool result, including metadata and content/structuredContent duplication; excludes JSON-RPC framing. Pages one selected collection, or returns an explicit budget error when atomic data/metadata cannot fit. Minimum 512 bytes permits a compact error, not every successful result.',
+        default: 16384,
+        description: 'Default 16384 bytes (16 KiB). Hard limit for the full UTF-8 JSON tool result, including metadata and content/structuredContent duplication; excludes JSON-RPC framing. Pages one selected collection, or returns an explicit budget error when atomic data/metadata cannot fit. Minimum 512 bytes permits a compact error, not every successful result.',
       },
       continuation_token: {
         type: 'string',
@@ -282,10 +286,15 @@ inputSchema: {
         enum: ['text', 'json'],
         description: 'Output format: text or json (default: "text", alias: output_format)',
       },
+      include_structured: {
+        type: 'boolean',
+        description: 'When format is "text", set to true to include the full structuredContent JSON payload (default: false to eliminate transport duplication)',
+      },
       max_bytes: {
         type: 'integer',
         minimum: 512,
-        description: 'Hard limit for the full UTF-8 JSON tool result, including metadata and content/structuredContent duplication; excludes JSON-RPC framing. Pages one selected collection, or returns an explicit budget error when atomic data/metadata cannot fit. Minimum 512 bytes permits a compact error, not every successful result.',
+        default: 16384,
+        description: 'Default 16384 bytes (16 KiB). Hard limit for the full UTF-8 JSON tool result, including metadata and content/structuredContent duplication; excludes JSON-RPC framing. Pages one selected collection, or returns an explicit budget error when atomic data/metadata cannot fit. Minimum 512 bytes permits a compact error, not every successful result.',
       },
       continuation_token: {
         type: 'string',
@@ -297,22 +306,17 @@ inputSchema: {
 {
 name: 'audit_frontend',
 description:
-    'Maps frontend architecture topology (routes, api-contracts) and runs structural health audits (dead-components, dead-state, design-tokens, bundle-health, similar-templates, archetype-drift). Use target: "routes" or "api-contracts" when discovering pages, layouts, and endpoints for new or changed features; use health targets or target: "all" for diagnostics.',
+    'Maps frontend architecture topology (routes, api-contracts) and runs structural health audits (dead-components, dead-state). Use target: "routes" or "api-contracts" when discovering pages, layouts, and endpoints for new or changed features; use health targets or target: "all" for diagnostics.',
 inputSchema: {
     type: 'object',
     properties: {
       path: {
         type: 'string',
-        description: 'Project root directory or target page file for archetype-drift (alias: target_path, default: ".")',
+        description: 'Project root directory (alias: target_path, default: ".")',
       },
       target_path: {
         type: 'string',
         description: 'Alias for path',
-      },
-      exemplar_path: {
-        type: 'string',
-        description:
-          'Optional exemplar/reference page file path for target: "archetype-drift" (auto-discovers richest sibling page when omitted)',
       },
       scope_path: {
         type: 'string',
@@ -325,19 +329,11 @@ inputSchema: {
           'routes',
           'dead-components',
           'dead-state',
-          'similar-templates',
-          'design-tokens',
-          'bundle-health',
           'api-contracts',
-          'archetype-drift',
           'all',
         ],
         description:
-          'Audit target: "routes" (URL topology), "dead-components" (orphan components), "dead-state" (unused composables/stores), "similar-templates" (redundant template structure & DRY opportunities), "design-tokens" (arbitrary Tailwind colors/spacing, radius consistency & a11y violations), "bundle-health" (heavy eager imports & eager island hydration), "api-contracts" (outbound API endpoints & caller mapping), "archetype-drift" (page semantic section & component drift vs exemplar), or "all" for a full architectural diagnostic (default: "all", excluding similar-templates and archetype-drift)',
-      },
-      threshold: {
-        type: 'number',
-        description: 'Similarity threshold for template redundancy audit between 0.0 and 1.0 (default: 0.8)',
+          'Audit target: "routes" (URL topology), "api-contracts" (outbound API endpoints and caller mapping), "dead-components" (unused component candidates), "dead-state" (unused state candidates), or "all" for these four targets (default: "all")',
       },
       view: {
         type: 'string',
@@ -372,10 +368,15 @@ inputSchema: {
         enum: ['text', 'json'],
         description: 'Output format: text or json (default: "text", alias: output_format)',
       },
+      include_structured: {
+        type: 'boolean',
+        description: 'When format is "text", set to true to include the full structuredContent JSON payload (default: false to eliminate transport duplication)',
+      },
       max_bytes: {
         type: 'integer',
         minimum: 512,
-        description: 'Hard limit for the full UTF-8 JSON tool result, including metadata and content/structuredContent duplication; excludes JSON-RPC framing. Pages one selected collection, or returns an explicit budget error when atomic data/metadata cannot fit. Minimum 512 bytes permits a compact error, not every successful result.',
+        default: 16384,
+        description: 'Default 16384 bytes (16 KiB). Hard limit for the full UTF-8 JSON tool result, including metadata and content/structuredContent duplication; excludes JSON-RPC framing. Pages one selected collection, or returns an explicit budget error when atomic data/metadata cannot fit. Minimum 512 bytes permits a compact error, not every successful result.',
       },
       continuation_token: {
         type: 'string',
@@ -417,6 +418,31 @@ inputSchema: {
         type: 'string',
         description: 'New prop or event name (required when renaming, e.g. "variant", "active")',
       },
+      operations: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            refactor_type: {
+              type: 'string',
+              enum: [
+                'rename_prop',
+                'remove_prop',
+                'rename_event',
+                'remove_event',
+                'rename_model',
+                'remove_model',
+                'rename_slot',
+                'remove_slot',
+              ],
+            },
+            old_name: { type: 'string' },
+            new_name: { type: 'string' },
+          },
+          required: ['refactor_type', 'old_name'],
+        },
+        description: 'Optional batch of atomic refactoring operations to execute together in a single pass across consumers (alias: batch_operations)',
+      },
       target_path: {
         type: 'string',
         description: 'Workspace or project root directory (default: ".")',
@@ -426,10 +452,15 @@ inputSchema: {
         enum: ['text', 'json'],
         description: 'Output format: text or json (default: "text", alias: output_format)',
       },
+      include_structured: {
+        type: 'boolean',
+        description: 'When format is "text", set to true to include the full structuredContent JSON payload (default: false to eliminate transport duplication)',
+      },
       max_bytes: {
         type: 'integer',
         minimum: 512,
-        description: 'Hard limit for the full UTF-8 JSON tool result, including metadata and content/structuredContent duplication; excludes JSON-RPC framing. Pages one selected collection, or returns an explicit budget error when atomic data/metadata cannot fit. Minimum 512 bytes permits a compact error, not every successful result.',
+        default: 16384,
+        description: 'Default 16384 bytes (16 KiB). Hard limit for the full UTF-8 JSON tool result, including metadata and content/structuredContent duplication; excludes JSON-RPC framing. Pages one selected collection, or returns an explicit budget error when atomic data/metadata cannot fit. Minimum 512 bytes permits a compact error, not every successful result.',
       },
       continuation_token: {
         type: 'string',

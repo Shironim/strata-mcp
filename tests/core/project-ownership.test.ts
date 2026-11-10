@@ -30,14 +30,14 @@ for(const sample of samples) test(`${sample.fw}: nearest child package owns sour
   await put(owner,'package.json',JSON.stringify({dependencies:sample.deps}));
   const path=await put(owner,sample.file,sample.code);
   await put(owner,'src/tsconfig.json','{}');
-  const result=await inspectComponentTool.handler({path,project_root:root,format:'json',resolve_globals:false});
+  const result=await inspectComponentTool.handler({path,project_root:root,format:'json',});
   expect(result.isError).not.toBe(true);const data=result.structuredContent as any;
   expect(data.framework).toBe(sample.fw);expect(data.projectContext.ownerRoot).toBe(owner);
   expect(data.projectContext.scopeRoot).toBe(root);expect(data.projectContext.status).toBe('owned');
   expect(data.renderBoundary.boundary).toBe(sample.boundary);
   expect(data.dependencies.some((input:any)=>input.path===join(owner,'package.json') && /^[a-f0-9]{64}$/.test(input.hash))).toBe(true);
   expect(data.dependencies.some((input:any)=>input.path===join(root,'package.json'))).toBe(false);
-  const summary=await inspectComponentTool.handler({path,project_root:root,format:'json',resolve_globals:false,response_detail:'summary'});
+  const summary=await inspectComponentTool.handler({path,project_root:root,format:'json',response_detail:'summary'});
   expect(summary.isError).not.toBe(true);
   expect((summary.structuredContent as any).resultSummary.contract.projectContext.ownerRoot).toBe(owner);
 }));
@@ -70,17 +70,16 @@ test('Next app ownership excludes arbitrary nested app paths and follows root/sr
   const code='export default ()=> <button onClick={()=>save()}/>';
   const src=await put(root,'src/app/page.tsx',code);
   const fake=await put(root,'features/app/page.tsx',code);
-  let contract=await extractComponentContract(src,undefined,{workspaceRoot:root,resolveGlobals:false});
+  let contract=await extractComponentContract(src,undefined,{workspaceRoot:root,});
   expect(contract.projectContext?.appRoot).toBe(join(root,'src/app'));
   expect(contract.renderBoundary?.boundary).toBe('server-component');
-  const outside=await extractComponentContract(fake,undefined,{workspaceRoot:root,resolveGlobals:false});
+  const outside=await extractComponentContract(fake,undefined,{workspaceRoot:root,});
   expect(outside.renderBoundary?.boundary).toBe('isomorphic');
-  expect(outside.patternDiagnostics?.some(item=>item.ruleId==='next/rsc-event-handler')??false).toBe(false);
   const real=await put(root,'app/page.tsx',code);
-  contract=await extractComponentContract(src,undefined,{workspaceRoot:root,resolveGlobals:false});
+  contract=await extractComponentContract(src,undefined,{workspaceRoot:root,});
   expect(contract.projectContext?.appRoot).toBe(join(root,'app'));
   expect(contract.renderBoundary?.boundary).toBe('isomorphic');
-  expect((await extractComponentContract(real,undefined,{workspaceRoot:root,resolveGlobals:false})).renderBoundary?.boundary).toBe('server-component');
+  expect((await extractComponentContract(real,undefined,{workspaceRoot:root,})).renderBoundary?.boundary).toBe('server-component');
   const batch=await batchParser([fake,real],root,new Map(),false);
   expect(batch.files.get(fake)?.boundary.boundary).toBe('isomorphic');
   expect(batch.files.get(real)?.boundary.boundary).toBe('server-component');
@@ -90,13 +89,13 @@ test('one local framework config disambiguates mixed dependencies without execut
   await put(root,'package.json','{"dependencies":{"next":"15.0.0","nuxt":"3.17.0","astro":"5.0.0","vue":"3.5.13"}}');
   await put(root,'astro.config.mjs','throw new Error("MUST_NOT_EXECUTE");');
   const path=await put(root,'Card.client.vue','<template><p/></template>');
-  const result=await extractComponentContract(path,undefined,{workspaceRoot:root,resolveGlobals:false});
+  const result=await extractComponentContract(path,undefined,{workspaceRoot:root,});
   expect(result.framework).toBe('vue');expect(result.projectContext?.applicationFramework).toBe('astro');
   expect(result.projectContext?.configFiles).toEqual([join(root,'astro.config.mjs')]);
   expect(result.renderBoundary?.boundary).toBe('isomorphic');
   const previous=result.dependencies!.find(item=>item.path.endsWith('astro.config.mjs'))!.hash;
   await put(root,'astro.config.mjs','export default {};');
-  expect((await extractComponentContract(path,undefined,{workspaceRoot:root,resolveGlobals:false})).dependencies!
+  expect((await extractComponentContract(path,undefined,{workspaceRoot:root,})).dependencies!
     .find(item=>item.path.endsWith('astro.config.mjs'))!.hash).not.toBe(previous);
 }));
 
@@ -104,7 +103,7 @@ test('conflicting local configs expose omissions and never select an app convent
   await put(root,'package.json','{"dependencies":{"next":"15.0.0","nuxt":"3.17.0"}}');
   await put(root,'next.config.js','module.exports={}');await put(root,'nuxt.config.ts','export default {}');
   const path=await put(root,'app/page.tsx',`import Link from 'next/link';export default ()=> <button onClick={()=>save()}/>`);
-  const result=await inspectComponentTool.handler({path,project_root:root,format:'json',resolve_globals:false});
+  const result=await inspectComponentTool.handler({path,project_root:root,format:'json',});
   const data=result.structuredContent as any;expect(result.isError).not.toBe(true);
   expect(data.projectContext.status).toBe('conflict');expect(data.projectContext.appRoot).toBeNull();
   expect(data.renderBoundary.boundary).toBe('isomorphic');
@@ -163,7 +162,7 @@ test('physical paths outside scope and sibling-prefix paths do not inherit owner
 test('selecting a source subdirectory preserves its ancestor application owner and marks external inputs',async()=>fixture(async root=>{
   await put(root,'package.json','{"dependencies":{"nuxt":"3.17.0"}}');
   const path=await put(root,'src/Card.client.vue','<template/>');
-  const result=await extractComponentContract(path,undefined,{workspaceRoot:join(root,'src'),resolveGlobals:false});
+  const result=await extractComponentContract(path,undefined,{workspaceRoot:join(root,'src'),});
   expect(result.framework).toBe('nuxt');expect(result.projectContext?.ownerRoot).toBe(root);
   expect(result.projectContext?.scopeRoot).toBe(join(root,'src'));
   expect(result.dependencies?.find(input=>input.path===join(root,'package.json'))?.isExternal).toBe(true);

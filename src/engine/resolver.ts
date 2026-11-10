@@ -1,6 +1,7 @@
 import { readSourceFile, readSourceFileSync } from './source-file';
-import { statSync, promises as fs } from 'node:fs';
+import { statSync, existsSync, readdirSync, readFileSync, promises as fs } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { findMonorepoRoot } from './path-resolver';
 
 /** User-supplied alias map: `{ "@/*": "resources/js/*", "@/": "src/" }`. */
 export type AliasMap = Record<string, string>;
@@ -470,10 +471,154 @@ export function buildAliasConfigFromTsconfigPaths(
  * and builds an alias resolver from its full inheritance hierarchy (`extends`).
  * Also returns all config files involved in the hierarchy.
  */
+/**
+ * Scans a monorepo workspace for internal packages and constructs an AliasConfig
+ * mapping package names (e.g. "@partyplanner/ui") to their workspace entrypoints.
+ */
+export function discoverMonorepoAliases(fromPath: string): AliasConfig | null {
+  const monorepoRoot = findMonorepoRoot(fromPath);
+  if (!monorepoRoot) return null;
+
+  const candidateDirs: string[] = [];
+  const searchDirs = ['packages', 'apps', 'libs', 'modules', 'shared'];
+
+  for (const sDir of searchDirs) {
+    const fullSearchDir = join(monorepoRoot, sDir);
+    if (existsSync(fullSearchDir) && statSync(fullSearchDir).isDirectory()) {
+      try {
+        const entries = readdirSync(fullSearchDir);
+        for (const entry of entries) {
+          const pkgDir = join(fullSearchDir, entry);
+          if (existsSync(pkgDir) && statSync(pkgDir).isDirectory()) {
+            if (existsSync(join(pkgDir, 'package.json'))) {
+              candidateDirs.push(pkgDir);
+            }
+          }
+        }
+      } catch {
+        // ignore read errors
+      }
+    }
+  }
+
+  // Also check direct workspaces if defined in root package.json
+  const rootPkgPath = join(monorepoRoot, 'package.json');
+  if (existsSync(rootPkgPath)) {
+    try {
+      const rootPkg = JSON.parse(readFileSync(rootPkgPath, 'utf-8'));
+      const workspaces: string[] = Array.isArray(rootPkg.workspaces)
+        ? rootPkg.workspaces
+        : Array.isArray(rootPkg.workspaces?.packages)
+          ? rootPkg.workspaces.packages
+          : [];
+      for (const pattern of workspaces) {
+        if (typeof pattern === 'string' && !pattern.includes('*')) {
+          const directDir = join(monorepoRoot, pattern);
+          if (existsSync(join(directDir, 'package.json')) && !candidateDirs.includes(directDir)) {
+            candidateDirs.push(directDir);
+          }
+        }
+      }
+    } catch {
+      // ignore parse errors
+    }
+  }
+
+  if (candidateDirs.length === 0) return null;
+
+  const aliasMap: AliasMap = {};
+
+  for (const pkgDir of candidateDirs) {
+    try {
+      const pkg = JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf-8'));
+      const pkgName = pkg.name;
+      if (!pkgName || typeof pkgName !== 'string') continue;
+
+      let entryFile: string | undefined;
+
+      if (pkg.exports) {
+        if (typeof pkg.exports === 'string') {
+          entryFile = pkg.exports;
+        } else if (typeof pkg.exports['.'] === 'string') {
+          entryFile = pkg.exports['.'];
+        } else if (typeof pkg.exports['.']?.import === 'string') {
+          entryFile = pkg.exports['.']?.import;
+        } else if (typeof pkg.exports['.']?.default === 'string') {
+          entryFile = pkg.exports['.']?.default;
+        }
+      }
+
+      if (!entryFile && typeof pkg.source === 'string') {
+        entryFile = pkg.source;
+      }
+      if (!entryFile && typeof pkg.main === 'string') {
+        entryFile = pkg.main;
+      }
+      if (!entryFile && typeof pkg.module === 'string') {
+        entryFile = pkg.module;
+      }
+
+      if (entryFile) {
+        const resolvedEntry = join(pkgDir, entryFile);
+        if (existsSync(resolvedEntry)) {
+          aliasMap[pkgName] = resolvedEntry;
+        } else if (existsSync(join(pkgDir, 'src/index.ts'))) {
+          aliasMap[pkgName] = join(pkgDir, 'src/index.ts');
+        } else if (existsSync(join(pkgDir, 'src/index.tsx'))) {
+          aliasMap[pkgName] = join(pkgDir, 'src/index.tsx');
+        }
+      } else {
+        if (existsSync(join(pkgDir, 'src/index.ts'))) {
+          aliasMap[pkgName] = join(pkgDir, 'src/index.ts');
+        } else if (existsSync(join(pkgDir, 'src/index.tsx'))) {
+          aliasMap[pkgName] = join(pkgDir, 'src/index.tsx');
+        } else if (existsSync(join(pkgDir, 'index.ts'))) {
+          aliasMap[pkgName] = join(pkgDir, 'index.ts');
+        }
+      }
+
+      if (pkg.exports && typeof pkg.exports === 'object') {
+        for (const [subpath, exportTarget] of Object.entries(pkg.exports)) {
+          if (subpath === '.' || typeof subpath !== 'string') continue;
+          let targetPath: string | undefined;
+          if (typeof exportTarget === 'string') targetPath = exportTarget;
+          else if (typeof (exportTarget as any)?.import === 'string') targetPath = (exportTarget as any).import;
+          else if (typeof (exportTarget as any)?.default === 'string') targetPath = (exportTarget as any).default;
+
+          if (targetPath) {
+            const cleanSub = subpath.replace(/^\.\/?/, '');
+            const resolvedSub = join(pkgDir, targetPath);
+            aliasMap[`${pkgName}/${cleanSub}`] = resolvedSub;
+          }
+        }
+      }
+
+      if (existsSync(join(pkgDir, 'src'))) {
+        aliasMap[`${pkgName}/*`] = join(pkgDir, 'src/*');
+      } else {
+        aliasMap[`${pkgName}/*`] = join(pkgDir, '*');
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  if (Object.keys(aliasMap).length === 0) return null;
+  return createAliasConfig(aliasMap, monorepoRoot);
+}
+
+/**
+ * Discovers the nearest `jsconfig.json` or `tsconfig.json` walking up from a file
+ * and builds an alias resolver from its full inheritance hierarchy (`extends`).
+ * Also discovers and merges monorepo package workspace aliases.
+ * Also returns all config files involved in the hierarchy.
+ */
 export async function loadAliasConfigWithDependencies(
   fromPath: string
 ): Promise<{ config: AliasConfig | null; configFiles: string[] }> {
   let dir = dirname(resolve(fromPath));
+  let tsConfigConfig: AliasConfig | null = null;
+  let configFiles: string[] = [];
 
   while (true) {
     for (const name of ['jsconfig.json', 'tsconfig.json']) {
@@ -483,28 +628,32 @@ export async function loadAliasConfigWithDependencies(
         if (statSync(candidate).isFile()) {
           const hierarchy = await loadTsConfigHierarchy(candidate);
           if (Object.keys(hierarchy.paths).length > 0) {
-            return {
-              config: buildAliasConfigFromResolvedHierarchy(hierarchy),
-              configFiles: hierarchy.configFiles,
-            };
+            tsConfigConfig = buildAliasConfigFromResolvedHierarchy(hierarchy);
+            configFiles = hierarchy.configFiles;
+            break;
           }
         }
       } catch {
         // No config or invalid config at this level — keep walking up.
       }
     }
+    if (tsConfigConfig) break;
 
     const parent = dirname(dir);
     if (parent === dir) break;
     dir = parent;
   }
 
-  return { config: null, configFiles: [] };
+  const monorepoConfig = discoverMonorepoAliases(fromPath);
+  const finalConfig = mergeAliasConfigs(tsConfigConfig, monorepoConfig);
+
+  return { config: finalConfig, configFiles };
 }
 
 /**
  * Discovers the nearest `jsconfig.json` or `tsconfig.json` walking up from a file
- * and builds an alias resolver from its full inheritance hierarchy (`extends`).
+ * and builds an alias resolver from its full inheritance hierarchy (`extends`),
+ * augmented with monorepo package workspace aliases.
  */
 export async function loadAliasConfig(fromPath: string): Promise<AliasConfig | null> {
   const { config } = await loadAliasConfigWithDependencies(fromPath);

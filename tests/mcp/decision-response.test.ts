@@ -17,7 +17,7 @@ test('an empty unverified search is inconclusive, never proof of absence', async
   const result = await tool.handler({ path: '/tmp', format: 'json' });
   expect(result.structuredContent?.decision).toMatchObject({ status: 'partial', emptyOutcome: 'inconclusive' });
   expect(result.content[0]?.text).toBe('[]');
-  expect((result.structuredContent?.cost as any).responseBytes).toBe(Buffer.byteLength(JSON.stringify(result), 'utf8'));
+  expect(result.structuredContent).not.toHaveProperty('cost');
   expect((result.structuredContent?.decision as any).next[0].action).toBe('review-coverage');
 });
 

@@ -1,6 +1,6 @@
 import { promises as fs } from 'node:fs';
 import { basename, extname, join, resolve } from 'node:path';
-import { collectFiles } from './collector';
+import { collectFilesWithReport, type ExcludedDirectoryReport } from './collector';
 import { detectCodeDomains, classifyFileDomain } from './domains';
 
 const COVERED = ['.vue', '.astro', '.svelte', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'];
@@ -9,7 +9,9 @@ export async function mapFrontendScope(path: string, options: { limit?: number; 
   const root = resolve(path);
   const limit = Math.min(500, Math.max(1, options.limit ?? 100));
   const offset = Math.max(0, options.offset ?? 0);
-  const files = (await collectFiles(root, { excludeDirs: options.excludeDirs })).sort();
+  const collected = await collectFilesWithReport(root, { excludeDirs: options.excludeDirs });
+  const files = collected.files.sort();
+  const excludedDirs = collected.excludedDirs;
   const domainResolution = await detectCodeDomains(root);
   const manifest = await readPackageManifest(root);
   const dependencies = { ...manifest?.dependencies, ...manifest?.devDependencies };
@@ -26,7 +28,15 @@ export async function mapFrontendScope(path: string, options: { limit?: number; 
     root,
     scope: { path: root, basis: 'requested-path' },
     status: offset + selected.length < files.length ? 'partial' : 'complete',
-    coverage: { knownFiles: files.length, returnedFiles: selected.length, offset, limit, truncated: offset + selected.length < files.length, extensions },
+    coverage: {
+      knownFiles: files.length,
+      returnedFiles: selected.length,
+      offset,
+      limit,
+      truncated: offset + selected.length < files.length,
+      excludedDirs,
+      extensions,
+    },
     domainRoots: domainResolution.activeDomainRoots,
     domains: domainResolution.domains,
     agentHarnesses: domainResolution.agentHarnesses,
@@ -46,6 +56,26 @@ export async function mapFrontendScope(path: string, options: { limit?: number; 
     }),
     unsupportedExtensions: ['.css', '.scss', '.sass', '.less', '.mdx'],
   };
+}
+
+export function formatFrontendMapAsText(result: Awaited<ReturnType<typeof mapFrontendScope>>): string {
+  const excludedDirs: ExcludedDirectoryReport[] = result.coverage.excludedDirs ?? [];
+  const exclusionNote = excludedDirs.length > 0
+    ? ` (excluding ${excludedDirs.length} director${excludedDirs.length === 1 ? 'y' : 'ies'})`
+    : '';
+  const lines = [
+    `Frontend map: ${result.root}`,
+    `Status: ${result.status}${exclusionNote}; ${result.coverage.returnedFiles}/${result.coverage.knownFiles} files returned (offset ${result.coverage.offset})`,
+    `Framework candidates: ${result.frameworkCandidates.map(item => item.name).join(', ') || 'unknown'} (${result.frameworkDetection})`,
+    ...result.files.map(file => `- ${file.path}${file.roleHint ? ` [${file.roleHint}; heuristic]` : ''}`),
+  ];
+  if (excludedDirs.length > 0) {
+    const shown = excludedDirs.slice(0, 20).map(item => `${item.path} (${item.reason})`);
+    const remainder = excludedDirs.length > 20 ? `, +${excludedDirs.length - 20} more` : '';
+    lines.push(`Excluded directories: ${shown.join(', ')}${remainder}`);
+  }
+  lines.push(`Extension coverage: ${Object.entries(result.coverage.extensions).filter(([, count]) => count > 0).map(([ext, count]) => `${ext}=${count}`).join(', ') || 'none'}`);
+  return lines.join('\n');
 }
 
 async function readPackageManifest(root: string): Promise<{ dependencies?: Record<string, string>; devDependencies?: Record<string, string> } | null> {

@@ -130,7 +130,14 @@ test('YAML snippets use result limits without pattern-mode metadata', async () =
   };
   const defaults = await findCodeTool.handler(args);
   expect(defaults.isError).toBeUndefined();
-  expect(JSON.parse(defaults.content[0].text).matchCount).toBe(200);
+  const page = JSON.parse(defaults.content[0].text);
+  expect(page.totalAvailable).toBe(200);
+  expect(page.matchCount).toBe(page.matches.length);
+  expect(page.matches.length).toBeLessThan(200);
+  expect(page.continuationToken).toBeDefined();
+  expect(Buffer.byteLength(JSON.stringify(defaults))).toBeLessThanOrEqual(16384);
+  const expanded = await findCodeTool.handler({ ...args, max_bytes: 200000 });
+  expect(JSON.parse(expanded.content[0].text).matchCount).toBe(200);
   expect(defaults.structuredContent?.modeRequested).toBeUndefined();
   const limited = await findCodeTool.handler({ ...args, max_results: 2 });
   expect(JSON.parse(limited.content[0].text).matches).toHaveLength(2);

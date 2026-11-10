@@ -1,8 +1,4 @@
 import { parse as parseDom, NodeTypes } from '@vue/compiler-dom';
-import {
-  extractReactSemanticSections,
-  extractVueSemanticSections,
-} from './archetype';
 import type {
   ComponentLayoutStructure,
   DynamicClassBinding,
@@ -276,13 +272,11 @@ export function extractVueLayoutStructure(
     // If template parsing encounters malformed markup, fallback safely
   }
 
-  const sections = extractVueSemanticSections(templateContent, startLineOffset);
 
   return {
     rootWrapper,
     dynamicBindings,
     visibilityDirectives,
-    sections: sections.length > 0 ? sections : undefined,
   };
 }
 
@@ -378,13 +372,11 @@ export function extractReactLayoutStructure(content: string): ComponentLayoutStr
     });
   }
 
-  const sections = extractReactSemanticSections(content);
 
   return {
     rootWrapper,
     dynamicBindings,
     visibilityDirectives,
-    sections: sections.length > 0 ? sections : undefined,
   };
 }
 
@@ -402,11 +394,10 @@ export function extractLayoutStructure(
     let tContent = templateBlockContent;
     let tLine = templateStartLine;
     if (!tContent) {
-      const templateMatch = content.match(/<template\b[^>]*>([\s\S]*?)<\/template>/i);
-      if (templateMatch && templateMatch[1]) {
-        tContent = templateMatch[1];
-        const beforeTemplate = content.slice(0, templateMatch.index || 0);
-        tLine = beforeTemplate.split('\n').length;
+      const outer = extractOuterVueTemplate(content);
+      if (outer) {
+        tContent = outer.content;
+        tLine = outer.lineOffset;
       }
     }
     if (tContent) {
@@ -426,4 +417,37 @@ export function extractLayoutStructure(
   }
 
   return undefined;
+}
+
+export function extractOuterVueTemplate(
+  sfcContent: string
+): { content: string; lineOffset: number } | null {
+  const openRegex = /<template\b[^>]*>/gi;
+  const firstMatch = openRegex.exec(sfcContent);
+  if (!firstMatch) return null;
+
+  const contentStart = firstMatch.index + firstMatch[0].length;
+  const lineOffset = sfcContent.slice(0, firstMatch.index).split('\n').length - 1;
+
+  const tagRegex = /<\/?template\b[^>]*>/gi;
+  tagRegex.lastIndex = contentStart;
+
+  let depth = 1;
+  let match: RegExpExecArray | null;
+  while ((match = tagRegex.exec(sfcContent)) !== null) {
+    const token = match[0];
+    if (token.startsWith('</')) {
+      depth--;
+      if (depth === 0) {
+        return {
+          content: sfcContent.slice(contentStart, match.index),
+          lineOffset,
+        };
+      }
+    } else if (!token.endsWith('/>')) {
+      depth++;
+    }
+  }
+
+  return null;
 }

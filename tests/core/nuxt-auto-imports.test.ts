@@ -113,7 +113,7 @@ test('nested extends uses declaring layer paths and reports unsupported or cycli
     expect(audit.autoImportUnresolved).toEqual(result.unresolved);
     expect(formatEventHandlerAuditAsText(audit)).toContain('discovery is partial');
     for (const response_detail of ['full', 'summary']) {
-      const response = await inspectComponentTool.handler({ path, project_root: root, audit_events: true, resolve_globals: false, format: 'json', response_detail });
+      const response = await inspectComponentTool.handler({ path, project_root: root, audit_events: true, format: 'json', response_detail });
       expect(response.isError).not.toBe(true);
       const structured = response.structuredContent as any;
       expect(structured.retrieval.omissions.some((item: any) => item.code === 'NUXT_AUTO_IMPORT_PARTIAL')).toBe(true);

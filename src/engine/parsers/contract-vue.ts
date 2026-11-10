@@ -8,7 +8,6 @@ import { unwrapExpression, staticPropertyName } from './ts-syntax';
 import { executeAstGrep, isBinaryExecutionError } from '../astgrep';
 import { parseSfc } from '../splitter';
 import { stripQuotes, escapeRegExp } from '../patterns';
-import { extractStyleTokens } from '../contract';
 import { canonicalizePath, findProjectRoot } from '../path-resolver';
 import { loadAliasConfig } from '../resolver';
 import type {
@@ -832,7 +831,6 @@ rule:
     slotDetails: slotDetails && slotDetails.length > 0 ? slotDetails : undefined,
     models: models.length > 0 ? models : undefined,
     exposed: exposed.length > 0 ? Array.from(new Set(exposed)) : undefined,
-    styleTokens: extractStyleTokens(content),
     dependencies: dependencies.length > 0 ? dependencies : undefined,
     unresolvedTypes: unresolvedTypes.length > 0 ? unresolvedTypes : undefined,
   };

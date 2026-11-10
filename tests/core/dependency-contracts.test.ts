@@ -192,7 +192,7 @@ defineProps<ItemProps>();
     workspace: appRoot,
     snapshot,
     policy: 'component-contract-v1',
-    query: { inferProps: true, resolveGlobals: true },
+    query: { },
     complete: true,
     selectionReason: 'Verification of staleness detection on disk mutation',
     dependencies: trackedDeps,
@@ -209,10 +209,10 @@ test('audit_frontend cleanly separates filesystem-direct evidence from SQLite in
   await writeFile(join(root, 'package.json'), '{"dependencies":{"vue":"3"}}');
   await writeFile(join(root, 'App.vue'), '<template><div>Audit</div></template>\n');
 
-  // Direct filesystem target: similar-templates
+  // Direct filesystem target: api-contracts
   const fsResult = await auditFrontendTool.handler({
     target_path: root,
-    target: 'similar-templates',
+    target: 'api-contracts',
     output_format: 'json',
   });
   const fsJson = JSON.parse(fsResult.content[0].text);

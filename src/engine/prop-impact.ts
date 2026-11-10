@@ -6,7 +6,7 @@ import { readSourceSnapshot } from './source-file';
 import { parseSfc } from './splitter';
 import { inspectVueTreeInput } from './graph/vue-tree-input';
 import { extractImports, resolveImportPath } from './graph/path-helpers';
-import { resolveBarrelExport } from './graph/resolution';
+import { resolveBarrelExport } from './graph/path-helpers';
 import { loadAliasConfig } from './resolver';
 import { getCandidateNames } from './template';
 import { hashRetrievalIdentity } from './retrieval-evidence';

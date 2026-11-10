@@ -154,7 +154,7 @@ test('MCP server loaded runtime - JSON-RPC protocol handshake, tool enumeration 
         expect(response.result.isError).toBeFalsy();
         expect(response.result.structuredContent.continuationToken).toBeDefined();
         expect(response.result.structuredContent.matches.length).toBeLessThan(50);
-        expect(response.result.structuredContent.cost.responseBytes).toBe(Buffer.byteLength(JSON.stringify(response.result), 'utf8'));
+        expect(response.result.structuredContent).not.toHaveProperty('cost');
       }
     }
   } finally {

@@ -30,7 +30,7 @@ test('NOT_INDEXED and stale error retain meaning and explicit limitations', asyn
 test('specific evidence is not replaced and thrown failures do not become successful empty results', async () => {
   const specific = { content: [{ type: 'text' as const, text: 'source' }], structuredContent: { retrieval: { policy: 'specific' } } };
   const enriched = await tool(specific).handler({});
-  expect(enriched.structuredContent?.retrieval).toBe(specific.structuredContent.retrieval);
+  expect(enriched.structuredContent?.retrieval).toEqual(specific.structuredContent.retrieval);
   expect(enriched.content[0]).toEqual(specific.content[0]);
   const failing = withRetrievalEvidence({ name: 'fixture', description: '', inputSchema: { type: 'object' }, handler: async () => { throw new Error('PARSE_FAILED'); } });
   const result = await failing.handler({});

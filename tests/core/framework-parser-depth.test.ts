@@ -10,7 +10,6 @@ import { extractNuxtPageMeta, extractNextSegmentConfig, extractApiHandlers, scan
 import { extractRenderBoundary } from '../../src/engine/contract';
 import { moduleDirective } from '../../src/engine/parsers/ts-syntax';
 import { inspectComponentTool } from '../../src/tools/inspect-component';
-import { runCanonAudit } from '../../src/engine/canon';
 import { readSourceSnapshot, readSourceRef } from '../../src/engine/source-file';
 import { getComponentTree } from '../../src/engine/tree';
 
@@ -142,21 +141,6 @@ test('Next handler scanner reads AST exports including aliases and ignores comme
   expect(await extractApiHandlers(file)).toEqual(['GET', 'POST', 'PATCH', 'OPTIONS']);
 }));
 
-test('Next audit uses the same directive AST and exact source ref as contract inspection', async () => fixture(async root => {
-  await writeFile(join(root,'package.json'),'{"dependencies":{"next":"15.0.0"}}');
-  const file = join(root, 'app/page.tsx');
-  await mkdir(join(root, 'app'));
-  await writeFile(file, "// 🙂\r\n'use strict'; 'use client';\r\nexport default async function Page(){ return <div/> }");
-  const { snapshot, content } = await readSourceSnapshot(file);
-  const diagnostics = await runCanonAudit(snapshot, content, 'next');
-  const directive = diagnostics.find(item => item.ruleId === 'next/no-use-client-at-page-root')!;
-  expect(await readSourceRef(file, directive.fact.ref)).toBe("'use client'");
-  expect(diagnostics.some(item => item.ruleId === 'next/no-async-client-component')).toBe(true);
-  await writeFile(file, "export default function Page(){\n'use client';\nreturn <div/> }");
-  const next = await readSourceSnapshot(file);
-  expect((await runCanonAudit(next.snapshot, next.content, 'next')).some(item => item.ruleId === 'next/no-use-client-at-page-root')).toBe(false);
-}));
-
 test('Next tree inheritance uses module directives rather than function-local decoys', async () => fixture(async root => {
   const parent = join(root, 'Parent.tsx');
   const child = join(root, 'Child.tsx');
@@ -177,7 +161,7 @@ test('inspect handler keeps unresolved framework metadata visible in JSON, text 
     const file = join(root, name);
     await writeFile(file, content);
     for (const extra of [{ format: 'json' }, { format: 'text' }, { format: 'json', response_detail: 'summary' }]) {
-      const response = await inspectComponentTool.handler({ path: file, project_root: root, resolve_globals: false, ...extra });
+      const response = await inspectComponentTool.handler({ path: file, project_root: root, ...extra });
       expect(response.isError).not.toBe(true);
       expect((response.structuredContent as any).retrieval.omissions.some((item: any) => item.code === code)).toBe(true);
       expect((response.structuredContent as any).decision.status).toBe('partial');
@@ -228,7 +212,7 @@ test('Svelte untyped props do not inherit unrelated type declarations or module 
 test('Vue defaults preserve aliased names and nested expression boundaries', async () => {
   const contract = await extractVueContract('/fixture/Card.vue', `<script setup lang="ts">
     const { title: label = 'hello, world', options = { first: 1, second: [2, 3] }, text = format('a', 'b') } = defineProps<{ title?: string; options?: object; text?: string; toString?: string }>();
-  </script><template><div>{{ label }}</div></template>`, { inferProps: false, resolveGlobals: false });
+  </script><template><div>{{ label }}</div></template>`, { });
   const props = new Map(contract.props.map(prop => [prop.name, prop]));
   expect(props.get('title')?.default).toBe("'hello, world'");
   expect(props.get('options')?.default).toBe('{ first: 1, second: [2, 3] }');
@@ -239,13 +223,13 @@ test('Vue defaults preserve aliased names and nested expression boundaries', asy
 test('Vue withDefaults supports TypeScript wrappers and reports dynamic default overrides', async () => {
   const contract = await extractVueContract('/fixture/Card.vue', `<script setup lang="ts">
     const props = withDefaults(defineProps<{ title?: string; count?: number }>(), ({ title: 'wrapped', ...extra, count: 1 } as const));
-  </script><template><div/></template>`, { inferProps: false, resolveGlobals: false });
+  </script><template><div/></template>`, { });
   expect(contract.props.find(prop => prop.name === 'title')?.default).toBeUndefined();
   expect(contract.props.find(prop => prop.name === 'count')?.default).toBe('1');
   expect(contract.unresolvedTypes?.some(item => item.name === 'withDefaults')).toBe(true);
   const shorthand = await extractVueContract('/fixture/Card.vue', `<script setup lang="ts">
     const props = withDefaults(defineProps<{ title?: string }>(), { title: 'earlier', title });
-  </script><template><div/></template>`, { inferProps: false, resolveGlobals: false });
+  </script><template><div/></template>`, { });
   expect(shorthand.props[0].default).toBeUndefined();
   expect(shorthand.unresolvedTypes?.some(item => item.name === 'title')).toBe(true);
 });

@@ -93,6 +93,8 @@ export function synthesizeBackendTargetHint(
         `${entityName}Action`,
         `${entityName}Service`,
       ],
+      isHeuristic: true,
+      disclaimer: 'Pure Naming Convention Heuristic; verify actual route mapping in routes/web.php or routes/api.php',
     };
   }
 
@@ -160,6 +162,8 @@ export function synthesizeBackendTargetHint(
     targetIntent,
     routePattern: cleanPath || trimmedEndpoint,
     suggestedSymbols,
+    isHeuristic: true,
+    disclaimer: 'Pure Naming Convention Heuristic; verify actual route mapping in routes/web.php or routes/api.php',
   };
 }
 
@@ -422,7 +426,7 @@ export function formatApiContractsAsText(result: ApiContractResult): string {
     );
     if (item.backendTargetHint) {
       lines.push(
-        `  - *Backend Target Hint:* \`${item.backendTargetHint.targetIntent}\` ➔ \`${item.backendTargetHint.suggestedSymbols[0]}\``
+        `  - *Backend Target Hint:* \`${item.backendTargetHint.targetIntent}\` ➔ \`${item.backendTargetHint.suggestedSymbols[0]}\` *(Pure Naming Convention Heuristic - verify actual routes)*`
       );
     }
   }

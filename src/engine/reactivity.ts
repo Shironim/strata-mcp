@@ -17,12 +17,13 @@ import { parseVueSource as parseSfcRaw } from './vue-parser';
 import { parseSfc } from './splitter';
 import { remapPosition } from './remapper';
 import { executeAstGrep } from './astgrep';
+import { extractBoundaryContracts } from './contract';
 import type {
   AuditEventHandlersOptions,
+  BoundaryContract,
   DeadHandlerInfo,
   EventHandlerAuditResult,
   EventHandlerInfo,
-  ReactivitySmell,
 } from '../types';
 
 const BUILTIN_GLOBALS = new Set([
@@ -163,7 +164,7 @@ export async function auditEventHandlers(
 
   // 1. Gather all in-scope identifiers in <script> and <script setup>
   const definedIdentifiers = new Set<string>(BUILTIN_GLOBALS);
-  const scriptDeclaredFunctions = new Map<string, { line: number; kind: 'function' | 'const' }>();
+  const scriptDeclaredFunctions = new Map<string, { line: number; kind: 'function' | 'const'; body?: string }>();
 
   // Use @vue/compiler-sfc compileScript if scriptSetup or script is present
   try {
@@ -200,7 +201,7 @@ export async function auditEventHandlers(
           const fnName = nameMatch[1];
           const pos = remapPosition(m.line, m.column, blockStart);
           definedIdentifiers.add(fnName);
-          scriptDeclaredFunctions.set(fnName, { line: pos.line, kind: 'function' });
+          scriptDeclaredFunctions.set(fnName, { line: pos.line, kind: 'function', body: m.text });
         }
       }
 
@@ -216,11 +217,22 @@ export async function auditEventHandlers(
           const varName = nameMatch[1];
           const pos = remapPosition(m.line, m.column, blockStart);
           definedIdentifiers.add(varName);
-          scriptDeclaredFunctions.set(varName, { line: pos.line, kind: 'const' });
+          scriptDeclaredFunctions.set(varName, { line: pos.line, kind: 'const', body: m.text });
         }
       }
     } catch {
       // AST grep fallback
+    }
+  }
+
+  // 2b. 1-Hop Static Outbound API resolution for declared script functions
+  const fnOutboundApis = new Map<string, BoundaryContract>();
+  for (const [fnName, fnInfo] of scriptDeclaredFunctions.entries()) {
+    if (fnInfo.body) {
+      const apis = extractBoundaryContracts(fnInfo.body, 'vue');
+      if (apis.length > 0) {
+        fnOutboundApis.set(fnName, apis[0]);
+      }
     }
   }
 
@@ -283,12 +295,15 @@ export async function auditEventHandlers(
             referencedIdentifiersInTemplate.add(ident);
           }
 
+          const outboundApi = fnOutboundApis.get(ident) ?? (extractBoundaryContracts(expContent, 'vue')[0] || undefined);
           if (analysis.isInline) {
+            const inlineApis = extractBoundaryContracts(expContent, 'vue');
             inlineExpressions.push({
               event: fullEvent,
               handlerName: expContent,
               line: absPos.line,
               status: 'inline-expression',
+              ...(inlineApis.length > 0 ? { outboundApi: inlineApis[0] } : {}),
             });
           } else if (definedIdentifiers.has(ident)) {
             validHandlers.push({
@@ -297,6 +312,7 @@ export async function auditEventHandlers(
               line: absPos.line,
               status: 'valid',
               source: scriptDeclaredFunctions.has(ident) ? 'local-function' : 'import',
+              ...(outboundApi ? { outboundApi } : {}),
             });
           } else if (isNuxtCandidate(ident)) {
             candidateHandlers.push({
@@ -310,6 +326,7 @@ export async function auditEventHandlers(
                 resolution: 'candidate',
                 method: 'nuxt-auto-import',
               },
+              ...(outboundApi ? { outboundApi } : {}),
             });
           } else {
             brokenHandlers.push({
@@ -447,7 +464,14 @@ export function formatEventHandlerAuditAsText(result: EventHandlerAuditResult): 
   if (result.candidateHandlers && result.candidateHandlers.length > 0) {
     lines.push(`ℹ️ **AUTO-IMPORTED / CANDIDATE HANDLERS (${result.candidateHandlers.length}):**`);
     for (const ch of result.candidateHandlers) {
-      lines.push(`- Line ${ch.line}: \`@${ch.event}="${ch.handlerName}"\` — ℹ️ Candidate auto-import [${ch.source || 'nuxt-auto-import'}]`);
+      const apiInfo = ch.outboundApi
+        ? ` -> [${ch.outboundApi.boundaryType}] ${ch.outboundApi.method} ${ch.outboundApi.targetEndpoint}${
+            ch.outboundApi.backendTargetHint
+              ? ` -> [Backend: ${ch.outboundApi.backendTargetHint.suggestedSymbols[0] ?? ch.outboundApi.backendTargetHint.targetIntent}]`
+              : ''
+          }`
+        : '';
+      lines.push(`- Line ${ch.line}: \`@${ch.event}="${ch.handlerName}"\` — ℹ️ Candidate auto-import [${ch.source || 'nuxt-auto-import'}]${apiInfo}`);
     }
     lines.push('');
   }
@@ -463,7 +487,14 @@ export function formatEventHandlerAuditAsText(result: EventHandlerAuditResult): 
   if (result.validHandlers.length > 0) {
     lines.push(`**Valid Handlers (${result.validHandlers.length}):**`);
     for (const vh of result.validHandlers) {
-      lines.push(`- Line ${vh.line}: \`@${vh.event}="${vh.handlerName}"\` (source: ${vh.source || 'resolved'})`);
+      const apiInfo = vh.outboundApi
+        ? ` -> [${vh.outboundApi.boundaryType}] ${vh.outboundApi.method} ${vh.outboundApi.targetEndpoint}${
+            vh.outboundApi.backendTargetHint
+              ? ` -> [Backend: ${vh.outboundApi.backendTargetHint.suggestedSymbols[0] ?? vh.outboundApi.backendTargetHint.targetIntent}]`
+              : ''
+          }`
+        : '';
+      lines.push(`- Line ${vh.line}: \`@${vh.event}="${vh.handlerName}"\` (source: ${vh.source || 'resolved'})${apiInfo}`);
     }
     lines.push('');
   }
@@ -471,208 +502,17 @@ export function formatEventHandlerAuditAsText(result: EventHandlerAuditResult): 
   if (result.inlineExpressions.length > 0) {
     lines.push(`**Inline Expressions (${result.inlineExpressions.length}):**`);
     for (const ie of result.inlineExpressions) {
-      lines.push(`- Line ${ie.line}: \`@${ie.event}="${ie.handlerName}"\``);
+      const apiInfo = ie.outboundApi
+        ? ` -> [${ie.outboundApi.boundaryType}] ${ie.outboundApi.method} ${ie.outboundApi.targetEndpoint}${
+            ie.outboundApi.backendTargetHint
+              ? ` -> [Backend: ${ie.outboundApi.backendTargetHint.suggestedSymbols[0] ?? ie.outboundApi.backendTargetHint.targetIntent}]`
+              : ''
+          }`
+        : '';
+      lines.push(`- Line ${ie.line}: \`@${ie.event}="${ie.handlerName}"\`${apiInfo}`);
     }
   }
 
-  return lines.join('\n');
-}
-
-export interface DetectReactivitySmellsOptions {
-  path: string;
-  code?: string;
-}
-
-/**
- * Detects anti-patterns and performance smells in reactivity architectures:
- * - Vue 3: Props destructuring losing reactivity, direct prop mutation via v-model or script
- * - React: Inline function/object allocation inside .map() render loops, missing useEffect deps
- */
-export async function detectReactivitySmells(
-  options: DetectReactivitySmellsOptions
-): Promise<ReactivitySmell[]> {
-  const smells: ReactivitySmell[] = [];
-  const filePath = options.path;
-  let code = options.code;
-
-  if (!code) {
-    try {
-      code = await readSourceFile(filePath);
-    } catch {
-      return smells;
-    }
-  }
-
-  const lines = code.split(/\r?\n/);
-  const ext = filePath.split('.').pop()?.toLowerCase();
-
-  // 1. Vue SFC Analysis
-  if (ext === 'vue') {
-    let isPreVue35 = true;
-    try {
-      const rootDir = findProjectRoot(filePath);
-      const eco = getProjectEcosystem(rootDir);
-      if (eco.frameworks.vue?.major) {
-        isPreVue35 = eco.frameworks.vue.major < 3 || (eco.frameworks.vue.major === 3 && (eco.frameworks.vue.minor ?? 0) < 5);
-      }
-    } catch {
-      // default
-    }
-
-    for (let i = 0; i < lines.length; i++) {
-      const lineNum = i + 1;
-      const line = lines[i];
-      const isComment = /^\s*(?:\/\/|\/\*|\*)/.test(line);
-
-      // Smell A: Destructuring defineProps directly (only loses reactivity in Vue < 3.5)
-      if (isPreVue35) {
-        const definePropsDestructMatch = line.match(/(?:const|let|var)\s*\{([^}]+)\}\s*=\s*defineProps/);
-        if (definePropsDestructMatch && !isComment) {
-          const destructuredVars = definePropsDestructMatch[1].trim();
-          smells.push({
-            type: 'vue-props-destructure',
-            severity: 'warning',
-            message: `Destructuring '{ ${destructuredVars} }' directly from defineProps() causes loss of reactivity in Vue < 3.5.`,
-            line: lineNum,
-            snippet: line.trim(),
-            recommendation: `Access via props object (e.g. 'props.${destructuredVars.split(',')[0].trim()}') or use 'toRefs(props)' to preserve reactivity.`,
-          });
-        }
-      }
-
-      // Smell B: Destructuring props object without toRefs
-      if (
-        !isComment &&
-        /(?:const|let|var)\s*\{([^}]+)\}\s*=\s*props\b/.test(line) &&
-        !line.includes('toRefs') &&
-        !line.includes('storeToRefs')
-      ) {
-        const varsMatch = line.match(/(?:const|let|var)\s*\{([^}]+)\}\s*=\s*props\b/);
-        const vars = varsMatch ? varsMatch[1].trim() : 'props';
-        smells.push({
-          type: 'vue-props-destructure',
-          severity: 'warning',
-          message: `Destructuring '{ ${vars} }' directly from 'props' loses reactivity.`,
-          line: lineNum,
-          snippet: line.trim(),
-          recommendation: `Use 'const { ${vars} } = toRefs(props)' or reference 'props.${vars.split(',')[0].trim()}'.`,
-        });
-      }
-
-      // Smell C: Direct prop mutation in template (v-model="props.xxx" or v-model="$props.xxx")
-      const vModelPropMatch = line.match(/v-model(?::[A-Za-z0-9_-]+)?=["'](?:\$?props)\.([A-Za-z0-9_$.]+)["']/);
-      if (vModelPropMatch && !isComment) {
-        const propName = vModelPropMatch[1];
-        smells.push({
-          type: 'vue-prop-mutation',
-          severity: 'error',
-          message: `Directly mutating prop via 'v-model="props.${propName}"' violates Vue's one-way data flow.`,
-          line: lineNum,
-          snippet: line.trim(),
-          recommendation: `Emit an event (e.g. '@update:modelValue') or use 'defineModel()' / computed setter instead of mutating the prop.`,
-        });
-      }
-
-      // Smell D: Direct prop mutation in script (props.foo = ... or $props.foo = ...)
-      const scriptPropMutMatch = line.match(/(?:\bprops|\$props)\.([A-Za-z0-9_$]+)\s*(?:=|\+\+|--|\+=|-=)/);
-      if (!isComment && scriptPropMutMatch && !line.includes('defineProps') && !line.includes('==') && !line.includes('===')) {
-        const propName = scriptPropMutMatch[1];
-        smells.push({
-          type: 'vue-prop-mutation',
-          severity: 'error',
-          message: `Direct mutation of prop '${propName}' in script violates one-way data flow.`,
-          line: lineNum,
-          snippet: line.trim(),
-          recommendation: `Emit an event to the parent component rather than mutating the prop directly.`,
-        });
-      }
-    }
-  }
-
-  // 2. React / JSX / TSX Analysis
-  if (ext === 'jsx' || ext === 'tsx' || ext === 'js' || ext === 'ts') {
-    let inMapBlock = false;
-    let mapStartLine = 0;
-
-    for (let i = 0; i < lines.length; i++) {
-      const lineNum = i + 1;
-      const line = lines[i];
-
-      if (/\.(?:map|flatMap)\s*\(\s*(?:\([^)]*\)|[A-Za-z0-9_$]+)\s*=>/.test(line)) {
-        inMapBlock = true;
-        mapStartLine = lineNum;
-      }
-
-      if (inMapBlock) {
-        // Smell A: Inline function handlers inside loop rendering custom components
-        const inlineHandlerMatch = line.match(/<[A-Z][A-Za-z0-9_]*[^>]*?(?:on[A-Z][A-Za-z0-9]*)=\{(?:\([^)]*\)|[A-Za-z0-9_$]+)\s*=>/);
-        if (inlineHandlerMatch) {
-          smells.push({
-            type: 'react-inline-in-loop',
-            severity: 'warning',
-            message: `Inline arrow function callback allocated inside .map() render loop causes unnecessary re-renders.`,
-            line: lineNum,
-            snippet: line.trim(),
-            recommendation: `Extract item action handler, pass ID to child component callback, or wrap child in React.memo with useCallback.`,
-          });
-        }
-
-        // Smell B: Inline object / style literal inside loop rendering custom components
-        const inlineObjMatch = line.match(/<[A-Z][A-Za-z0-9_]*[^>]*?[a-zA-Z0-9_-]+=\{\{\s*[^}]+\s*\}\}/);
-        if (inlineObjMatch) {
-          smells.push({
-            type: 'react-inline-in-loop',
-            severity: 'warning',
-            message: `Inline object literal passed as prop inside .map() loop creates new object references every render.`,
-            line: lineNum,
-            snippet: line.trim(),
-            recommendation: `Hoist static style/config objects outside the render loop or memoize.`,
-          });
-        }
-
-        if (lineNum > mapStartLine + 30 || (line.includes(');') && inMapBlock)) {
-          inMapBlock = false;
-        }
-      }
-
-      // Smell C: useEffect hook without dependency array
-      const useEffectNoDeps = line.match(/useEffect\s*\(\s*(?:\(\)\s*=>|function\s*\(\))\s*\{/);
-      if (useEffectNoDeps && !line.includes(', [')) {
-        const followingLines = lines.slice(i, Math.min(i + 15, lines.length)).join('\n');
-        if (/\}\s*\)/.test(followingLines) && !/\}\s*,\s*\[/.test(followingLines)) {
-          smells.push({
-            type: 'general',
-            severity: 'warning',
-            message: `useEffect hook called without a dependency array runs on EVERY single render.`,
-            line: lineNum,
-            snippet: line.trim(),
-            recommendation: `Add a dependency array '[]' or specify reactive dependencies.`,
-          });
-        }
-      }
-    }
-  }
-
-  return smells;
-}
-
-/**
- * Formats reactivity smells into a concise, readable diagnostic text block.
- */
-export function formatReactivitySmellsAsText(smells: ReactivitySmell[]): string {
-  if (!smells || smells.length === 0) {
-    return '✅ No reactivity smells detected.';
-  }
-
-  const lines: string[] = [`Reactivity Smells (${smells.length} detected):`];
-  for (const s of smells) {
-    const icon = s.severity === 'error' ? '❌' : '⚠️';
-    lines.push(`  ${icon} [${s.severity.toUpperCase()}] Line ${s.line}: ${s.message}`);
-    if (s.snippet) {
-      lines.push(`     Code: \`${s.snippet}\``);
-    }
-    lines.push(`     Fix: ${s.recommendation}`);
-  }
   return lines.join('\n');
 }
 

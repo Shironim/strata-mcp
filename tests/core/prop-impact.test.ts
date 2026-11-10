@@ -25,7 +25,7 @@ test('omission evidence distinguishes absent props from forwarding and counts re
   const summary = await analyzePropImpact({ target, workspace: root, props, detail: 'summary' });
   expect(summary.props[0]!.omittedRenderCount).toBe(3);
   expect(summary.props[0]!.omissions).toBeUndefined();
-  const response = await inspectComponentTool.handler({ path: target, project_root: root, resolve_globals: false, impact: 'full', response_detail: 'summary', format: 'json' });
+  const response = await inspectComponentTool.handler({ path: target, project_root: root, impact: 'full', response_detail: 'summary', format: 'json' });
   const projected = (response.structuredContent as any).propImpact.props[0];
   expect(projected.omittedRenderCount).toBe(3);
   expect(projected.omissions).toBeUndefined();
@@ -100,7 +100,7 @@ test('alias/barrel imports resolve to the explicit target; filtered scope does n
 
 test('real inspect handler exposes opt-in impact in text/JSON without changing default contract or accepting selector conflicts', async () => fixture(async (root, target) => {
   await writeFile(join(root, 'Parent.vue'), '<script setup>import Child from "./Child.vue"</script><template><Child title="yes"/></template>');
-  const base = { path: target, project_root: root, resolve_globals: false };
+  const base = { path: target, project_root: root, };
   const defaultResult = await inspectComponentTool.handler({ ...base, format: 'json' });
   expect(defaultResult.isError).not.toBe(true);
   expect(defaultResult.structuredContent?.propImpact).toBeUndefined();

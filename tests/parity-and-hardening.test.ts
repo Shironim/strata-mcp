@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { coerceToolArguments, parseSafePositiveInt, parseSafeFloat } from '../src/mcp';
+import { coerceToolArguments, parseSafePositiveInt } from '../src/mcp';
 import { auditFrontendTool } from '../src/tools/audit-frontend';
 import { patchPlanTool } from '../src/tools/patch-plan';
 import { componentTreeTool } from '../src/tools/component-tree';
@@ -17,13 +17,6 @@ describe('Strata-MCP Parity, Coercion, & Hardening Suite', () => {
       expect(parseSafePositiveInt(undefined, 3)).toBe(3);
     });
 
-    test('parseSafeFloat preserves 0 threshold and rejects NaN', () => {
-      expect(parseSafeFloat(0)).toBe(0);
-      expect(parseSafeFloat('0')).toBe(0);
-      expect(parseSafeFloat('0.75')).toBe(0.75);
-      expect(parseSafeFloat('invalid', 0.8)).toBe(0.8);
-      expect(parseSafeFloat(-0.5, 0.8)).toBe(0.8);
-    });
   });
 
   describe('Universal MCP Coercion (coerceToolArguments)', () => {
@@ -65,40 +58,36 @@ describe('Strata-MCP Parity, Coercion, & Hardening Suite', () => {
       expect(a1.ignore_patterns).toEqual(['*.stories.vue', '*.test.vue']);
     });
 
-    test('guards depth, max_depth, max_results, and threshold against NaN and 0', () => {
+    test('guards depth, max_depth, and max_results against NaN and 0', () => {
       const bad = coerceToolArguments('get_component_tree', {
         depth: 'not-a-number',
         max_results: 0,
-        threshold: 'nan',
       });
       expect(bad.depth).toBeUndefined();
       expect(bad.max_depth).toBeUndefined();
       expect(bad.max_results).toBeUndefined();
-      expect(bad.threshold).toBeUndefined();
 
-      const zeroThreshold = coerceToolArguments('audit_frontend', {
-        threshold: 0,
+      const validDepth = coerceToolArguments('audit_frontend', {
         depth: '4',
       });
-      expect(zeroThreshold.threshold).toBe(0);
-      expect(zeroThreshold.depth).toBe(4);
-      expect(zeroThreshold.max_depth).toBe(4);
+      expect(validDepth.depth).toBe(4);
+      expect(validDepth.max_depth).toBe(4);
     });
   });
 
   describe('Tool Handler Validation & Parity', () => {
-    test('audit_frontend rejects unknown targets with isError instead of running all 7 audits', async () => {
+    test('audit_frontend rejects unknown targets with isError instead of running all audits', async () => {
       const res = await auditFrontendTool.handler({ target: 'unknown-audit-target' });
       expect(res.isError).toBe(true);
       expect(res.content[0].text).toContain('Invalid audit target');
     });
 
-    test('audit_frontend accepts snake_case target and short aliases without falling through to all', async () => {
+    test('audit_frontend rejects removed snake_case targets without falling through to all', async () => {
       const res = await auditFrontendTool.handler({
         target: 'archetype_drift',
       });
       expect(res.isError).toBe(true);
-      expect(res.content[0].text).toContain("Missing required argument: 'path'");
+      expect(res.content[0].text).toContain('Invalid audit target');
     });
 
     test('generate_patch_plan requires new_name for rename_model and rename_slot', async () => {
@@ -119,26 +108,40 @@ describe('Strata-MCP Parity, Coercion, & Hardening Suite', () => {
       expect(resSlot.content[0].text).toContain('"new_name" is required');
     });
 
-    test('public library index exports template-similarity, bundle-audit, dynamic-imports, and tools', () => {
-      expect(typeof StrataIndex.findSimilarTemplates).toBe('function');
-      expect(typeof StrataIndex.auditBundleHealth).toBe('function');
+    test('public library index retains core exports and removes pruned audits', () => {
+      expect('findSimilarTemplates' in StrataIndex).toBe(false);
+      expect('auditBundleHealth' in StrataIndex).toBe(false);
       expect(typeof StrataIndex.scanDynamicImportsAndGlobals).toBe('function');
       expect(Array.isArray(StrataIndex.TOOLS)).toBe(true);
       expect(StrataIndex.TOOLS.length).toBe(6);
     });
 
-    test('strata init templates and instructions include archetype-drift, rename_model, and rename_slot', async () => {
-      const { STRATA_FRONTEND_RULE, STRATA_INSPECT_SKILL } = await import('../src/cli/templates');
+    test('strata init templates and instructions exclude pruned audits and retain rename_model and rename_slot', async () => {
+      const { readFileSync } = await import('node:fs');
+      const { join } = await import('node:path');
+      const { STRATA_FRONTEND_RULE, STRATA_INSPECT_SKILL, STRATA_TS_RULE, STRATA_TS_SKILL } = await import('../src/cli/templates');
       const { STRATA_INSTRUCTIONS } = await import('../src/instructions');
+      const checkedInSkill = readFileSync(join(import.meta.dir, '../.agents/skills/use-strata/SKILL.md'), 'utf8');
 
-      expect(STRATA_FRONTEND_RULE).toContain('archetype-drift');
+      expect(STRATA_FRONTEND_RULE).not.toContain('archetype-drift');
       expect(STRATA_FRONTEND_RULE).toContain('rename_model');
       expect(STRATA_FRONTEND_RULE).toContain('rename_slot');
 
-      expect(STRATA_INSPECT_SKILL).toContain('archetype-drift');
-      expect(STRATA_INSPECT_SKILL).toContain('rename_model');
+      for (const skillText of [STRATA_INSPECT_SKILL, checkedInSkill]) {
+        expect(skillText).not.toContain('archetype-drift');
+        expect(skillText).not.toContain('target_name');
+        expect(skillText).not.toContain('file_path?:');
+        expect(skillText).not.toContain('query:');
+        expect(skillText).toContain('pattern:');
+        expect(skillText).toContain('old_name:');
+        expect(skillText).toContain('rename_model');
+      }
 
-      expect(STRATA_INSTRUCTIONS).toContain('archetype-drift');
+      expect(STRATA_TS_RULE).not.toContain('archetype-drift');
+      expect(STRATA_TS_SKILL).toContain('pattern:');
+      expect(STRATA_TS_SKILL).not.toContain('query:');
+
+      expect(STRATA_INSTRUCTIONS).not.toContain('archetype-drift');
       expect(STRATA_INSTRUCTIONS).toContain('rename_model');
     });
   });

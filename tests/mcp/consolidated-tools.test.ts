@@ -89,7 +89,7 @@ describe('routes and API contracts through audit_frontend', () => {
     try {
       const call = (server as any)._requestHandlers.get('tools/call');
       for (const name of ['get_routes', 'get_api_contracts']) {
-        const response = await call({ method: 'tools/call', params: { name, arguments: { path: root } } });
+        const response = await call({ method: 'tools/call', params: { name, arguments: { root, path: root } } });
         expect(response.isError).toBe(true);
         expect(response.content[0].text).toContain('audit_frontend');
       }

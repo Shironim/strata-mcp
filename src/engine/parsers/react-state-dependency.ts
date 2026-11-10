@@ -7,6 +7,10 @@ const BUILTINS = new Set(['useState', 'useEffect', 'useCallback', 'useMemo', 'us
   'useTransition', 'useDeferredValue', 'useImperativeHandle', 'useLayoutEffect', 'useInsertionEffect', 'useSyncExternalStore', 'useActionState', 'useOptimistic']);
 const REDUX = /^(useSelector|useDispatch|useAppSelector|useAppDispatch)$/;
 const ACTION = /^(set|update|delete|add|remove|open|close|mutate|trigger|toggle|reset|dispatch|handle|submit|checkout)/i;
+// Conventional collection reads remain candidates: custom methods and callbacks can have side effects.
+const COLLECTION_READS = new Set(['filter', 'slice', 'map', 'flat', 'flatMap', 'concat', 'find', 'findIndex',
+  'findLast', 'findLastIndex', 'includes', 'indexOf', 'lastIndexOf', 'some', 'every', 'reduce', 'reduceRight',
+  'forEach', 'join', 'at', 'entries', 'keys', 'values', 'toSorted', 'toReversed', 'toSpliced', 'with']);
 interface Dependency { kind: StateDependencyItem['kind']; identifier: string; evidence: Evidence }
 
 export function extractReactStateDependencies(content: string, self?: string): StateDependencyInfo {
@@ -23,13 +27,21 @@ export function extractReactStateDependencies(content: string, self?: string): S
     if (!dependencies.has(key)) dependencies.set(key, { kind, identifier, evidence: { basis: 'derived', resolution: 'candidate', method, reason } });
     return dependencies.get(key)!;
   }
-  function record(dependency: Dependency, node: ts.Node, accessMode: 'read' | 'write' = 'read'): void {
+  function record(dependency: Dependency, node: ts.Node, accessMode: 'read' | 'write' = 'read', accessedProperties?: string[]): void {
     const lineNumber = sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1;
+    const existing = items.find(item => item.kind === dependency.kind && item.identifier === dependency.identifier && item.lineNumber === lineNumber && item.accessMode === accessMode);
+    if (existing) {
+      if (accessedProperties && accessedProperties.length > 0) {
+        existing.accessedProperties = Array.from(new Set([...(existing.accessedProperties ?? []), ...accessedProperties]));
+      }
+      return;
+    }
     const key = `${dependency.kind}:${dependency.identifier}:${lineNumber}:${accessMode}`;
     if (seenItems.has(key)) return;
     seenItems.add(key);
     items.push({ kind: dependency.kind, identifier: dependency.identifier, accessMode, lineNumber,
-      usageSnippet: lines[lineNumber - 1]?.trim().slice(0, 80), evidence: dependency.evidence });
+      usageSnippet: lines[lineNumber - 1]?.trim().slice(0, 80), evidence: dependency.evidence,
+      ...(accessedProperties && accessedProperties.length > 0 ? { accessedProperties } : {}) });
   }
   function classify(identifier: ts.Identifier): Dependency | undefined {
     const value = bindings.binding(identifier);
@@ -96,7 +108,45 @@ export function extractReactStateDependencies(content: string, self?: string): S
           && (!imported || /^jotai(?:\/|$)/.test(imported.source ?? ''))) dependency = add('store', arg.text, 'atom-hook-binding');
         else if (direct) dependency = classify(direct);
       }
-      if (dependency) { record(dependency, node); seed(node, dependency, name); }
+      if (dependency) {
+        const accessed: string[] = [];
+        if (node.arguments[0]) {
+          const arg0 = node.arguments[0];
+          let fn: ts.ArrowFunction | ts.FunctionExpression | undefined;
+          if (ts.isArrowFunction(arg0) || ts.isFunctionExpression(arg0)) fn = arg0;
+          if (fn && fn.parameters.length > 0) {
+            const firstParam = fn.parameters[0];
+            if (ts.isIdentifier(firstParam.name)) {
+              const paramName = firstParam.name.text;
+              const scanParam = (n: ts.Node) => {
+                if (ts.isPropertyAccessExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === paramName) {
+                  accessed.push(n.name.text);
+                }
+                ts.forEachChild(n, scanParam);
+              };
+              scanParam(fn.body);
+            } else if (ts.isObjectBindingPattern(firstParam.name)) {
+              for (const el of firstParam.name.elements) {
+                if (ts.isBindingElement(el) && ts.isIdentifier(el.name)) {
+                  accessed.push(el.propertyName?.getText(sf) ?? el.name.text);
+                }
+              }
+            }
+          }
+        }
+        let currentParent: ts.Node = node;
+        while (ts.isParenthesizedExpression(currentParent.parent) || ts.isAsExpression(currentParent.parent) || ts.isSatisfiesExpression(currentParent.parent) || ts.isAwaitExpression(currentParent.parent) || ts.isNonNullExpression(currentParent.parent)) currentParent = currentParent.parent;
+        if (ts.isVariableDeclaration(currentParent.parent) && ts.isObjectBindingPattern(currentParent.parent.name)) {
+          for (const el of currentParent.parent.name.elements) {
+            if (ts.isBindingElement(el) && ts.isIdentifier(el.name)) {
+              accessed.push(el.propertyName?.getText(sf) ?? el.name.text);
+            }
+          }
+        }
+        const uniqueAccessed = Array.from(new Set(accessed));
+        record(dependency, node, 'read', uniqueAccessed.length > 0 ? uniqueAccessed : undefined);
+        seed(node, dependency, name);
+      }
     }
     ts.forEachChild(node, visit);
   }
@@ -113,10 +163,14 @@ export function extractReactStateDependencies(content: string, self?: string): S
         for (const tracked of value ? tracking.get(value) ?? [] : []) {
           let access: ts.Node = node;
           while ((ts.isPropertyAccessExpression(access.parent) || ts.isElementAccessExpression(access.parent)) && access.parent.expression === access) access = access.parent;
-          const write = ts.isCallExpression(access.parent) && access.parent.expression === access && (tracked.action || access !== node)
+          const method = ts.isPropertyAccessExpression(access) ? access.name.text
+            : ts.isElementAccessExpression(access) && access.argumentExpression && ts.isStringLiteralLike(access.argumentExpression)
+              ? access.argumentExpression.text : undefined;
+          const write = ts.isCallExpression(access.parent) && access.parent.expression === access
+            && (access === node ? tracked.action : !method || !COLLECTION_READS.has(method))
             || ts.isBinaryExpression(access.parent) && access.parent.left === access && access.parent.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && access.parent.operatorToken.kind <= ts.SyntaxKind.LastAssignment
             || (ts.isPrefixUnaryExpression(access.parent) || ts.isPostfixUnaryExpression(access.parent)) && [ts.SyntaxKind.PlusPlusToken, ts.SyntaxKind.MinusMinusToken].includes(access.parent.operator);
-          record(tracked.dependency, node, write ? 'write' : 'read');
+          record(tracked.dependency, node, write ? 'write' : 'read', method ? [method] : undefined);
         }
       }
     }

@@ -41,7 +41,14 @@ test('inclusive line ranges preserve original internal line endings and include 
 
   expect(await readSourceRef(path, selected.ref)).toBe('one\r\ntwo');
   expect(finalLine.lineRange).toEqual({ startLine: 3, endLine: 3 });
+  expect(finalLine.clamped).toBe(false);
   expect(await readSourceRef(path, finalLine.ref)).toBe('');
+
+  const clamped = getSourceLineRange(snapshot, source, 1, 99);
+  expect(clamped.clamped).toBe(true);
+  expect(clamped.requestedEndLine).toBe(99);
+  expect(clamped.lineRange).toEqual({ startLine: 1, endLine: 3 });
+  expect(() => getSourceLineRange(snapshot, source, 4, 5)).toThrow('INVALID_SOURCE_RANGE');
 });
 
 test('stale, out-of-bounds and surrogate-splitting references are rejected', async () => {

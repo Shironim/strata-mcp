@@ -41,7 +41,7 @@ test('capability identifies actual selectors and aliases instead of treating vie
 });
 
 test('declared implementation and framework certification remain separate', () => {
-  const assessment = assessCapability('inspect_component', { path: 'Button.vue' });
+  const assessment = assessCapability('inspect_component', { path: 'Button.vue', impact: 'full' });
   expect(assessment).toMatchObject({ operation: 'contract', implementation: 'declared', validation: 'not-certified', frameworkVersion: 'unknown', status: 'partial' });
   expect(assessment.features.find(item => item.id === 'consumer-count-per-prop')?.status).toBe('partial');
   expect(assessCapability('inspect_component', { path: 'Button.svelte' }).status).toBe('unknown');
@@ -67,14 +67,14 @@ test('empty results on all six tools name only the selection they actually count
 test('missing payloads, unrelated arrays, and a missing audit section never mean empty', () => {
   expect(decide('inspect_component', {}, { props: [], slots: [] }).selection.count).toBeNull();
   expect(decide('get_component_tree', {}, { diagnostics: [] }).emptyOutcome).toBe('not-asserted');
-  expect(decide('audit_frontend', { target: 'design-tokens' }, { a11yViolations: [] }).selection.count).toBeNull();
+  expect(decide('audit_frontend', { target: 'all' }, { routes: { routes: [] } }).selection.count).toBeNull();
   expect(decide('trace_state', { depth: 2 }, { consumers: [] }).selection.count).toBeNull();
 });
 
 test('filters and multiple selected collections do not manufacture absence', () => {
   expect(decide('trace_state', { direction: 'both' }, { consumers: [], dependencies: [{ identifier: 'useOther' }] }).selection.count).toBe(1);
   expect(decide('trace_state', { direction: 'consumers', depth: 2 }, { consumers: [], dependencies: [{ identifier: 'useOther' }] }).selection.count).toBe(0);
-  expect(decide('audit_frontend', { target: 'design-tokens' }, { a11yViolations: [], arbitraryTokens: [{ token: 'px-[3px]' }] }).selection.count).toBe(1);
+  expect(decide('audit_frontend', { target: 'all' }, { routes: { routes: [] }, unusedComponents: { unusedComponents: [] }, unusedState: { unusedState: [] }, apiContracts: { endpoints: [{ endpoint: '/api/items' }] } }).selection.count).toBe(1);
 });
 
 test('local diagnostics and coverage gaps prevent a negative complete result', () => {
@@ -91,4 +91,12 @@ test('audit all requires all selected sections and counts findings rather than e
     designSystemAudit: { arbitraryTokens: [], a11yViolations: [] }, bundleAudit: { heavyEagerImports: [] }, apiContracts: { endpoints: [] } };
   expect(decide('audit_frontend', { target: 'all' }, all).selection.count).toBe(0);
   expect(decide('audit_frontend', { target: 'all' }, { ...all, apiContracts: {} }).selection.count).toBeNull();
+});
+
+test('capabilities describe JSX impact/search and Svelte prop edits without framework certification', () => {
+  const impact = assessCapability('inspect_component', { path: 'Button.tsx', impact: 'full' });
+  expect(impact.features.find(f => f.id === 'consumer-count-per-prop')?.reason).toContain('React/JSX');
+  expect(impact.validation).toBe('not-certified');
+  expect(assessCapability('find_code', { prop_name: 'title' }).features[0]?.reason).toContain('React/JSX');
+  expect(assessCapability('generate_patch_plan', { refactor_type: 'rename_prop' }).features.find(f => f.id === 'static-consumer-edits')?.reason).toContain('Svelte');
 });

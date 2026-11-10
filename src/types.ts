@@ -136,46 +136,6 @@ export type DocumentType =
   | 'astro'
   | 'script';
 
-export type PatternCategory =
-  | 'reactivity'
-  | 'data-flow'
-  | 'rendering'
-  | 'ssr-hydration'
-  | 'boundary'
-  | 'performance'
-  | 'legacy-syntax'
-  | 'architecture'
-  | 'syntax'
-  | 'security'
-  | 'correctness'
-  | 'reliability';
-
-export interface CanonicalRemediation {
-  summary: string;
-  rationale: string;
-  canonicalCode: string;
-  referenceDoc?: string;
-}
-
-export interface CodePatternDiagnostic {
-  ruleId: string;                  // e.g. 'vue/no-prop-mutation', 'solid/no-props-destructure'
-  framework: FrontendFramework;
-  category: PatternCategory;
-  severity: 'error' | 'warning' | 'info';
-  fact: {
-    snippet: string;
-    span: SourceSpan;
-    lineRange: SourceLineRange | null;
-    ref: SourceRef;                // Terikat SHA-256 snapshot
-  };
-  smell: {
-    title: string;
-    explanation: string;           // Mengapa pola di dalam kode tersebut salah/berbahaya
-  };
-  canon: CanonicalRemediation;     // Bagaimana kode seharusnya ditulis sesuai standar
-  evidence: Evidence;              // basis: 'source' | 'derived' | 'heuristic'
-}
-
 export interface SourceMapResult {
   snapshot: SourceSnapshot;
   documentType: DocumentType;
@@ -282,6 +242,8 @@ export interface ComponentPropContract {
   default?: string;
   isUnion?: boolean;
   unionMembers?: string[];
+  description?: string;
+  deprecated?: boolean | string;
 }
 
 export interface ComponentEmitContract {
@@ -331,6 +293,7 @@ export interface StateDependencyItem {
   lineNumber?: number;
   usageSnippet?: string;
   evidence?: Evidence;
+  accessedProperties?: string[];
 }
 
 export interface StateDependencyInfo {
@@ -363,13 +326,6 @@ export interface ComponentSlotDetail {
   payload?: Record<string, string>;
 }
 
-export interface ComponentStyleTokens {
-  layoutTraps: string[];
-  zIndices: string[];
-  overflow: string[];
-  positioning: string[];
-}
-
 export interface DynamicClassBinding {
   line: number;
   tag: string;
@@ -396,91 +352,6 @@ export interface ComponentLayoutStructure {
   rootWrapper?: RootWrapperLayout;
   dynamicBindings: DynamicClassBinding[];
   visibilityDirectives: VisibilityDirective[];
-  sections?: SemanticSection[];
-}
-
-export interface InferredPropProperty {
-  property: string;
-  inferredType?: string;
-  usageSnippet?: string;
-}
-
-export interface InferredPropDetail {
-  propName: string;
-  properties: InferredPropProperty[];
-}
-
-export interface GlobalSymbolInfo {
-  name: string;
-  category: 'ziggy-route' | 'auto-import' | 'global-helper' | 'inferred-global';
-  hint?: string;
-}
-
-export type SerializationFormat = 'json' | 'multipart/form-data' | 'query-params' | 'unknown';
-
-export interface EgressTransportContract {
-  endpoint: string;
-  method: string;
-  clientKind: string;
-  serialization: SerializationFormat;
-  payloadKeys: string[];
-  casing: 'camelCase' | 'snake_case' | 'mixed' | 'unknown';
-  potentialRisks: string[];
-}
-
-export interface IngressTransportContract {
-  source: 'page-props' | 'tanstack-query' | 'swr' | 'fetch-response' | 'inertia-shared';
-  rootPropName: string;
-  expectedShape: 'paginated-collection' | 'array' | 'entity-object' | 'primitive' | 'unknown';
-  accessedProperties: Array<{
-    path: string;
-    inferredType: string;
-    hasNullGuard: boolean;
-  }>;
-  potentialRisks: string[];
-}
-
-export interface ValidationFieldRule {
-  field: string;
-  baseType: string;
-  isOptional: boolean;
-  isNullable: boolean;
-  constraints: string[];
-}
-
-export interface ValidationSchemaContract {
-  name: string;
-  schemaLibrary: 'zod' | 'valibot' | 'yup' | 'typescript-interface';
-  fields: ValidationFieldRule[];
-}
-
-export interface ErrorHandlingAudit {
-  hasErrorBinding: boolean;
-  errorSources: string[];
-  boundErrorFields: string[];
-  unhandledPayloadKeys: string[];
-}
-
-export interface InvalidationNode {
-  line: number;
-  mechanism: 'tanstack-invalidate' | 'swr-mutate' | 'inertia-reload' | 'custom';
-  targetKeyOrUrl: string;
-  triggerAction?: string;
-}
-
-export interface InvalidationGraphContract {
-  invalidations: InvalidationNode[];
-  hasDanglingMutation: boolean;
-  danglingMutations: string[];
-}
-
-export interface BidirectionalTransportContract {
-  egress: EgressTransportContract[];
-  ingress: IngressTransportContract[];
-  validationSchemas?: ValidationSchemaContract[];
-  errorHandling?: ErrorHandlingAudit;
-  invalidationGraph?: InvalidationGraphContract;
-  transportRisks: string[];
 }
 
 export interface UnresolvedMetadataField {
@@ -578,13 +449,7 @@ export interface ComponentContract {
   renderBoundary?: RenderBoundaryInfo;
   stateDependencies?: StateDependencyInfo;
   dataDependencies?: DataDependencyInfo;
-  inferredProps?: InferredPropDetail[];
-  globalSymbols?: GlobalSymbolInfo[];
-  styleTokens?: ComponentStyleTokens;
   layoutStructure?: ComponentLayoutStructure;
-  transportContract?: BidirectionalTransportContract;
-  reactivitySmells?: ReactivitySmell[];
-  patternDiagnostics?: CodePatternDiagnostic[];
   boundaryContracts?: BoundaryContract[];
   formContracts?: FormContract[];
   symbolOutline?: ComponentSymbolOutline;
@@ -597,8 +462,6 @@ export interface ComponentContract {
 
 export interface ContractOptions {
   path?: string;
-  inferProps?: boolean;
-  resolveGlobals?: boolean;
   outputFormat?: 'text' | 'json';
   workspaceRoot?: string;
 }
@@ -606,6 +469,7 @@ export interface ContractOptions {
 export interface PassedPropInfo {
   propName: string;
   expression: string;
+  isSpread?: boolean;
 }
 
 export interface ComponentTreeNode {
@@ -618,7 +482,8 @@ export interface ComponentTreeNode {
   isPage?: boolean;
   isExternalScope?: boolean;
   isRendered?: boolean;
-  relationKind?: 'render' | 'import' | 'type';
+  isCascadingWrapper?: boolean;
+  relationKind?: 'render' | 'import' | 'type' | 'dynamic-import';
   warning?: string;
   depth: number;
   passedProps?: PassedPropInfo[];
@@ -648,7 +513,7 @@ export interface ComponentTreeResult {
   } | {
     code: 'CYCLE_TRUNCATED';
     filePath: string;
-    sourceHash: string;
+    sourceHash: string | null;
     targetPath: string;
     depth: number;
     reason: string;
@@ -680,7 +545,7 @@ export interface ComponentTreeResult {
     sourceHash: null;
     reason: string;
   } | {
-    code: 'MAX_DEPTH_REACHED' | 'SCOPE_BOUNDARY' | 'SOURCE_READ_FAILED';
+    code: 'MAX_DEPTH_REACHED' | 'SCOPE_BOUNDARY' | 'SOURCE_READ_FAILED' | 'UPWARD_RESULTS_TRUNCATED';
     filePath: string;
     sourceHash: null;
     depth: number;
@@ -690,6 +555,7 @@ export interface ComponentTreeResult {
   totalComponents: number;
   maxDepthReached: number;
   direction?: 'downward' | 'upward' | 'down' | 'up';
+  has_more?: boolean;
   propsDrilling: PropsDrillingAlert[];
   contextGraph?: ContextDependencyGraph;
   resolvedRoute?: {
@@ -712,6 +578,7 @@ export interface ComponentTreeOptions {
   aliasMap?: Record<string, string>;
   includeLayouts?: boolean;
   includeProps?: boolean;
+  limit?: number;
 }
 
 export interface ResolveRouteEntryOptions {
@@ -861,6 +728,7 @@ export interface StateImpactConsumer {
   accessMode?: StateAccessMode;
   lineNumber?: number;
   actionsCalled?: string[];
+  accessedProperties?: string[];
   usageSnippet?: string;
 }
 
@@ -883,20 +751,6 @@ export interface QueryStateImpactOptions {
   outputFormat?: 'text' | 'json';
 }
 
-export interface TemplateSimilarityCluster {
-  similarity: number;
-  files: string[];
-  sharedStructure: string[];
-  recommendation: string;
-}
-
-export interface TemplateSimilarityResult {
-  workspaceRoot: string;
-  clusters: TemplateSimilarityCluster[];
-  totalComponentsAudited: number;
-  _meta?: EngineMetadata;
-}
-
 export interface UnusedStateItem {
   identifier: string;
   kind: 'store' | 'context' | 'composable';
@@ -917,19 +771,13 @@ export type SymbolKind =
   | 'class'
   | 'interface'
   | 'type'
+  | 'enum'
   | 'variable'
   | 'computed'
   | 'watcher'
   | 'method'
   | 'composable'
   | 'unknown';
-
-export interface ComplexitySmell {
-  isHighComplexity: boolean;
-  threshold: number;
-  totalLines: number;
-  warning: string;
-}
 
 export interface ResolvedCalleeReference {
   symbol: string;
@@ -945,7 +793,7 @@ export interface ResolvedCalleeReference {
 
 export interface FunctionOutlineItem {
   name: string;
-  kind: 'function' | 'arrow-function' | 'method' | 'computed' | 'watcher' | 'composable';
+  kind: Exclude<SymbolKind, 'unknown'>;
   startLine: number;
   endLine: number;
   lineCount: number;
@@ -953,14 +801,12 @@ export interface FunctionOutlineItem {
   isExported: boolean;
   internalCalls: string[];
   resolvedCalls?: ResolvedCalleeReference[];
-  complexitySmell?: ComplexitySmell;
 }
 
 export interface ComponentSymbolOutline {
   filePath: string;
   framework: string;
   totalFunctions: number;
-  highComplexityCount: number;
   functions: FunctionOutlineItem[];
   dependencies?: InputDependency[];
   _meta?: EngineMetadata;
@@ -968,7 +814,6 @@ export interface ComponentSymbolOutline {
 
 export interface ExtractOutlineOptions {
   path: string;
-  maxFunctionLines?: number;
   resolveCalls?: boolean;
   workspaceRoot?: string;
   outputFormat?: 'text' | 'json';
@@ -982,7 +827,6 @@ export interface SymbolSliceResult {
   endLine: number;
   code: string;
   signature?: string;
-  complexitySmell?: ComplexitySmell;
   blastRadius?: {
     status?: 'resolved' | 'partial' | 'unknown' | 'verified';
     reason?: string;
@@ -1015,6 +859,7 @@ export interface EventHandlerInfo {
   status: 'valid' | 'broken' | 'inline-expression' | 'candidate';
   source?: 'local-function' | 'composable-return' | 'prop' | 'import' | 'unresolved' | 'nuxt-auto-import';
   evidence?: Evidence;
+  outboundApi?: BoundaryContract;
 }
 
 export interface DeadHandlerInfo {
@@ -1065,51 +910,6 @@ export interface TraceStateChainOptions {
   targetPath?: string;
   direction?: 'consumers' | 'dependencies' | 'both';
   maxDepth?: number;
-  outputFormat?: 'text' | 'json';
-}
-
-export interface ReactivitySmell {
-  type: 'vue-props-destructure' | 'vue-prop-mutation' | 'react-inline-in-loop' | 'general';
-  severity: 'error' | 'warning';
-  message: string;
-  line: number;
-  snippet?: string;
-  recommendation: string;
-}
-
-export interface ArbitraryTokenViolation {
-  file: string;
-  line: number;
-  token: string;
-  category: 'color' | 'spacing' | 'radius' | 'size' | 'layout-trap' | 'other';
-  recommendation: string;
-}
-
-export interface A11yViolation {
-  file: string;
-  line: number;
-  column?: number;
-  element: string;
-  issue: string;
-  recommendation: string;
-  ruleId?: string;
-  certainty?: 'confirmed' | 'candidate';
-  severity?: 'error' | 'warning';
-}
-
-export interface DesignSystemAuditResult {
-  workspaceRoot: string;
-  totalFilesAudited: number;
-  arbitraryTokens: ArbitraryTokenViolation[];
-  radiusDistribution: Record<string, number>;
-  a11yViolations: A11yViolation[];
-  _meta?: EngineMetadata;
-}
-
-export interface AuditDesignTokensOptions {
-  targetPath: string;
-  scopePath?: string;
-  excludeDirs?: string[];
   outputFormat?: 'text' | 'json';
 }
 
@@ -1201,27 +1001,6 @@ export interface EdgePayload {
 }
 
 // ---------------------------------------------------------------------------
-// Zero-Bloat Bundle & Island Architecture Awareness
-// ---------------------------------------------------------------------------
-
-export interface BundleWeightWarning {
-  file: string;
-  line: number;
-  module: string;
-  category: 'chart' | 'rich-text' | 'pdf' | 'spreadsheet' | '3d-canvas' | 'heavy-utility';
-  recommendation: string;
-  islandDirective?: string; // e.g. 'client:load' vs 'client:visible'
-}
-
-export interface BundleAuditResult {
-  workspaceRoot: string;
-  totalFilesAudited: number;
-  heavyEagerImports: BundleWeightWarning[];
-  totalWarnings: number;
-  _meta?: EngineMetadata;
-}
-
-// ---------------------------------------------------------------------------
 // Prescriptive Refactoring & Automated Patch Plan
 // ---------------------------------------------------------------------------
 
@@ -1247,12 +1026,19 @@ export interface ComponentPatchItem {
   description: string;
 }
 
-export interface PatchPlanOptions {
-  componentPath: string;
+export interface PatchOperation {
   refactorType: PatchRefactorType;
   oldName: string;
   newName?: string;
+}
+
+export interface PatchPlanOptions {
+  componentPath: string;
+  refactorType?: PatchRefactorType;
+  oldName?: string;
+  newName?: string;
   targetPath?: string;
+  operations?: PatchOperation[];
 }
 
 export interface PatchPlanResult {
@@ -1260,6 +1046,7 @@ export interface PatchPlanResult {
   refactorType: PatchRefactorType;
   oldName: string;
   newName?: string;
+  operations?: PatchOperation[];
   totalConsumersAudited: number;
   coverage: {
     candidateCount: number;
@@ -1318,6 +1105,8 @@ export interface BackendTargetHint {
   routePattern: string;
   suggestedSymbols: string[];
   namedRoute?: string;
+  isHeuristic?: boolean;
+  disclaimer?: string;
 }
 
 export interface ApiContractItem {
@@ -1342,93 +1131,12 @@ export interface ApiContractResult {
   _meta?: EngineMetadata;
 }
 
-// ---------------------------------------------------------------------------
-// Live Page Archetype & Structural Drift Engine
-// ---------------------------------------------------------------------------
-
-export type SectionKind =
-  | 'page-header'
-  | 'filter-toolbar'
-  | 'data-content'
-  | 'form-section'
-  | 'action-footer'
-  | 'sidebar'
-  | 'custom-section';
-
-export interface ComponentInstanceRef {
-  name: string;
-  tag: string;
-  isCustomComponent: boolean;
-  line: number;
-  props: string[];
-  events: string[];
-  conditional?: string;
-  layoutTokens?: string[];
-}
-
-export interface SemanticSection {
-  kind: SectionKind;
-  tag: string;
-  line: number;
-  layoutTokens: string[];
-  components: ComponentInstanceRef[];
-  rawHtmlPrimitives: ComponentInstanceRef[];
-}
-
-export interface PageArchetype {
-  filePath: string;
-  framework: 'vue' | 'react' | 'astro' | 'unknown';
-  rootWrapper?: RootWrapperLayout;
-  sections: SemanticSection[];
-}
-
-export type ArchetypeViolationCode =
-  | 'MISSING_SEMANTIC_SECTION'
-  | 'SECTION_ORDER_DRIFT'
-  | 'RAW_HTML_SUBSTITUTION'
-  | 'MISSING_COMPANION_COMPONENT'
-  | 'CONTAINER_DNA_MISMATCH';
-
-export interface ArchetypeDriftViolation {
-  code: ArchetypeViolationCode;
-  severity: 'error' | 'warning';
-  section?: SectionKind;
-  line?: number;
-  message: string;
-  expected: string;
-  actual: string;
-  fixRecommendation: string;
-}
-
-export interface ArchetypeAuditResult {
-  targetFile: string;
-  exemplarFile: string;
-  conforms: boolean;
-  score: number;
-  targetArchetype: PageArchetype;
-  exemplarArchetype: PageArchetype;
-  violations: ArchetypeDriftViolation[];
-  status?: 'conclusive' | 'inconclusive';
-  reason?: string;
-  exemplarSelection?: 'explicit' | 'sibling-heuristic';
-  _meta?: EngineMetadata;
-}
-
-export interface AuditArchetypeOptions {
-  targetPath: string;
-  exemplarPath?: string;
-  workspaceRoot?: string;
-}
-
 export interface ExtractedImport {
   name: string;
   alias?: string;
   source: string;
   isDynamic: boolean;
 }
-
-export type { FindSimilarTemplatesOptions } from './engine/template-similarity';
-export type { AuditBundleOptions } from './engine/bundle-audit';
 
 export interface ExtractApiContractsOptions {
   targetPath?: string;

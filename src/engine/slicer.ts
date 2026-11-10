@@ -601,16 +601,6 @@ export async function sliceSymbol(options: SliceSymbolOptions): Promise<SymbolSl
       ].join('\n');
     }
 
-    const complexitySmell =
-      lineCount > 300
-        ? {
-            isHighComplexity: true,
-            threshold: 300,
-            totalLines: lineCount,
-            warning: `Symbol '${options.symbolName}' spans ${lineCount} lines (exceeds 300-line threshold). Candidate for decomposition/refactoring.`,
-          }
-        : undefined;
-
     return {
       symbolName: options.symbolName,
       kind,
@@ -619,7 +609,6 @@ export async function sliceSymbol(options: SliceSymbolOptions): Promise<SymbolSl
       endLine,
       code: finalCode,
       signature,
-      complexitySmell,
       blastRadius,
       isTruncated,
     };
@@ -635,10 +624,6 @@ export function formatSymbolSliceAsText(result: SymbolSliceResult): string {
   const lines: string[] = [];
   lines.push(`### Symbol: \`${result.symbolName}\` (${result.kind})`);
   lines.push(`**File:** \`${result.filePath}:${result.startLine}-${result.endLine}\``);
-
-  if (result.complexitySmell) {
-    lines.push(`\n⚠️ **High-Complexity Smell (${result.complexitySmell.totalLines} lines):** ${result.complexitySmell.warning}`);
-  }
 
   if (result.signature) {
     lines.push(`**Signature:** \`${result.signature}\``);

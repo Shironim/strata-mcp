@@ -257,7 +257,7 @@ describe('Domain Code Detection & Multi-Nested Folder Traversal', () => {
     await fs.writeFile(join(tempDir, 'AGENTS.md'), '# Agents Instructions', 'utf8');
 
     // Opencode folder config
-    const opencodeDir = join(tempDir, 'opencode', 'skills', 'strata-inspect');
+    const opencodeDir = join(tempDir, 'opencode', 'skills', 'use-strata');
     await fs.mkdir(opencodeDir, { recursive: true });
     await fs.writeFile(join(opencodeDir, 'SKILL.md'), '# OpenCode Skill', 'utf8');
 

@@ -3,7 +3,6 @@ import { join } from 'node:path';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { generatePatchPlan } from '../../src/engine/patch-plan';
-import { extractStyleTokens } from '../../src/engine/contract';
 
 const FIXTURES_DIR = join(import.meta.dir, '../fixtures');
 const PATCH_FIXTURES_DIR = join(import.meta.dir, '../mock-projects/patch-fixtures');
@@ -92,20 +91,6 @@ describe('Patch Plan Engine — Automated Refactoring Plans', () => {
     expect(patch?.newSnippet).toContain('#topHeader');
   });
 
-  it('detects layout clashes (fixed combined with transform/backdrop) in style tokens', () => {
-    const templateWithClash = `
-      <template>
-        <div class="fixed inset-0 transform scale-100 backdrop-blur-md">
-          <h1>Clash Modal</h1>
-        </div>
-      </template>
-    `;
-    const tokens = extractStyleTokens(templateWithClash);
-    expect(tokens).toBeDefined();
-    expect(tokens?.layoutTraps).toContain('layout-clash:fixed-in-transform-stacking-context');
-    expect(tokens?.layoutTraps).toContain('transform');
-    expect(tokens?.positioning).toContain('fixed');
-  });
 
   it('normalizes prop/event directives with shorthand prefixes and kebab/camel case (Issue #1)', async () => {
     const { cleanIdentifier, matchVueProp, matchVueEvent } = await import('../../src/engine/patch-plan');
@@ -192,6 +177,54 @@ export const Page = (extra: any) => {
       expect(result.patches[0]?.file).toBe(pagePath);
       expect(result.patches[0]?.oldSnippet).toBe('color');
       expect(result.patches[0]?.newSnippet).toBe('themeColor');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('generates atomic batch patch plan for multiple prop renames simultaneously', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'strata-batch-patch-'));
+    try {
+      const btnPath = join(root, 'Button.tsx');
+      const pagePath = join(root, 'Page.tsx');
+      await writeFile(
+        btnPath,
+        `import React from 'react';
+export function Button(props: { variant?: string; size?: string }) {
+  return <button />;
+}`
+      );
+      await writeFile(
+        pagePath,
+        `import React from 'react';
+import { Button } from './Button';
+
+export function Page() {
+  return <Button variant="primary" size="large" />;
+}`
+      );
+
+      const result = await generatePatchPlan({
+        componentPath: btnPath,
+        targetPath: root,
+        operations: [
+          { refactorType: 'rename_prop', oldName: 'variant', newName: 'tone' },
+          { refactorType: 'rename_prop', oldName: 'size', newName: 'dimension' },
+        ],
+      });
+
+      expect(result.totalConsumersAudited).toBeGreaterThanOrEqual(1);
+      expect(result.totalPatches).toBe(2);
+      expect(result.operations).toHaveLength(2);
+      expect(result.patches[0].file).toBe(pagePath);
+      expect(result.patches[0].oldSnippet).toBe('variant');
+      expect(result.patches[0].newSnippet).toBe('tone');
+      expect(result.patches[1].file).toBe(pagePath);
+      expect(result.patches[1].oldSnippet).toBe('size');
+      expect(result.patches[1].newSnippet).toBe('dimension');
+      expect(result.patches[0].sourceRef).toBeDefined();
+      expect(result.patches[1].sourceRef).toBeDefined();
+      expect(result.patches[0].sourceRef!.endOffset).toBeLessThan(result.patches[1].sourceRef!.startOffset);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

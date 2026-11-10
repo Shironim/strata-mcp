@@ -246,7 +246,7 @@ describe('Context Budgeting & Continuation Tokens (R-07 / R-08 / G-06)', () => {
     expect(smallResp.content[0].text).toContain('BUDGET_TOO_SMALL');
 
     // 2. Adequate budget on multi-match snippet
-    const repeatedCode = Array.from({ length: 40 }, (_, i) => `const val_${i} = ref(${i});`).join('\n');
+    const repeatedCode = Array.from({ length: 100 }, (_, i) => `const val_${i} = ref(${i});`).join('\n');
     const firstPage = await findCodeTool.handler({
       code: repeatedCode,
       pattern: 'const $A = ref($B);',
@@ -259,7 +259,7 @@ describe('Context Budgeting & Continuation Tokens (R-07 / R-08 / G-06)', () => {
     const data = firstPage.structuredContent;
     expect(data.is_truncated).toBe(true);
     expect(data.continuationToken).toBeDefined();
-    expect(data.matches.length).toBeLessThan(40);
+    expect(data.matches.length).toBeLessThan(100);
     expect(data.retrieval?.budget?.isTruncated).toBe(true);
     expect(data.retrieval?.omissions.some((o: any) => o.code === 'CONTEXT_BUDGET_EXCEEDED')).toBe(true);
 
@@ -339,45 +339,59 @@ describe('Context Budgeting & Continuation Tokens (R-07 / R-08 / G-06)', () => {
   });
 
   it('enforces budget through componentTreeTool and rejects stale token on index change', async () => {
-    const fixtureRoot = 'tests/fixtures';
-    const leaf = 'tests/fixtures/OldButton.vue';
+    const { mkdtemp, copyFile, writeFile, rm } = await import('node:fs/promises');
+    const { join, resolve } = await import('node:path');
+    const { syncWorkspace } = await import('../../src/engine/storage/delta-sync');
+    const { getWorkspaceDatabase, closeWorkspaceDatabase } = await import('../../src/engine/storage/schema');
+    const fixtureRoot = await mkdtemp('/tmp/strata-budget-tree-');
+    const leaf = join(fixtureRoot, 'OldButton.vue');
+    await copyFile(resolve(import.meta.dir, '../fixtures/OldButton.vue'), leaf);
+    await writeFile(join(fixtureRoot, 'package.json'), '{"dependencies":{"vue":"3"}}');
+    await writeFile(join(fixtureRoot, 'Parent.vue'), '<script setup>import OldButton from "./OldButton.vue";</script><template><OldButton /></template>');
+    try {
+      getWorkspaceDatabase(fixtureRoot, { create: true, enableWatcher: false });
+      await syncWorkspace(fixtureRoot);
 
-    const resp = await componentTreeTool.handler({
-      path: leaf,
-      target_path: fixtureRoot,
-      direction: 'upward',
-      format: 'json',
-      max_bytes: 64000,
-    });
+      const resp = await componentTreeTool.handler({
+        path: leaf,
+        target_path: fixtureRoot,
+        direction: 'upward',
+        format: 'json',
+        max_bytes: 64000,
+      });
 
-    expect(resp.isError).toBeFalsy();
-    expect(Buffer.byteLength(JSON.stringify(resp))).toBeLessThanOrEqual(64000);
-    const data = resp.structuredContent;
-    expect(data.root.children).toBeDefined();
+      expect(resp.isError).toBeFalsy();
+      expect(Buffer.byteLength(JSON.stringify(resp))).toBeLessThanOrEqual(64000);
+      const data = resp.structuredContent;
+      expect(data.root.children).toBeDefined();
 
-    // Verify rejection on mutated index generation
-    const payload: ContinuationTokenPayload = {
-      version: 1,
-      tool: 'get_component_tree',
-      queryId: data.retrieval.queryId,
-      indexGeneration: 'mutated-generation-999',
-      engineRevision: data.retrieval.engineRevision,
-      offset: 1,
-      totalItems: 5,
-      issuedAt: Date.now(),
-    };
-    const staleToken = encodeContinuationToken(payload);
+      // Verify rejection on mutated index generation
+      const payload: ContinuationTokenPayload = {
+        version: 1,
+        tool: 'get_component_tree',
+        queryId: data.retrieval.queryId,
+        indexGeneration: 'mutated-generation-999',
+        engineRevision: data.retrieval.engineRevision,
+        offset: 1,
+        totalItems: 5,
+        issuedAt: Date.now(),
+      };
+      const staleToken = encodeContinuationToken(payload);
 
-    const staleResp = await componentTreeTool.handler({
-      path: leaf,
-      target_path: fixtureRoot,
-      direction: 'upward',
-      continuation_token: staleToken,
-      format: 'json',
-    });
+      const staleResp = await componentTreeTool.handler({
+        path: leaf,
+        target_path: fixtureRoot,
+        direction: 'upward',
+        continuation_token: staleToken,
+        format: 'json',
+      });
 
-    expect(staleResp.isError).toBe(true);
-    expect(staleResp.content[0].text).toContain('STALE_CONTINUATION_TOKEN: database index generation changed');
+      expect(staleResp.isError).toBe(true);
+      expect(staleResp.content[0].text).toContain('STALE_CONTINUATION_TOKEN: database index generation changed');
+    } finally {
+      closeWorkspaceDatabase(fixtureRoot);
+      await rm(fixtureRoot, { recursive: true, force: true });
+    }
   });
 
   it('enforces budget on auditFrontendTool routes and diagnostics', async () => {

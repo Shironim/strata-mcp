@@ -17,7 +17,7 @@ test('six tools expose explicit summaries with counts and full-detail recovery w
     const tool = withRetrievalEvidence({ name, description: '', inputSchema: { type: 'object' }, handler: async () => ({
       content: [{ type: 'text', text: JSON.stringify(payload) }], structuredContent: { ...payload, diagnostics: [diagnostic] },
     }) });
-    const full = await tool.handler({ ...args, response_detail: 'full' });
+    const full = await tool.handler({ ...args, response_detail: 'full', max_bytes: 2000000 });
     const summary = await tool.handler({ ...args, response_detail: 'summary', max_bytes: 16000 });
     expect(summary.isError).not.toBe(true);
     const data = summary.structuredContent as any;

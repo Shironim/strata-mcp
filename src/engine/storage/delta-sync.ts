@@ -4,10 +4,8 @@ import { parseVueSource } from '../vue-parser';
 import { Database } from 'bun:sqlite';
 import { basename, dirname, extname, normalize, resolve } from 'node:path';
 import {
-  detectFramework,
   extractComponentContract,
   extractRenderBoundary,
-  extractStateDependencies,
 } from '../contract';
 import {
   extractLocalImports,
@@ -25,6 +23,7 @@ import { scanRoutes } from '../routes';
 import { getWorkspaceDatabase } from './schema';
 import type {
   ComponentContract,
+  FrontendFramework,
   EdgePayload,
   InputDependency,
   StateDependencyInfo,
@@ -65,10 +64,10 @@ export async function batchParser(
         const { errors } = parseVueSource(content, { filename: path, sourceMap: false });
         if (errors.length) throw new Error(`PARSE_FAILED: ${path}: ${errors.map(error => typeof error === 'string' ? error : error.message).join('; ')}`);
       }
-      const framework = detectFramework(path, content, absRoot);
-      const stateDeps = extractStateDependencies(content, framework);
-      const compName = basename(path, extname(path));
       const contract = await extractComponentContract(path, content, { path, workspaceRoot: absRoot });
+      const framework = contract.framework as FrontendFramework | 'vue-composable';
+      const stateDeps = contract.stateDependencies ?? { stores: [], contexts: [], composables: [] };
+      const compName = contract.component;
       const boundary = contract?.renderBoundary ?? extractRenderBoundary(path, content, framework, contract?.projectContext);
       const aliasConfig = await loadAliasConfig(path);
       const allImports = extractLocalImports(content, aliasConfig, path);
@@ -169,12 +168,16 @@ export async function batchParser(
 export async function syncWorkspace(
   workspaceRoot: string,
   scopePath?: string,
-  database?: Database
+  database?: Database,
+  options?: { rebuild?: boolean }
 ): Promise<SyncStats> {
   const absRoot = canonicalizePath(workspaceRoot);
   const db = database ?? getWorkspaceDatabase(absRoot);
   const previous = syncQueues.get(db) ?? Promise.resolve();
   const operation = previous.catch(() => {}).then(async () => {
+    if (options?.rebuild) {
+      db.run("INSERT OR REPLACE INTO meta(key,value) VALUES ('index_invalid','1')");
+    }
     const { stagedSync } = await import('./staged-sync');
     const maxRetries = 3;
     for (let attempt = 0; attempt < maxRetries; attempt++) {

@@ -7,7 +7,7 @@ import { formatRetrievalEvidence } from '../engine/retrieval-evidence';
 import { resolve } from 'node:path';
 import { resolveWorkspacePath, findProjectRoot } from '../engine/path-resolver';
 import type { McpToolDefinition } from './types';
-import type { PatchRefactorType } from '../types';
+import type { PatchRefactorType, PatchOperation, PatchPlanResult, RetrievalEvidence } from '../types';
 
 const patchPlanToolDefinition: McpToolDefinition = {
   ...TOOL_CATALOG[5],
@@ -21,6 +21,7 @@ const patchPlanToolDefinition: McpToolDefinition = {
     if (!rawPath) {
       return {
         isError: true,
+        structuredContent: { error: { code: 'INVALID_ARGUMENT' } },
         content: [
           {
             type: 'text',
@@ -34,6 +35,16 @@ const patchPlanToolDefinition: McpToolDefinition = {
     const rawTargetPath = args.target_path ?? args.targetPath;
     const targetPath = rawTargetPath ? resolve(String(rawTargetPath)) : undefined;
 
+    const rawOps = args.operations ?? args.batch_operations;
+    let operations: PatchOperation[] | undefined = undefined;
+    if (Array.isArray(rawOps) && rawOps.length > 0) {
+      operations = rawOps.map((op: any) => ({
+        refactorType: (op.refactor_type || op.refactorType || op.refactor) as PatchRefactorType,
+        oldName: String(op.old_name ?? op.oldName ?? op.old ?? ''),
+        newName: (op.new_name ?? op.newName ?? op.new) ? String(op.new_name ?? op.newName ?? op.new) : undefined,
+      }));
+    }
+
     const refactorType = (args.refactor_type || args.refactorType || args.refactor) as PatchRefactorType;
     const oldName = String(args.old_name ?? args.oldName ?? args.old ?? '');
     const rawNewName = args.new_name ?? args.newName ?? args.new;
@@ -44,10 +55,11 @@ const patchPlanToolDefinition: McpToolDefinition = {
       const before = observeRetrievalIndex(workspace);
       const plan = await generatePatchPlan({
         componentPath,
-        refactorType,
-        oldName,
-        newName,
+        refactorType: refactorType || operations?.[0]?.refactorType,
+        oldName: oldName || operations?.[0]?.oldName,
+        newName: newName ?? operations?.[0]?.newName,
         targetPath,
+        operations,
       });
 
       const preconditionCheck = await checkPatchPreconditions(plan.patches);
@@ -59,7 +71,7 @@ const patchPlanToolDefinition: McpToolDefinition = {
       }
 
       const retrieval = indexedRetrievalEvidence({ workspace, scope: workspace, policy: 'consumer-patch-plan-v1', before,
-        query: { componentPath, refactorType, oldName, newName: newName ?? null },
+        query: { componentPath, refactorType: plan.refactorType, oldName: plan.oldName, newName: plan.newName ?? null, operations: plan.operations ?? null },
         selectionReason: 'Upward consumer candidates and supported static usages for the requested component refactor.' });
       retrieval.omissions.push(...plan.coverage.diagnostics.map(d => ({ code: d.code, reason: `${d.file}: ${d.message}` })), ...plan.coverage.omissions.map(d => ({ code: d.code, reason: `${d.file}: ${d.message}` })));
 
@@ -77,47 +89,12 @@ const patchPlanToolDefinition: McpToolDefinition = {
         };
       }
 
-      // Human-readable / Agent-ready markdown representation
-      const lines: string[] = [
-        `# Prescriptive Patch Plan: ${refactorType.toUpperCase()}`,
-        `- **Target Component:** \`${plan.component}\``,
-        `- **Old Symbol:** \`${plan.oldName}\``,
-        ...(plan.newName ? [`- **New Symbol:** \`${plan.newName}\``] : []),
-        `- **Consumers Audited:** ${plan.totalConsumersAudited}`,
-        `- **Candidate Consumers:** ${plan.coverage.candidateCount}`,
-        `- **Failed / Unsupported:** ${plan.coverage.failedCount} / ${plan.coverage.unsupportedCount}`,
-        `- **Patches Found:** ${plan.totalPatches}`,
-        `- **Preconditions Validated:** ${plan.preconditionsValidated ? 'PASS (all patches verified against current disk snapshots)' : 'FAIL'}`,
-        '- **Coverage:** bounded by graph discovery and supported static usages; forwarding and dynamic usages may be omitted.',
-        ...plan.coverage.diagnostics.map(d => `- **${d.code}:** ${d.file}: ${d.message}`),
-        '- **Operation scope:** supported static consumer usages; target declarations, forwarding, and dynamic components are not rewritten.',
-        ...plan.coverage.omissions.map(d => `- **Omission ${d.code} (${d.resolution}):** ${d.file}: ${d.message}${d.sourceRef ? ` [SHA-256 ${d.sourceRef.sha256}, UTF-16 ${d.sourceRef.startOffset}:${d.sourceRef.endOffset}]` : ''}`),
-        '',
-      ];
-
-      if (plan.patches.length === 0) {
-        lines.push('No patches found within the analyzed static usages. This does not establish that all affected usages were discovered or supported.');
-      } else {
-        lines.push('### Proposed Code Replacements:');
-        for (const patch of plan.patches) {
-          lines.push(
-            `- **[\`${patch.file}#L${patch.line}:${patch.column}\`](file://${patch.file}#L${patch.line})**`
-          );
-          lines.push(`  - *Context:* Tag \`<${patch.targetTag}>\``);
-          lines.push(`  - *Action:* ${patch.description}`);
-          lines.push(`  - *Current:* \`${patch.oldSnippet}\``);
-          lines.push(`  - *Replace with:* \`${patch.newSnippet || '(remove)'}\``);
-          lines.push('');
-        }
-      }
-
-      lines.push(formatRetrievalEvidence(retrieval));
       return {
         structuredContent: { ...plan, retrieval },
         content: [
           {
             type: 'text',
-            text: lines.join('\n'),
+            text: formatPatchPlanAsText(plan, retrieval),
           },
         ],
       };
@@ -125,10 +102,62 @@ const patchPlanToolDefinition: McpToolDefinition = {
       const msg = err instanceof Error ? err.message : String(err);
       return {
         isError: true,
+        structuredContent: { error: { code: err instanceof Error && 'code' in err && err.code === 'INVALID_ARGUMENT' ? 'INVALID_ARGUMENT' : 'HANDLER_ERROR' } },
         content: [{ type: 'text', text: `Failed to generate patch plan: ${msg}` }],
       };
     }
   },
 };
 
-export const patchPlanTool: McpToolDefinition = withRetrievalEvidence(patchPlanToolDefinition);
+export function formatPatchPlanAsText(plan: PatchPlanResult, retrieval?: RetrievalEvidence): string {
+  const isBatch = Boolean(plan.operations && plan.operations.length > 1);
+  const title = isBatch && plan.operations ? `BATCH (${plan.operations.length} operations)` : plan.refactorType.toUpperCase();
+  const lines: string[] = [
+    `# Prescriptive Patch Plan: ${title}`,
+    `- **Target Component:** \`${plan.component}\``,
+    ...(isBatch && plan.operations
+      ? plan.operations.map((op) => `  - ${op.refactorType}: \`${op.oldName}\`${op.newName ? ` -> \`${op.newName}\`` : ''}`)
+      : [
+          `- **Old Symbol:** \`${plan.oldName}\``,
+          ...(plan.newName ? [`- **New Symbol:** \`${plan.newName}\``] : []),
+        ]),
+    `- **Consumers Audited:** ${plan.totalConsumersAudited}`,
+    `- **Candidate Consumers:** ${plan.coverage.candidateCount}`,
+    `- **Failed / Unsupported:** ${plan.coverage.failedCount} / ${plan.coverage.unsupportedCount}`,
+    `- **Patches Found:** ${plan.totalPatches}`,
+    `- **Preconditions Validated:** ${plan.preconditionsValidated ? 'PASS (all patches verified against current disk snapshots)' : 'FAIL'}`,
+    '- **Coverage:** bounded by graph discovery and supported static usages; forwarding and dynamic usages may be omitted.',
+    ...plan.coverage.diagnostics.map(d => `- **${d.code}:** ${d.file}: ${d.message}`),
+    '- **Operation scope:** supported static consumer usages; target declarations, forwarding, and dynamic components are not rewritten.',
+    ...plan.coverage.omissions.map(d => `- **Omission ${d.code} (${d.resolution}):** ${d.file}: ${d.message}${d.sourceRef ? ` [SHA-256 ${d.sourceRef.sha256}, UTF-16 ${d.sourceRef.startOffset}:${d.sourceRef.endOffset}]` : ''}`),
+    '',
+  ];
+
+  if (plan.patches.length === 0) {
+    lines.push('No patches found within the analyzed static usages. This does not establish that all affected usages were discovered or supported.');
+  } else {
+    lines.push('### Proposed Code Replacements:');
+    for (const patch of plan.patches) {
+      lines.push(
+        `- **[\`${patch.file}#L${patch.line}:${patch.column}\`](file://${patch.file}#L${patch.line})**`
+      );
+      lines.push(`  - *Context:* Tag \`<${patch.targetTag}>\``);
+      lines.push(`  - *Action:* ${patch.description}`);
+      lines.push(`  - *Current:* \`${patch.oldSnippet}\``);
+      lines.push(`  - *Replace with:* \`${patch.newSnippet || '(remove)'}\``);
+      lines.push('');
+    }
+  }
+
+  if (retrieval) lines.push(formatRetrievalEvidence(retrieval));
+  return lines.join('\n');
+}
+
+export const patchPlanTool: McpToolDefinition = withRetrievalEvidence(patchPlanToolDefinition, {
+  formatText: (data, page) => {
+    if (page.path === 'patches' && Array.isArray(data.patches)) {
+      return formatPatchPlanAsText(data as PatchPlanResult);
+    }
+    return undefined;
+  },
+});

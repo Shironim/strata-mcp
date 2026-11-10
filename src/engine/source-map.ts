@@ -607,3 +607,29 @@ export async function mapSourceFile(path: string, options: { maxRegions?: number
   if (ext === '.svelte') return mapSvelte(snapshot, content, maxRegions);
   return mapScript(snapshot, content, ext, maxRegions);
 }
+
+/** Formats a source map with a single header SHA-256 digest and copyable UTF-16 offsets per region. */
+export function formatSourceMapAsText(result: SourceMapResult): string {
+  const formatRegionRef = (ref: SourceRegion['ref']): string => {
+    const offsets = `offsets: ${ref.startOffset}-${ref.endOffset}`;
+    return ref.sha256 === result.snapshot.sha256 ? offsets : `sha256: ${ref.sha256}, ${offsets}`;
+  };
+  const formatLineRange = (item: SourceRegion): string =>
+    item.lineRange ? `${item.lineRange.startLine}-${item.lineRange.endLine}` : 'empty';
+
+  const lines = [
+    `${result.framework} map: ${result.snapshot.file}`,
+    `Status: ${result.status}`,
+    `SHA-256 (source_ref.sha256): ${result.snapshot.sha256} | Lines: ${result.snapshot.lineCount}`,
+  ];
+  for (const item of result.regions) {
+    lines.push(`- ${item.kind}${item.name ? ` ${item.name}` : ''}: lines ${formatLineRange(item)} (${formatRegionRef(item.ref)})`);
+    for (const child of item.children ?? []) {
+      lines.push(`  - ${child.kind}${child.name ? ` ${child.name}` : ''}: lines ${formatLineRange(child)} (${formatRegionRef(child.ref)})`);
+    }
+  }
+  for (const diagnostic of result.diagnostics) lines.push(`! ${diagnostic.code}: ${diagnostic.message}`);
+  if (result.coverage?.truncated || result.coverage?.childRegionsTruncated) lines.push(`Truncated: ${JSON.stringify(result.coverage)}`);
+  if (result.unsupported.length) lines.push(`Unsupported: ${result.unsupported.join(', ')}`);
+  return lines.join('\n');
+}

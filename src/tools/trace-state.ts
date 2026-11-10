@@ -160,4 +160,22 @@ const traceStateToolDefinition: McpToolDefinition = {
   },
 };
 
-export const traceStateTool: McpToolDefinition = withRetrievalEvidence(traceStateToolDefinition);
+export const traceStateTool: McpToolDefinition = withRetrievalEvidence(traceStateToolDefinition, {
+  formatText: (data) => {
+    if (Array.isArray(data.dependencies)) {
+      return formatStateChainAsText(data as any);
+    }
+    if (Array.isArray(data.consumers)) {
+      const mutators = data.consumers.filter((c: any) => c.role === 'mutator');
+      const readers = data.consumers.filter((c: any) => c.role !== 'mutator');
+      return formatStateImpactAsText({
+        ...data,
+        mutators,
+        readers,
+        mutatorsCount: mutators.length,
+        readersCount: readers.length,
+      } as any);
+    }
+    return undefined;
+  },
+});

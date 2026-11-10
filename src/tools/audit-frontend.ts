@@ -7,30 +7,17 @@ import { scanRoutes, formatRoutesAsText } from '../engine/routes';
 import { findUnusedComponents, formatUnusedAsText } from '../engine/audit';
 import { findUnusedState, formatUnusedStateAsText } from '../engine/database';
 import {
-  findSimilarTemplates,
-  formatSimilarTemplatesAsText,
-} from '../engine/template-similarity';
-import { auditDesignTokens, formatDesignAuditAsText } from '../engine/style-audit';
-import { auditBundleHealth, formatBundleAuditAsText } from '../engine/bundle-audit';
-import {
   extractWorkspaceApiContracts,
   formatApiContractsAsText,
 } from '../engine/api-contract';
 import {
-  auditPageArchetypeDrift,
-  formatArchetypeAuditAsText,
-} from '../engine/archetype';
-import {
   normalizeAuditTarget,
-  parseSafeFloat,
   parseStringList,
   resolveProjectRoot,
-  resolveWorkspacePath,
   VALID_AUDIT_TARGETS,
 } from '../engine/path-resolver';
 import type { RouteFramework } from '../types';
 import type { McpToolDefinition } from './types';
-import { checkRuntimeVersion, getCachedRuntimeVersion } from '../utils/version-check';
 
 const auditFrontendToolDefinition: McpToolDefinition = {
   ...TOOL_CATALOG[4],
@@ -61,12 +48,9 @@ const auditFrontendToolDefinition: McpToolDefinition = {
       const ignorePatterns = parseStringList(args.ignore_patterns ?? args.ignorePatterns);
       const includePages = Boolean(args.include_pages ?? args.includePages);
       const frameworkHint = (args.framework || args.framework_hint || args.frameworkHint) as RouteFramework | undefined;
-      const threshold = parseSafeFloat(args.threshold);
       const routeView = args.view === 'full' || args.view === 'tree' ? args.view : 'summary';
 
-      const runtimeVersion = getCachedRuntimeVersion();
-      void checkRuntimeVersion().catch(() => {});
-      const isDirectFilesystemTarget = ['routes', 'similar-templates', 'design-tokens', 'bundle-health', 'api-contracts', 'archetype-drift'].includes(target);
+      const isDirectFilesystemTarget = ['routes', 'api-contracts'].includes(target);
       if (!isDirectFilesystemTarget) {
         try {
           await syncWorkspace(targetPath);
@@ -74,7 +58,7 @@ const auditFrontendToolDefinition: McpToolDefinition = {
       }
       const before = isDirectFilesystemTarget ? null : observeRetrievalIndex(targetPath);
       const formatAuditResponse = (payload: any, formattedText: string) => {
-        const query = { target, excludeDirs, ignorePatterns, includePages, frameworkHint: frameworkHint ?? null, threshold: threshold ?? null, routeView, prefix: args.prefix ?? null, exemplarPath: args.exemplar_path ?? args.exemplarPath ?? null };
+        const query = { target, excludeDirs, ignorePatterns, includePages, frameworkHint: frameworkHint ?? null, routeView, prefix: args.prefix ?? null };
         const retrieval = isDirectFilesystemTarget
           ? filesystemAuditRetrievalEvidence({
               workspace: targetPath,
@@ -103,17 +87,12 @@ const auditFrontendToolDefinition: McpToolDefinition = {
         }
         for (const reason of configReasons) retrieval.omissions.push({ code: 'NEXT_EFFECTIVE_CONFIG_PARTIAL', reason });
         const finalJson = isJson
-          ? JSON.stringify({ runtime_version: runtimeVersion, ...(typeof payload === 'object' && payload !== null ? payload : { data: payload }), retrieval }, null, 2)
+          ? JSON.stringify({ ...(typeof payload === 'object' && payload !== null ? payload : { data: payload }), retrieval }, null, 2)
           : undefined;
         let finalText = isJson ? finalJson! : `${formattedText}\n\n${formatRetrievalEvidence(retrieval)}`;
-        if (!isJson && runtimeVersion.update_available) {
-          finalText = `[Notice: Update available: v${runtimeVersion.server_version} -> v${runtimeVersion.latest_version}. Run: ${runtimeVersion.upgrade_command}]\n\n` + finalText;
-        }
         return {
-          structuredContent: { runtime_version: runtimeVersion, ...(typeof payload === 'object' && payload !== null ? payload : { data: payload }), retrieval },
+          structuredContent: { ...(typeof payload === 'object' && payload !== null ? payload : { data: payload }), retrieval },
           content: [{ type: 'text' as const, text: finalText }],
-          metadata: { runtime_version: runtimeVersion },
-          runtime_version: runtimeVersion,
         };
       };
 
@@ -145,64 +124,13 @@ const auditFrontendToolDefinition: McpToolDefinition = {
         return formatAuditResponse(result, formatUnusedStateAsText(result));
       }
 
-      if (target === 'similar-templates') {
-        const result = await findSimilarTemplates({
-          targetPath,
-          scopePath,
-          threshold,
-          excludeDirs,
-        });
-        return formatAuditResponse(result, formatSimilarTemplatesAsText(result));
-      }
-
-      if (target === 'design-tokens') {
-        const result = await auditDesignTokens({
-          targetPath,
-          scopePath,
-          excludeDirs,
-        });
-        return formatAuditResponse(result, formatDesignAuditAsText(result));
-      }
-
-      if (target === 'bundle-health') {
-        const result = await auditBundleHealth({ targetPath, scopePath, excludeDirs });
-        return formatAuditResponse(result, formatBundleAuditAsText(result));
-      }
-
       if (target === 'api-contracts') {
         const result = await extractWorkspaceApiContracts({ targetPath, scopePath, excludeDirs });
         return formatAuditResponse(result, formatApiContractsAsText(result));
       }
 
-      if (target === 'archetype-drift') {
-        if (!rawTargetPath) {
-          return {
-            isError: true,
-            content: [
-              {
-                type: 'text',
-                text: "Missing required argument: 'path' (or 'target_path') pointing to the target page file for archetype-drift audit.",
-              },
-            ],
-          };
-        }
-        const resolvedPagePath = resolveWorkspacePath(rawTargetPath);
-        const rawExemplar = args.exemplar_path || args.exemplar || args.exemplarPath;
-        const resolvedExemplarPath = rawExemplar
-          ? resolveWorkspacePath(String(rawExemplar), targetPath)
-          : undefined;
-
-        const result = await auditPageArchetypeDrift({
-          targetPath: resolvedPagePath,
-          exemplarPath: resolvedExemplarPath,
-          workspaceRoot: targetPath,
-        });
-
-        return formatAuditResponse(result, formatArchetypeAuditAsText(result));
-      }
-
-      // target === 'all' (runs standard structural health checks; similar-templates & archetype-drift are opt-in)
-      const [routes, unusedComponents, unusedState, designSystemAudit, bundleAudit, apiContracts] = await Promise.all([
+      // target === 'all': route/API topology and unused component/state candidates.
+      const [routes, unusedComponents, unusedState, apiContracts] = await Promise.all([
         scanRoutes({
           targetPath,
           scopePath,
@@ -219,16 +147,6 @@ const auditFrontendToolDefinition: McpToolDefinition = {
           excludeDirs,
         }),
         findUnusedState(targetPath, { scopePath, excludeDirs }),
-        auditDesignTokens({
-          targetPath,
-          scopePath,
-          excludeDirs,
-        }),
-        auditBundleHealth({
-          targetPath,
-          scopePath,
-          excludeDirs,
-        }),
         extractWorkspaceApiContracts({
           targetPath,
           scopePath,
@@ -245,15 +163,11 @@ const auditFrontendToolDefinition: McpToolDefinition = {
         '\n---\n',
         formatUnusedStateAsText(unusedState),
         '\n---\n',
-        formatDesignAuditAsText(designSystemAudit),
-        '\n---\n',
-        formatBundleAuditAsText(bundleAudit),
-        '\n---\n',
         formatApiContractsAsText(apiContracts),
       ].join('\n');
 
       return formatAuditResponse(
-        { routes, unusedComponents, unusedState, designSystemAudit, bundleAudit, apiContracts },
+        { routes, unusedComponents, unusedState, apiContracts },
         report
       );
     } catch (err: unknown) {
@@ -266,4 +180,20 @@ const auditFrontendToolDefinition: McpToolDefinition = {
   },
 };
 
-export const auditFrontendTool: McpToolDefinition = withRetrievalEvidence(auditFrontendToolDefinition);
+export const auditFrontendTool: McpToolDefinition = withRetrievalEvidence(auditFrontendToolDefinition, {
+  formatText: (data, page) => {
+    if (page.path === 'routes' && Array.isArray(data.routes)) {
+      return formatRoutesAsText(data as any);
+    }
+    if (page.path === 'unusedComponents' && Array.isArray(data.unusedComponents)) {
+      return formatUnusedAsText(data as any);
+    }
+    if (page.path === 'unusedState' && Array.isArray(data.unusedState)) {
+      return formatUnusedStateAsText(data as any);
+    }
+    if (page.path === 'endpoints' && Array.isArray(data.endpoints)) {
+      return formatApiContractsAsText(data as any);
+    }
+    return undefined;
+  },
+});

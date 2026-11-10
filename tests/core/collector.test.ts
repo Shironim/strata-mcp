@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { collectFiles, IGNORED_DIRS } from '../../src/engine/collector';
+import { collectFiles, collectFilesWithReport, IGNORED_DIRS } from '../../src/engine/collector';
 
 describe('Collector Filesystem Traversal & Default Ignores', () => {
   it('contains critical monorepo, backend, and IDE ignore directories', () => {
@@ -45,12 +45,25 @@ describe('Collector Filesystem Traversal & Default Ignores', () => {
     const publicFile = join(publicDir, 'bundle.js');
     await fs.writeFile(publicFile, 'console.log("bundle");', 'utf8');
 
-    const collected = await collectFiles(tempDir);
+    // Valid src/tools domain directory must NOT be silently ignored
+    const toolsDir = join(tempDir, 'src', 'tools');
+    await fs.mkdir(toolsDir, { recursive: true });
+    const toolsFile = join(toolsDir, 'network.ts');
+    await fs.writeFile(toolsFile, 'export const networkTool = {};', 'utf8');
+
+    const report = await collectFilesWithReport(tempDir);
+    const collected = report.files;
 
     expect(collected).toContain(validVueFile);
+    expect(collected).toContain(toolsFile);
     expect(collected).not.toContain(vendorFile);
     expect(collected).not.toContain(storageFile);
     expect(collected).not.toContain(publicFile);
+    expect(report.excludedDirs).toEqual([
+      { path: 'public', reason: 'default-ignore' },
+      { path: 'storage', reason: 'default-ignore' },
+      { path: 'vendor', reason: 'default-ignore' },
+    ]);
 
     await fs.rm(tempDir, { recursive: true, force: true });
   });

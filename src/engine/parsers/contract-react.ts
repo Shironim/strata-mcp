@@ -1,8 +1,7 @@
 import { basename, dirname, extname } from 'node:path';
 import ts from 'typescript';
-import { extractStyleTokens } from '../contract';
 import { unwrapExpression, staticPropertyName } from './ts-syntax';
-import { resolveLocalPropType } from './local-prop-types';
+import { resolveLocalPropType, extractCvaVariants } from './local-prop-types';
 import { PropTypeModules } from './prop-type-modules';
 import type {
   ComponentContract,
@@ -300,6 +299,34 @@ export async function extractReactContract(filePath: string, content: string, wo
       }
     }
 
+    // Heuristic: Extract destructured parameter props
+    if (targetFnNode && targetFnNode.parameters.length > 0) {
+      const firstParam = targetFnNode.parameters[0];
+      if (ts.isObjectBindingPattern(firstParam.name)) {
+        for (const el of firstParam.name.elements) {
+          if (ts.isIdentifier(el.name) && !el.dotDotDotToken) {
+            const propName = el.propertyName ? staticPropertyName(el.propertyName) : el.name.text;
+            if (propName && !propsMap.has(propName)) {
+              const defaultVal = el.initializer ? el.initializer.getText(sf).trim() : undefined;
+              propsMap.set(propName, {
+                name: propName,
+                type: defaultVal ? (defaultVal.startsWith('"') || defaultVal.startsWith("'") ? 'string' : 'any') : 'any',
+                required: defaultVal === undefined,
+                ...(defaultVal ? { default: defaultVal } : {}),
+              });
+            }
+          }
+        }
+      }
+    }
+
+    // Heuristic: Extract variants from local CVA definitions
+    for (const [varName] of declaredVariables) {
+      if (/Variants$/i.test(varName) || varName.includes('variant') || varName.includes('Variant')) {
+        extractCvaVariants(varName, sf, defaults, propsMap);
+      }
+    }
+
     for (const reason of modules.diagnostics) unresolvedTypes.push({ name: component, kind: 'props', reason });
 
     // Process extracted props
@@ -351,7 +378,6 @@ export async function extractReactContract(filePath: string, content: string, wo
     ...(exposed.length > 0 ? { exposed } : {}),
     ...(unresolvedTypes.length ? { unresolvedTypes } : {}),
     ...(dependencies.length ? { dependencies } : {}),
-    styleTokens: extractStyleTokens(content),
   };
 }
 

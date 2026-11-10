@@ -4,7 +4,7 @@ import { observeRetrievalIndex, indexedRetrievalEvidence } from '../engine/index
 import { formatRetrievalEvidence } from '../engine/retrieval-evidence';
 import fs from 'node:fs';
 import { resolve } from 'node:path';
-import { getComponentTree, formatTreeAsText } from '../engine/tree';
+import { getComponentTree, formatTreeAsText, formatTreeAsMermaid } from '../engine/tree';
 import {
   findProjectRoot,
   parseAliasMapInput,
@@ -70,6 +70,7 @@ const componentTreeToolDefinition: McpToolDefinition = {
 
     try {
       const maxDepth = parseSafePositiveInt(args.max_depth ?? args.maxDepth ?? args.depth);
+      const limit = parseSafePositiveInt(args.limit ?? args.max_results ?? args.maxResults);
 
       const rawDir = String(args.direction || '').toLowerCase();
       const direction: ComponentTreeOptions['direction'] =
@@ -118,6 +119,7 @@ const componentTreeToolDefinition: McpToolDefinition = {
         routePath,
         targetPath,
         maxDepth,
+        limit,
         direction,
         aliasMap,
         scopeFilter,
@@ -132,6 +134,7 @@ const componentTreeToolDefinition: McpToolDefinition = {
       }
 
       const isJson = args.output_format === 'json' || args.format === 'json';
+      const isMermaid = args.output_format === 'mermaid' || args.format === 'mermaid' || args.export_format === 'mermaid' || args.export === 'mermaid';
       const retrieval = indexedRetrievalEvidence({ workspace: targetPath, scope: scopeFilter ?? targetPath, policy: 'component-tree-v1', before,
         query: { entryPath: entryPath ?? null, routePath: routePath ?? null, maxDepth: maxDepth ?? 3, direction: direction ?? 'downward', aliasMap: aliasMap ?? null, includeProps: args.include_props !== false && args.includeProps !== false },
         selectionReason: 'Bounded component traversal selected by entrypoint, direction, depth and scope.' });
@@ -144,7 +147,11 @@ const componentTreeToolDefinition: McpToolDefinition = {
         content: [
           {
             type: 'text',
-            text: isJson ? JSON.stringify({ ...tree, retrieval }, null, 2) : `${formatTreeAsText(tree)}\n\n${formatRetrievalEvidence(retrieval)}`,
+            text: isJson
+              ? JSON.stringify({ ...tree, retrieval }, null, 2)
+              : isMermaid
+                ? `${formatTreeAsMermaid(tree)}\n\n${formatRetrievalEvidence(retrieval)}`
+                : `${formatTreeAsText(tree)}\n\n${formatRetrievalEvidence(retrieval)}`,
           },
         ],
       };
@@ -158,4 +165,12 @@ const componentTreeToolDefinition: McpToolDefinition = {
   },
 };
 
-export const componentTreeTool: McpToolDefinition = withRetrievalEvidence(componentTreeToolDefinition);
+export const componentTreeTool: McpToolDefinition = withRetrievalEvidence(componentTreeToolDefinition, {
+  formatText: (data, page, args) => {
+    if (page.path === 'root.children' && data.root) {
+      const isMermaid = args.output_format === 'mermaid' || args.format === 'mermaid' || args.export_format === 'mermaid' || args.export === 'mermaid';
+      return isMermaid ? formatTreeAsMermaid(data as any) : formatTreeAsText(data as any);
+    }
+    return undefined;
+  },
+});

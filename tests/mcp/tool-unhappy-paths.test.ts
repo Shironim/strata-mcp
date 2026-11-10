@@ -235,14 +235,14 @@ describe('MCP Tools Unhappy Paths & Edge Cases Suite', () => {
       expect(res.content[0].text).toContain('Invalid audit target: "security-audit-unknown"');
     });
 
-    it('rejects archetype-drift target when page path points to a directory', async () => {
+    it('rejects removed archetype-drift target', async () => {
       const res = await callTool('audit_frontend', {
         target_path: FIXTURES_DIR,
         target: 'archetype-drift',
         path: FIXTURES_DIR,
       });
       expect(res.isError).toBe(true);
-      expect(res.content[0].text).toContain('is a directory');
+      expect(res.content[0].text).toContain('Invalid audit target');
     });
   });
 

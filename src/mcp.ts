@@ -9,6 +9,7 @@ import { TOOLS, findTool } from './tools';
 import { AnalysisSupervisor } from './analysis-supervisor';
 import { STRATA_INSTRUCTIONS } from './instructions';
 import { STRATA_VERSION } from './version';
+import { describeResultSelection } from './tools/result-selection';
 import { StrataTelemetry } from './engine/telemetry';
 import { enforceResponseLimit } from './engine/context-budget';
 import { getLastKnownProjectRoot, setLastKnownProjectRoot } from './engine/path-resolver';
@@ -173,16 +174,11 @@ export function coerceToolArguments(toolName: string, rawArgs: any): Record<stri
     }
   }
 
-  // 8. Canonical Entity Aliasing: exemplar_path (for archetype-drift audit)
-  if (!args.exemplar_path) {
-    const exemplarAlias = args.exemplar || args.exemplarPath;
-    if (exemplarAlias) {
-      args.exemplar_path = String(exemplarAlias);
-    }
-  }
-
   // 9. Canonical Entity Aliasing for generate_patch_plan
   if (toolName === 'generate_patch_plan') {
+    if (!args.operations && (args.batch_operations || args.batchOperations)) {
+      args.operations = args.batch_operations || args.batchOperations;
+    }
     if (!args.refactor_type) {
       const refactorAlias = args.refactor || args.refactorType;
       if (refactorAlias) args.refactor_type = String(refactorAlias);
@@ -252,15 +248,6 @@ export function coerceToolArguments(toolName: string, rawArgs: any): Record<stri
     }
   }
 
-  if (args.threshold !== undefined) {
-    const parsedThreshold = parseSafeFloat(args.threshold);
-    if (parsedThreshold !== undefined) {
-      args.threshold = parsedThreshold;
-    } else {
-      delete args.threshold;
-    }
-  }
-
   // 15. Context Budget & Continuation Token Normalization (R-07 / R-08)
   const rawMaxBytes = args.max_bytes ?? args.maxBytes;
   if (rawMaxBytes !== undefined) {
@@ -291,7 +278,6 @@ export function coerceToolArguments(toolName: string, rawArgs: any): Record<stri
 
 export {
   parseSafePositiveInt,
-  parseSafeFloat,
   parseStringList,
   parseAliasMapInput,
   normalizeAuditTarget,
@@ -299,7 +285,6 @@ export {
 } from './engine/path-resolver';
 import {
   parseSafePositiveInt,
-  parseSafeFloat,
   parseStringList,
   parseAliasMapInput,
 } from './engine/path-resolver';
@@ -316,6 +301,11 @@ export function extractItemsFound(
   if (response?.isError) {
     return 0;
   }
+  const structured = response?.structuredContent;
+  if (structured && typeof structured === 'object') {
+    const count = describeResultSelection(toolName, args, structured).count;
+    return typeof count === 'number' && Number.isSafeInteger(count) && count >= 0 ? count : undefined;
+  }
   const firstText = response?.content?.[0]?.text;
   if (typeof firstText !== 'string' || !firstText.trim()) {
     return undefined;
@@ -325,6 +315,10 @@ export function extractItemsFound(
   if (firstText.trim().startsWith('{') || firstText.trim().startsWith('[')) {
     try {
       const parsed = JSON.parse(firstText);
+      if (parsed?.resultSummary || parsed?.decision || args.action === 'map') {
+        const count = describeResultSelection(toolName, args, parsed).count;
+        return typeof count === 'number' && Number.isSafeInteger(count) && count >= 0 ? count : undefined;
+      }
       if (typeof parsed.matchCount === 'number') {
         return parsed.matchCount;
       }
@@ -484,28 +478,55 @@ export function createMcpServer(): Server {
 
       const effectiveRoot = response?.projectRoot ?? explicitRoot ?? requestRootHint ?? process.cwd();
       const { projectRoot: _workerRoot, ...cleanResponse } = response;
-      const publicResponse = enforceResponseLimit(cleanResponse, args.max_bytes ?? args.maxBytes);
 
-      const itemsFound = extractItemsFound(name, args, publicResponse);
-      const isHandlerError = Boolean(publicResponse?.isError);
+      const itemsFound = extractItemsFound(name, args, cleanResponse);
+      const isHandlerError = Boolean(cleanResponse?.isError);
       let handlerErrorDiagnosis: { code: string; message: string } | undefined;
 
       if (isHandlerError) {
         let firstLine = '';
-        if (Array.isArray(publicResponse.content)) {
-          const firstText = publicResponse.content.find((c: any) => typeof c.text === 'string')?.text;
+        if (Array.isArray(cleanResponse.content)) {
+          const firstText = cleanResponse.content.find((c: any) => typeof c.text === 'string')?.text;
           if (firstText) {
             firstLine = firstText.trim().split('\n')[0].slice(0, 256);
           }
         }
         handlerErrorDiagnosis = {
-          code: 'HANDLER_ERROR',
+          code: (cleanResponse.structuredContent?.error as { code?: unknown } | undefined)?.code === 'INVALID_ARGUMENT' ? 'INVALID_ARGUMENT' : 'HANDLER_ERROR',
           message: firstLine || 'Tool returned error status',
         };
       }
 
+      // Strip redundant structuredContent for text transport before applying the final transport limit
+      const wantsStructured =
+        args.format === 'json' ||
+        args.output_format === 'json' ||
+        Boolean(args.include_structured || args.includeStructured);
+      const transportResponse =
+        !wantsStructured &&
+        cleanResponse.structuredContent &&
+        Array.isArray(cleanResponse.content) &&
+        cleanResponse.content.length > 0
+          ? {
+              ...cleanResponse,
+              structuredContent: { summary: 'omitted_for_text_format' },
+            }
+          : cleanResponse;
+      const finalResponse = enforceResponseLimit(transportResponse, args.max_bytes ?? args.maxBytes);
+      const isFinalError = isHandlerError || Boolean(finalResponse?.isError);
+      if (isFinalError && !handlerErrorDiagnosis) {
+        const errCode = (finalResponse?.structuredContent?.error as { code?: unknown } | undefined)?.code;
+        const firstText = Array.isArray(finalResponse?.content)
+          ? finalResponse.content.find((c: any) => typeof c.text === 'string')?.text
+          : undefined;
+        handlerErrorDiagnosis = {
+          code: typeof errCode === 'string' && errCode ? errCode : 'BUDGET_RESPONSE_TOO_LARGE',
+          message: firstText ? firstText.trim().split('\n')[0].slice(0, 256) : 'Response exceeded transport budget',
+        };
+      }
+
       StrataTelemetry.recordToolResponse({
-        event: isHandlerError ? 'tool_call_failed' : 'tool_call_completed',
+        event: isFinalError ? 'tool_call_failed' : 'tool_call_completed',
         tool: name,
         action,
         trace_id: traceId,
@@ -515,12 +536,11 @@ export function createMcpServer(): Server {
         metrics: {
           ...(itemsFound !== undefined ? { items_found: itemsFound } : {}),
         },
-        status: isHandlerError ? 'error' : 'success',
+        status: isFinalError ? 'error' : 'success',
         error: handlerErrorDiagnosis,
-      }, publicResponse, effectiveRoot);
+      }, finalResponse, effectiveRoot);
 
-      // Strip internal worker metadata before returning to client
-      return publicResponse;
+      return finalResponse;
     } catch (err) {
       const durationMs = Math.round(performance.now() - startTime);
       const errorInstance = err instanceof Error ? err : new Error(String(err));

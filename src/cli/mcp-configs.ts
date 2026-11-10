@@ -5,6 +5,12 @@ import {
   STRATA_INSPECT_SKILL,
   STRATA_POST_WRITE_HOOK,
   STRATA_CLAUDE_COMMAND,
+  STRATA_TS_RULE,
+  STRATA_TS_SKILL,
+  STRATA_TS_CLAUDE_COMMAND,
+  STRATA_GEMINI_MD_POINTER,
+  STRATA_RULE_REFERENCE_FROM_AGENTS,
+  STRATA_RULE_REFERENCE_FROM_GEMINI,
 } from './templates';
 
 export type AgentHarness =
@@ -591,6 +597,20 @@ async function writeDedicatedArtifact(
   return isExisting ? 'updated' : 'created';
 }
 
+export interface SetupHarnessArtifactOptions {
+  isUiProject?: boolean;
+}
+
+async function fileContainsStrataGuidance(filePath: string): Promise<boolean> {
+  if (!existsSync(filePath)) return false;
+  try {
+    const content = await fs.readFile(filePath, 'utf8');
+    return content.includes('strata-mcp') || content.includes('Strata-MCP');
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Generates per-harness rules, skills, and lifecycle hook scripts.
  * Exclusively supports: Antigravity (.gemini), Claude Code (.claude), Codex (.codex),
@@ -599,26 +619,65 @@ async function writeDedicatedArtifact(
 export async function setupHarnessArtifacts(
   projectRoot: string,
   harnesses: AgentHarness[],
-  force: boolean = false
+  force: boolean = false,
+  options: SetupHarnessArtifactOptions = {}
 ): Promise<HarnessConfigResult[]> {
   const results: HarnessConfigResult[] = [];
   const selectedSet = new Set(harnesses.map(h => h.toLowerCase()));
   const shouldApply = (h: AgentHarness) => selectedSet.has('all') || selectedSet.has(h);
 
+  const isUiProject = options.isUiProject ?? true;
+  const ruleTemplate = isUiProject ? STRATA_FRONTEND_RULE : STRATA_TS_RULE;
+  const skillTemplate = isUiProject ? STRATA_INSPECT_SKILL : STRATA_TS_SKILL;
+  const claudeCommandTemplate = isUiProject ? STRATA_CLAUDE_COMMAND : STRATA_TS_CLAUDE_COMMAND;
+
+  const agentsDocPath = join(projectRoot, 'AGENTS.md');
+  const geminiDocPath = join(projectRoot, 'GEMINI.md');
+  const sharedSkillPath = join(projectRoot, '.agents', 'skills', 'use-strata', 'SKILL.md');
+
+  const agentsHarnessRequested =
+    shouldApply('codex') || shouldApply('opencode') || shouldApply('agents') || selectedSet.has('skip');
+  const agentsAlreadyHasStrata = await fileContainsStrataGuidance(agentsDocPath);
+  const agentsWillHoldRule = agentsHarnessRequested || agentsAlreadyHasStrata;
+  const geminiAlreadyHasStrata = await fileContainsStrataGuidance(geminiDocPath);
+  const sharedSkillWillExist = shouldApply('agents') || selectedSet.has('skip') || existsSync(sharedSkillPath);
+
   const record = (harness: string, file: string, action: ConfigAction) => {
     results.push({ harness, file, action });
   };
 
+  // Helper to cleanly clean up legacy skill directory
+  const cleanupLegacy = async (dirPath: string) => {
+    if (existsSync(dirPath)) {
+      try {
+        await fs.rm(dirPath, { recursive: true, force: true });
+      } catch {}
+    }
+  };
+
   // 1. Google Antigravity (.gemini/)
   if (shouldApply('antigravity')) {
-    const gmAction = await writeMarkdownGuidance(join(projectRoot, 'GEMINI.md'), STRATA_FRONTEND_RULE, force);
-    record('Google Antigravity', 'GEMINI.md', gmAction);
+    const geminiRuleContent = agentsWillHoldRule
+      ? STRATA_RULE_REFERENCE_FROM_AGENTS
+      : geminiAlreadyHasStrata
+        ? STRATA_RULE_REFERENCE_FROM_GEMINI
+        : ruleTemplate;
 
-    const rAction = await writeDedicatedArtifact(join(projectRoot, '.gemini', 'rules', 'strata-frontend.md'), STRATA_FRONTEND_RULE, force);
+    const rAction = await writeDedicatedArtifact(join(projectRoot, '.gemini', 'rules', 'strata-frontend.md'), geminiRuleContent, force);
     record('Google Antigravity', '.gemini/rules/strata-frontend.md', rAction);
 
-    const sAction = await writeDedicatedArtifact(join(projectRoot, '.gemini', 'skills', 'strata-inspect', 'SKILL.md'), STRATA_INSPECT_SKILL, force);
-    record('Google Antigravity', '.gemini/skills/strata-inspect/SKILL.md', sAction);
+    // Avoid duplicating rules into GEMINI.md when AGENTS.md + .gemini/rules/ already cover workspace guidance;
+    // when Antigravity is configured standalone, write a compact pointer in GEMINI.md instead of copying all rule lines.
+    if (!agentsHarnessRequested) {
+      const gmAction = await writeMarkdownGuidance(geminiDocPath, STRATA_GEMINI_MD_POINTER, force);
+      record('Google Antigravity', 'GEMINI.md', gmAction);
+    }
+
+    await cleanupLegacy(join(projectRoot, '.gemini', 'skills', 'strata-inspect'));
+    if (!sharedSkillWillExist) {
+      const sAction = await writeDedicatedArtifact(join(projectRoot, '.gemini', 'skills', 'use-strata', 'SKILL.md'), skillTemplate, force);
+      record('Google Antigravity', '.gemini/skills/use-strata/SKILL.md', sAction);
+    }
 
     const hAction = await writeDedicatedArtifact(join(projectRoot, '.gemini', 'hooks', 'strata-post-write.sh'), STRATA_POST_WRITE_HOOK, force, 0o755);
     record('Google Antigravity', '.gemini/hooks/strata-post-write.sh', hAction);
@@ -626,26 +685,37 @@ export async function setupHarnessArtifacts(
 
   // 2. Claude Code (.claude/)
   if (shouldApply('claude')) {
-    const rAction = await writeMarkdownGuidance(join(projectRoot, 'CLAUDE.md'), STRATA_FRONTEND_RULE, force);
+    const rAction = await writeMarkdownGuidance(join(projectRoot, 'CLAUDE.md'), ruleTemplate, force);
     record('Claude Code', 'CLAUDE.md', rAction);
 
-    const skillAction = await writeDedicatedArtifact(join(projectRoot, '.claude', 'skills', 'strata-inspect', 'SKILL.md'), STRATA_INSPECT_SKILL, force);
-    record('Claude Code', '.claude/skills/strata-inspect/SKILL.md', skillAction);
+    await cleanupLegacy(join(projectRoot, '.claude', 'skills', 'strata-inspect'));
+    const skillAction = await writeDedicatedArtifact(join(projectRoot, '.claude', 'skills', 'use-strata', 'SKILL.md'), skillTemplate, force);
+    record('Claude Code', '.claude/skills/use-strata/SKILL.md', skillAction);
 
-    const cAction = await writeDedicatedArtifact(join(projectRoot, '.claude', 'commands', 'strata-inspect.md'), STRATA_CLAUDE_COMMAND, force);
-    record('Claude Code', '.claude/commands/strata-inspect.md', cAction);
+    await cleanupLegacy(join(projectRoot, '.claude', 'commands', 'strata-inspect.md'));
+    const cAction = await writeDedicatedArtifact(join(projectRoot, '.claude', 'commands', 'use-strata.md'), claudeCommandTemplate, force);
+    record('Claude Code', '.claude/commands/use-strata.md', cAction);
 
     const hAction = await writeDedicatedArtifact(join(projectRoot, '.claude', 'hooks', 'strata-post-write.sh'), STRATA_POST_WRITE_HOOK, force, 0o755);
     record('Claude Code', '.claude/hooks/strata-post-write.sh', hAction);
   }
 
+  // 3-5. Shared AGENTS.md writer (executed once per init pass across Codex, OpenCode, .agents, and skip)
+  let agentsDocHandledThisRun = false;
+  const ensureAgentsGuidance = async (harnessLabel: string) => {
+    if (agentsDocHandledThisRun) return;
+    agentsDocHandledThisRun = true;
+    const agAction = await writeMarkdownGuidance(agentsDocPath, ruleTemplate, force);
+    record(harnessLabel, 'AGENTS.md', agAction);
+  };
+
   // 3. OpenAI Codex (.codex/)
   if (shouldApply('codex')) {
-    const agAction = await writeMarkdownGuidance(join(projectRoot, 'AGENTS.md'), STRATA_FRONTEND_RULE, force);
-    record('Codex', 'AGENTS.md', agAction);
+    await ensureAgentsGuidance('Codex');
 
-    const sAction = await writeDedicatedArtifact(join(projectRoot, '.codex', 'skills', 'strata-inspect', 'SKILL.md'), STRATA_INSPECT_SKILL, force);
-    record('Codex', '.codex/skills/strata-inspect/SKILL.md', sAction);
+    await cleanupLegacy(join(projectRoot, '.codex', 'skills', 'strata-inspect'));
+    const sAction = await writeDedicatedArtifact(join(projectRoot, '.codex', 'skills', 'use-strata', 'SKILL.md'), skillTemplate, force);
+    record('Codex', '.codex/skills/use-strata/SKILL.md', sAction);
 
     const hAction = await writeDedicatedArtifact(join(projectRoot, '.codex', 'hooks', 'strata-post-write.sh'), STRATA_POST_WRITE_HOOK, force, 0o755);
     record('Codex', '.codex/hooks/strata-post-write.sh', hAction);
@@ -653,11 +723,11 @@ export async function setupHarnessArtifacts(
 
   // 4. OpenCode (opencode/)
   if (shouldApply('opencode')) {
-    const agAction = await writeMarkdownGuidance(join(projectRoot, 'AGENTS.md'), STRATA_FRONTEND_RULE, force);
-    record('OpenCode', 'AGENTS.md', agAction);
+    await ensureAgentsGuidance('OpenCode');
 
-    const sAction = await writeDedicatedArtifact(join(projectRoot, 'opencode', 'skills', 'strata-inspect', 'SKILL.md'), STRATA_INSPECT_SKILL, force);
-    record('OpenCode', 'opencode/skills/strata-inspect/SKILL.md', sAction);
+    await cleanupLegacy(join(projectRoot, 'opencode', 'skills', 'strata-inspect'));
+    const sAction = await writeDedicatedArtifact(join(projectRoot, 'opencode', 'skills', 'use-strata', 'SKILL.md'), skillTemplate, force);
+    record('OpenCode', 'opencode/skills/use-strata/SKILL.md', sAction);
 
     const hAction = await writeDedicatedArtifact(join(projectRoot, 'opencode', 'hooks', 'strata-post-write.sh'), STRATA_POST_WRITE_HOOK, force, 0o755);
     record('OpenCode', 'opencode/hooks/strata-post-write.sh', hAction);
@@ -665,11 +735,11 @@ export async function setupHarnessArtifacts(
 
   // 5. .agents (general)
   if (shouldApply('agents')) {
-    const agAction = await writeMarkdownGuidance(join(projectRoot, 'AGENTS.md'), STRATA_FRONTEND_RULE, force);
-    record('.agents (general)', 'AGENTS.md', agAction);
+    await ensureAgentsGuidance('.agents (general)');
 
-    const sAction = await writeDedicatedArtifact(join(projectRoot, '.agents', 'skills', 'strata-inspect', 'SKILL.md'), STRATA_INSPECT_SKILL, force);
-    record('.agents (general)', '.agents/skills/strata-inspect/SKILL.md', sAction);
+    await cleanupLegacy(join(projectRoot, '.agents', 'skills', 'strata-inspect'));
+    const sAction = await writeDedicatedArtifact(sharedSkillPath, skillTemplate, force);
+    record('.agents (general)', '.agents/skills/use-strata/SKILL.md', sAction);
 
     const hAction = await writeDedicatedArtifact(join(projectRoot, '.agents', 'hooks', 'strata-post-write.sh'), STRATA_POST_WRITE_HOOK, force, 0o755);
     record('.agents (general)', '.agents/hooks/strata-post-write.sh', hAction);
@@ -677,11 +747,11 @@ export async function setupHarnessArtifacts(
 
   // Fallback if skipping MCP config
   if (selectedSet.has('skip')) {
-    const agAction = await writeMarkdownGuidance(join(projectRoot, 'AGENTS.md'), STRATA_FRONTEND_RULE, force);
-    record('Fallback Guidance', 'AGENTS.md', agAction);
+    await ensureAgentsGuidance('Fallback Guidance');
 
-    const sAction = await writeDedicatedArtifact(join(projectRoot, '.agents', 'skills', 'strata-inspect', 'SKILL.md'), STRATA_INSPECT_SKILL, force);
-    record('Fallback Skills', '.agents/skills/strata-inspect/SKILL.md', sAction);
+    await cleanupLegacy(join(projectRoot, '.agents', 'skills', 'strata-inspect'));
+    const sAction = await writeDedicatedArtifact(sharedSkillPath, skillTemplate, force);
+    record('Fallback Skills', '.agents/skills/use-strata/SKILL.md', sAction);
 
     const hAction = await writeDedicatedArtifact(join(projectRoot, '.agents', 'hooks', 'strata-post-write.sh'), STRATA_POST_WRITE_HOOK, force, 0o755);
     record('Fallback Hooks', '.agents/hooks/strata-post-write.sh', hAction);

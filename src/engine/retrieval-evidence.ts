@@ -48,14 +48,16 @@ export async function sourceRetrievalEvidence(options: {
 }
 
 export function formatRetrievalEvidence(evidence: RetrievalEvidence): string {
-  return [`Retrieval: freshness=${evidence.freshness}; completeness=${evidence.completeness}; policy=${evidence.policy}`,
-    ...(evidence.sourceFreshness ? [`Primary source freshness: ${evidence.sourceFreshness}; dependency freshness: ${evidence.dependencies?.status ?? 'not-applicable'}`] : []),
-    `Source SHA-256: ${evidence.source?.sha256 ?? 'not-captured'}; query: ${evidence.queryId}`,
-    ...(evidence.index ? [`Index: generation=${evidence.index.generation}; consistency=${evidence.index.consistency}; manifest=${evidence.index.manifestHash}`] : []),
-    ...(evidence.budget ? [`Budget: max_bytes=${evidence.budget.maxBytes ?? 'unbounded'}; estimated_bytes=${evidence.budget.estimatedBytes}; truncated=${evidence.budget.isTruncated}${evidence.budget.continuationToken ? `; continuation=${evidence.budget.continuationToken}` : ''}`] : []),
-    `Selected because: ${evidence.selectionReason}`,
-    ...evidence.omissions.map(item => `Omission ${item.code}: ${item.reason}`),
-    ...evidence.limitations.map(reason => `Limitation: ${reason}`)].join('\n');
+  const parts = [
+    `Retrieval: status=${evidence.freshness}; completeness=${evidence.completeness}; policy=${evidence.policy}; query=${evidence.queryId}`,
+  ];
+  if (evidence.source?.sha256) {
+    parts.push(`sha256=${evidence.source.sha256.slice(0, 12)}`);
+  }
+  if (evidence.omissions && evidence.omissions.length > 0) {
+    parts.push(`omissions=${evidence.omissions.map((o) => o.code).join(',')}`);
+  }
+  return parts.join(' | ');
 }
 
 /** Until a dependency manifest is captured, primary-file freshness cannot verify derived results. */

@@ -204,8 +204,9 @@ describe('CLI Companion (Task 6 DoD)', () => {
     // Command-specific audit help assertions
     const auditHelp = logs[1];
     expect(auditHelp).toContain('Usage: strata audit [target-dir] [options]');
-    expect(auditHelp).toContain('archetype-drift');
-    expect(auditHelp).toContain('--exemplar <file>');
+    expect(auditHelp).not.toContain('archetype-drift');
+    expect(auditHelp).toContain('api-contracts');
+    expect(auditHelp).not.toContain('--exemplar <file>');
 
     // Command-specific patch help assertions
     const patchHelp = logs[2];

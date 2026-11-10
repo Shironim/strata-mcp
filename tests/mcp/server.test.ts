@@ -368,7 +368,7 @@ describe('MCP Server & Core Tools', () => {
       expect(response.content[0].text).toContain('Frontend Architecture & Health Audit');
     });
 
-    it('audits template structural similarity when target is similar-templates', async () => {
+    it('rejects removed similar-templates target', async () => {
       const server = createMcpServer();
       const callHandler = (server as any)._requestHandlers?.get('tools/call');
 
@@ -383,8 +383,8 @@ describe('MCP Server & Core Tools', () => {
         },
       });
 
-      expect(response.isError).toBeFalsy();
-      expect(response.content[0].text).toContain('Template Similarity & Abstraction Opportunities');
+      expect(response.isError).toBe(true);
+      expect(response.content[0].text).toContain('Invalid audit target');
     });
   });
 
@@ -418,8 +418,6 @@ describe('MCP Server & Core Tools', () => {
           name: 'inspect_component',
           arguments: {
             path: join(FIXTURES_DIR, 'RuntimePropsButton.vue'),
-            infer_props: true,
-            resolve_globals: true,
             output_format: 'json',
           },
         },

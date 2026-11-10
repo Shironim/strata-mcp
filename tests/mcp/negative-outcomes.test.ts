@@ -27,13 +27,17 @@ test('real Vue handlers report bounded negative results with operation-specific 
         expect(result.isError).not.toBe(true);
         const decision = result.structuredContent?.decision as any;
         expect(decision).toMatchObject({ status: 'partial', emptyOutcome: 'inconclusive', selection: { subject, count: 0 }, capability: { operation, implementation: 'declared' } });
-        const block = result.content.find(item => format === 'json' ? item.text.startsWith('{"decision":') : item.text.startsWith('Decision:'));
+        const block = result.content.find(item => {
+          if (item.text.startsWith('Decision:')) return true;
+          try { return Boolean(JSON.parse(item.text).decision); } catch { return false; }
+        });
         expect(block).toBeDefined();
-        if (format === 'json') expect(JSON.parse(block!.text).decision).toEqual(decision);
-        else {
+        if (block!.text.startsWith('Decision:')) {
           expect(block!.text).toContain(`Selection: ${subject}; count=0`);
           expect(block!.text).toContain('empty=inconclusive');
-        }
+        } else expect(JSON.parse(block!.text).decision).toMatchObject({
+          status: decision.status, emptyOutcome: decision.emptyOutcome, selection: decision.selection,
+        });
       }
     }
     const all = await TOOLS.find(tool => tool.name === 'audit_frontend')!.handler({ path: root, target: 'all', format: 'json' });

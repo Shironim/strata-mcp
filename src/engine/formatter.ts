@@ -12,7 +12,8 @@ export function formatMatchesAsText(matches: ResolvedMatch[]): string {
     .map((m) => {
       const usage = m.usageKind ? ` [${m.usageKind}]` : '';
       const directive = m.clientDirective ? ` [${m.clientDirective}]` : '';
-      return `${m.file}:${m.line}:${m.column}${usage}${directive} - ${m.snippet}`;
+      const loc = m.column !== undefined ? `${m.file}:${m.line}:${m.column}` : `${m.file}:${m.line}`;
+      return `${loc}${usage}${directive} - ${m.snippet}`;
     })
     .join('\n');
 }
@@ -47,20 +48,9 @@ function appendHeaderAndProps(contract: ComponentContract, lines: string[]): voi
       const reqStr = p.required ? 'required' : 'optional';
       const defStr = p.default ? `, default: ${p.default}` : '';
       const unionStr = p.unionMembers && p.unionMembers.length > 0 ? ` [options: ${p.unionMembers.join(' | ')}]` : '';
-      lines.push(`  - ${p.name}: ${p.type} (${reqStr}${defStr})${unionStr}`);
-    }
-  }
-
-  if (contract.inferredProps && contract.inferredProps.length > 0) {
-    lines.push('');
-    lines.push('Inferred Props Structure (via template & script AST):');
-    for (const ip of contract.inferredProps) {
-      lines.push(`  - ${ip.propName}:`);
-      for (const prop of ip.properties) {
-        const usage = prop.usageSnippet ? ` (${prop.usageSnippet})` : '';
-        const typeStr = prop.inferredType ? `: ${prop.inferredType}` : '';
-        lines.push(`      • .${prop.property}${typeStr}${usage}`);
-      }
+      const depStr = p.deprecated !== undefined ? ` ⚠️ [DEPRECATED${typeof p.deprecated === 'string' ? `: ${p.deprecated}` : ''}]` : '';
+      const descStr = p.description ? ` - ${p.description}` : '';
+      lines.push(`  - ${p.name}: ${p.type} (${reqStr}${defStr})${unionStr}${depStr}${descStr}`);
     }
   }
 }
@@ -187,66 +177,9 @@ function appendDependenciesAndTokens(contract: ComponentContract, lines: string[
       }
     }
   }
-
-  if (contract.globalSymbols && contract.globalSymbols.length > 0) {
-    lines.push('');
-    lines.push('External / Global Symbols:');
-    for (const g of contract.globalSymbols) {
-      const hint = g.hint ? ` (${g.hint})` : '';
-      lines.push(`  - ${g.name}: ${g.category}${hint}`);
-    }
-  }
-
-  if (contract.styleTokens) {
-    const { layoutTraps, zIndices, overflow, positioning } = contract.styleTokens;
-    if (layoutTraps.length > 0 || zIndices.length > 0 || overflow.length > 0 || positioning.length > 0) {
-      lines.push('');
-      lines.push('Layout & Style Tokens (Tailwind/CSS):');
-      if (layoutTraps.length > 0) {
-        lines.push(`  - Layout Traps: ${layoutTraps.join(', ')}`);
-      }
-      if (zIndices.length > 0) {
-        lines.push(`  - Z-Indices: ${zIndices.join(', ')}`);
-      }
-      if (overflow.length > 0) {
-        lines.push(`  - Overflow: ${overflow.join(', ')}`);
-      }
-      if (positioning.length > 0) {
-        lines.push(`  - Positioning: ${positioning.join(', ')}`);
-      }
-    }
-  }
 }
 
 function appendDiagnosticsAndForms(contract: ComponentContract, lines: string[]): void {
-  if (contract.patternDiagnostics && contract.patternDiagnostics.length > 0) {
-    lines.push('');
-    lines.push(`Canonical Pattern Diagnostics (${contract.patternDiagnostics.length} detected):`);
-    for (const d of contract.patternDiagnostics) {
-      const icon = d.severity === 'error' ? '❌' : d.severity === 'warning' ? '⚠️' : 'ℹ️';
-      const lineStr = d.fact.lineRange ? `Line ${d.fact.lineRange.startLine}` : 'Line ?';
-      lines.push(`  ${icon} [${d.severity.toUpperCase()}] [${d.ruleId}] ${lineStr}: ${d.smell.title}`);
-      lines.push(`     Fact: \`${d.fact.snippet}\` (ref: ${d.fact.ref.sha256.slice(0, 8)}:${d.fact.ref.startOffset}-${d.fact.ref.endOffset})`);
-      lines.push(`     Smell: ${d.smell.explanation}`);
-      lines.push(`     Canon: ${d.canon.summary}`);
-      if (d.canon.canonicalCode) {
-        lines.push(`     Standard Code:\n       ${d.canon.canonicalCode.replace(/\n/g, '\n       ')}`);
-      }
-    }
-  }
-
-  if (contract.reactivitySmells && contract.reactivitySmells.length > 0) {
-    lines.push('');
-    lines.push(`Reactivity Smells (${contract.reactivitySmells.length} detected):`);
-    for (const s of contract.reactivitySmells) {
-      const icon = s.severity === 'error' ? '❌' : '⚠️';
-      lines.push(`  ${icon} [${s.severity.toUpperCase()}] Line ${s.line}: ${s.message}`);
-      if (s.snippet) {
-        lines.push(`     Code: \`${s.snippet}\``);
-      }
-      lines.push(`     Fix: ${s.recommendation}`);
-    }
-  }
 
   if (contract.boundaryContracts && contract.boundaryContracts.length > 0) {
     lines.push('');
@@ -255,7 +188,7 @@ function appendDiagnosticsAndForms(contract: ComponentContract, lines: string[])
       const lineStr = b.loc ? `Line ${b.loc.line}: ` : '';
       const payloadStr = b.payloadKeys && b.payloadKeys.length > 0 ? ` [payload: ${b.payloadKeys.join(', ')}]` : '';
       const hintStr = b.backendTargetHint
-        ? ` -> [Backend Target: ${b.backendTargetHint.targetIntent} | ${b.backendTargetHint.suggestedSymbols[0]}]`
+        ? ` -> [Backend Target (Heuristic): ${b.backendTargetHint.targetIntent} | ${b.backendTargetHint.suggestedSymbols[0]} (verify actual routes)]`
         : '';
       lines.push(`  - ${lineStr}[${b.boundaryType}] ${b.method} ${b.targetEndpoint}${payloadStr}${hintStr}`);
     }
@@ -277,12 +210,11 @@ function appendDiagnosticsAndForms(contract: ComponentContract, lines: string[])
 
 function appendLayoutStructure(contract: ComponentContract, lines: string[]): void {
   if (!contract.layoutStructure) return;
-  const { rootWrapper, dynamicBindings, visibilityDirectives, sections } = contract.layoutStructure;
+  const { rootWrapper, dynamicBindings, visibilityDirectives } = contract.layoutStructure;
   const hasData =
     rootWrapper ||
     dynamicBindings.length > 0 ||
-    visibilityDirectives.length > 0 ||
-    (sections && sections.length > 0);
+    visibilityDirectives.length > 0;
   if (!hasData) return;
 
   lines.push('');
@@ -292,18 +224,6 @@ function appendLayoutStructure(contract: ComponentContract, lines: string[]): vo
       ? ` (Tokens: ${rootWrapper.layoutTokens.join(' ')})`
       : '';
     lines.push(`  - Root Wrapper: <${rootWrapper.tag}>${tokensStr}`);
-  }
-  if (sections && sections.length > 0) {
-    lines.push(`  - Semantic Sections (${sections.length}):`);
-    for (const sec of sections) {
-      const customNames = sec.components
-        .filter((c) => c.isCustomComponent)
-        .map((c) => `<${c.name}>`)
-        .join(', ');
-      const rawNames = sec.rawHtmlPrimitives.map((r) => `<${r.tag}>`).join(', ');
-      const compSummary = [customNames, rawNames].filter(Boolean).join(', ') || 'layout-only';
-      lines.push(`      • L${sec.line} [${sec.kind}] <${sec.tag}>: ${compSummary}`);
-    }
   }
   if (dynamicBindings.length > 0) {
     lines.push(`  - Dynamic Class Bindings (${dynamicBindings.length}):`);
@@ -315,78 +235,6 @@ function appendLayoutStructure(contract: ComponentContract, lines: string[]): vo
     lines.push(`  - Visibility Directives (${visibilityDirectives.length}):`);
     for (const vd of visibilityDirectives) {
       lines.push(`      • L${vd.line} <${vd.tag} ${vd.directive}="${vd.expression}">`);
-    }
-  }
-}
-
-function appendTransportContract(contract: ComponentContract, lines: string[]): void {
-  if (!contract.transportContract) return;
-  const { egress, ingress, transportRisks } = contract.transportContract;
-  const hasData = egress.length > 0 || ingress.length > 0 || transportRisks.length > 0;
-  if (!hasData) return;
-
-  lines.push('');
-  lines.push('Bidirectional Data Transport & Boundary Contracts:');
-
-  if (egress.length > 0) {
-    lines.push(`  - Outbound Egress Payloads (${egress.length}):`);
-    for (const e of egress) {
-      const keysStr = e.payloadKeys.length > 0 ? ` { ${e.payloadKeys.join(', ')} }` : '';
-      lines.push(
-        `      • [${e.method}] ${e.endpoint} via ${e.clientKind} (${e.serialization}, casing: ${e.casing})${keysStr}`
-      );
-    }
-  }
-
-  if (ingress.length > 0) {
-    lines.push(`  - Inbound Ingress Shapes (${ingress.length}):`);
-    for (const i of ingress) {
-      lines.push(
-        `      • prop '${i.rootPropName}' (expected: ${i.expectedShape}, accessed fields: ${i.accessedProperties.length})`
-      );
-    }
-  }
-
-  if (contract.transportContract.validationSchemas && contract.transportContract.validationSchemas.length > 0) {
-    lines.push(`  - Validation Schemas (${contract.transportContract.validationSchemas.length}):`);
-    for (const s of contract.transportContract.validationSchemas) {
-      lines.push(
-        `      • ${s.name} (${s.schemaLibrary}): ${s.fields
-          .map((f) => `${f.field}:${f.baseType}${f.isOptional ? '?' : ''}`)
-          .join(', ')}`
-      );
-    }
-  }
-
-  if (contract.transportContract.errorHandling) {
-    const eh = contract.transportContract.errorHandling;
-    const errSourcesStr = eh.errorSources.length > 0 ? ` (Sources: ${eh.errorSources.join(', ')})` : '';
-    lines.push(`  - Error Handling & 422 Rejection Audit${errSourcesStr}:`);
-    lines.push(
-      `      • Bound Error Fields: ${eh.boundErrorFields.length > 0 ? eh.boundErrorFields.join(', ') : '(none)'}`
-    );
-    if (eh.unhandledPayloadKeys.length > 0) {
-      lines.push(`      • Unhandled Payload Keys: ${eh.unhandledPayloadKeys.join(', ')} [Silent 422 Risk]`);
-    }
-  }
-
-  if (contract.transportContract.invalidationGraph) {
-    const ig = contract.transportContract.invalidationGraph;
-    if (ig.invalidations.length > 0) {
-      lines.push(`  - Cache Invalidation Triggers (${ig.invalidations.length}):`);
-      for (const inv of ig.invalidations) {
-        lines.push(`      • L${inv.line} [${inv.mechanism}] -> ${inv.targetKeyOrUrl}`);
-      }
-    }
-    if (ig.hasDanglingMutation) {
-      lines.push(`      • Dangling Mutations (No Invalidation): ${ig.danglingMutations.join(', ')}`);
-    }
-  }
-
-  if (transportRisks.length > 0) {
-    lines.push(`  - Transport Risk Warnings (${transportRisks.length}):`);
-    for (const r of transportRisks) {
-      lines.push(`      ⚠️ ${r}`);
     }
   }
 }
@@ -407,7 +255,6 @@ export function formatContractAsText(contract: ComponentContract): string {
 
   appendDiagnosticsAndForms(contract, lines);
   appendLayoutStructure(contract, lines);
-  appendTransportContract(contract, lines);
 
   return lines.join('\n');
 }

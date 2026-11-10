@@ -11,7 +11,7 @@ const audit = (id: string, reason: string): CapabilityOperation => ({ id, source
 /** Declared implementation scope, not framework certification. No I/O or version inference. */
 export const CAPABILITY_MANIFEST: Readonly<Record<string, readonly CapabilityOperation[]>> = {
   find_code: [
-    { id: 'component-prop', source: 'src/engine/search-intent.ts', features: [feature('prop-supply', 'partial', 'Structured Vue component-prop usage and omission search (component + prop_name + prop_presence); target must be unambiguous in scope. Omission matches exclude indeterminate supply and candidate renders.')] },
+    { id: 'component-prop', source: 'src/engine/search-intent.ts', features: [feature('prop-supply', 'partial', 'Structured Vue and React/JSX component-prop usage and omission search (component + prop_name + prop_presence); target must be unambiguous in scope. Omission matches exclude indeterminate supply and candidate renders.')] },
     { id: 'map', source: 'src/engine/frontend-map.ts', features: [feature('file-inventory', 'partial', 'Bounded frontend path inventory; ignore rules and scope exclude files.')] },
     { id: 'dump_ast', source: 'src/tools/find-code.ts', features: [feature('syntax-tree', 'partial', 'Uses the selected ast-grep language; parser acceptance is not semantic correctness.')] },
     ...['ast', 'auto', 'literal', 'yaml', 'component'].map(id => ({ id, source: 'src/engine/search.ts', features: [
@@ -28,7 +28,8 @@ export const CAPABILITY_MANIFEST: Readonly<Record<string, readonly CapabilityOpe
     { id: 'audit_events', source: 'src/engine/reactivity.ts', features: [feature('event-bindings', 'partial', 'Vue template/script event-binding diagnostics only; not runtime event verification.')] },
     { id: 'contract', source: 'src/engine/contract.ts', features: [
       ...['props', 'emits', 'slots', 'state'].map(id => feature(id, 'partial', 'Static extraction varies by syntax and framework; imported/dynamic definitions may remain unresolved.')),
-      feature('consumer-count-per-prop', 'partial', 'Opt-in impact summary/full counts explicit static Vue script-setup usages and separates candidates; scope/runtime/config closure remains incomplete. Other target frameworks are unsupported by impact analysis.'),
+      feature('imported-composable-api', 'partial', 'Direct calls to named or default local use-prefixed hooks are inspected within the selected function declaration or arrow/function initializer. Unused imports, shadowed names, module-level endpoints and other functions are excluded. Re-exports, helper call chains and dynamic invocation are not resolved; extracted endpoints do not prove runtime execution.'),
+      feature('consumer-count-per-prop', 'partial', 'Opt-in impact summary/full counts explicit static Vue and React/JSX usages and separates candidates; scope/runtime/config closure remains incomplete. Astro and Svelte targets are unsupported by impact analysis.'),
     ] },
   ],
   get_component_tree: ['downward', 'upward'].map(id => ({ id, source: `src/engine/graph/${id}-traversal.ts`, features: [boundedGraph] })),
@@ -38,16 +39,12 @@ export const CAPABILITY_MANIFEST: Readonly<Record<string, readonly CapabilityOpe
     audit('routes', 'Route conventions and statically analyzable router configuration; dynamic registrations may be missing.'),
     audit('dead-components', 'Static render/import graph candidates, not proof that components are safe to delete.'),
     audit('dead-state', 'Static unused state candidates; dynamic accesses may be unresolved.'),
-    audit('similar-templates', 'Structural similarity candidates, not equivalent business behavior.'),
-    audit('design-tokens', 'Selected design tokens and accessibility rules; not a complete browser accessibility audit.'),
-    audit('bundle-health', 'Catalog-based eager import warnings, not measured bundle sizes.'),
     audit('api-contracts', 'Static outbound API expressions, not end-to-end backend contract verification.'),
-    audit('archetype-drift', 'Structural comparison to an exemplar, not approved business intent.'),
-    audit('all', 'Aggregates selected audits; each section retains its own limitations. Does not include archetype-drift.'),
+    audit('all', 'Aggregates routes, api-contracts, dead-components and dead-state; each section retains its own limitations.'),
   ],
   generate_patch_plan: ['rename_prop', 'remove_prop', 'rename_event', 'remove_event', 'rename_model', 'remove_model', 'rename_slot', 'remove_slot']
     .map(id => ({ id, source: 'src/engine/patch-plan.ts', features: [boundedGraph,
-      feature('static-consumer-edits', 'partial', 'Produces hash-bound proposals for supported static usages; validate the whole batch before applying.'),
+      feature('static-consumer-edits', 'partial', 'Produces hash-bound proposals for supported static usages; rename_prop/remove_prop include Vue, Astro, JSX/TSX and Svelte consumers. Other operations retain syntax-specific limits. Validate the whole batch before applying.'),
       feature('target-declaration-forwarding-dynamic-rewrite', 'unsupported', 'Target declarations, forwarding and dynamic components are not rewritten.'),
     ] })),
 };
@@ -83,18 +80,23 @@ export function selectCapabilityOperation(tool: string, args: Record<string, any
   }
 }
 
-export function assessCapability(tool: string, args: Record<string, any>) {
+export function assessCapability(tool: string, args: Record<string, any>, observed?: Record<string, any>) {
   const path = String(args.path ?? args.file_path ?? args.filePath ?? args.component_path ?? args.componentPath ?? args.entry_path ?? args.target_path ?? '');
   const syntax = path.endsWith('.vue') ? 'vue-sfc' : path.endsWith('.svelte') ? 'svelte'
     : path.endsWith('.astro') ? 'astro' : /\.[jt]sx$/.test(path) ? 'jsx' : /\.[jt]s$/.test(path) ? 'script' : 'unknown';
   const operation = selectCapabilityOperation(tool, args);
   const entry = CAPABILITY_MANIFEST[tool]?.find(item => item.id === operation);
+  const features = entry?.features.filter(item => {
+    if (item.id === 'imported-composable-api') return Boolean(observed?.boundaryContracts?.some((b: any) => b.source === 'imported-composable') || observed?.resultSummary?.contract?.apiCalls?.some((b: any) => b.source === 'imported-composable'));
+    if (item.id === 'consumer-count-per-prop') return args.impact !== undefined && args.impact !== 'none';
+    return true;
+  }).map(item => ({ ...item })) ?? [];
   return { manifestVersion: 1, tool, operation, syntax, frameworkVersion: 'unknown' as const,
     status: syntax === 'vue-sfc' && entry ? 'partial' as const : 'unknown' as const,
     implementation: entry ? 'declared' : 'unknown', validation: 'not-certified' as const,
-    source: entry?.source ?? null, features: entry?.features.map(item => ({ ...item })) ?? [],
+    source: entry?.source ?? null, features,
     limitations: [
-      ...(entry?.features.filter(item => item.status !== 'supported').map(item => item.reason) ?? ['No capability declaration exists for this operation.']),
-      'Framework version is unknown. Declared implementation support is not runtime verification; non-Vue capabilities are not certified by this milestone.',
+      ...(!entry ? ['No capability declaration exists for this operation.'] : []),
+      'Static declaration only; framework version unknown and runtime behavior not certified.',
     ] };
 }

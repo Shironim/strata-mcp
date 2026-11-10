@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import { extractBoundaryContracts, extractFormContracts } from '../../src/engine/contract';
 import { extractComponentContextNodes } from '../../src/engine/tree';
-import { auditBundleHealth } from '../../src/engine/bundle-audit';
 import type { ContextDependencyNode, ContextDependencyRelation } from '../../src/types';
 
 describe('Strata MCP — The Frontend Contract Master (4 Pillars)', () => {

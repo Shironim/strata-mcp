@@ -13,9 +13,6 @@ import { isPageFile } from '../tree';
 import { STRATA_VERSION } from '../../version';
 import type { SyncStats } from '../../types';
 
-// Reparse cached render-boundary diagnostics after React binding resolution changes.
-const CACHE_VERSION = `memory-v12:${STRATA_VERSION}`;
-
 async function hashFile(path: string): Promise<{hash: string; mtime: number; size: number}> {
   const file = await fs.open(path, 'r');
   try {
@@ -55,16 +52,38 @@ export async function stagedSync(root: string, scopePath: string | undefined, db
     `);
     const insert = prepare('INSERT INTO sync_files(path, hash, mtime, size, config) VALUES (?,?,?,?,?)');
     const verifyInsert = prepare('INSERT INTO sync_verify VALUES (?,?,?,?,?)');
-    async function scan(statement: Statement): Promise<void> {
+    const firstPassCache = new Map<string, { hash: string; mtime: number; size: number }>();
+    async function scan(statement: Statement, isVerify = false): Promise<void> {
       for await (const raw of iterateFiles(root, {ignoreRoot: root, includeConfigFiles: true, failOnReadError: true})) {
         const config = isConfigFile(basename(raw));
         if (!config && !SUPPORTED_EXTENSIONS.has(extname(raw).toLowerCase())) continue;
-        const path = normalize(canonicalizePath(raw)); const info = await hashFile(path);
+        const path = normalize(canonicalizePath(raw));
+        let info: { hash: string; mtime: number; size: number };
+        if (isVerify) {
+          const cached = firstPassCache.get(path);
+          if (cached) {
+            try {
+              const currentStat = await fs.stat(path);
+              if (currentStat.mtimeMs === cached.mtime && currentStat.size === cached.size) {
+                info = cached;
+              } else {
+                info = await hashFile(path);
+              }
+            } catch {
+              info = await hashFile(path);
+            }
+          } else {
+            info = await hashFile(path);
+          }
+        } else {
+          info = await hashFile(path);
+          firstPassCache.set(path, info);
+        }
         statement.run(path, info.hash, info.mtime, info.size, config ? 1 : 0);
       }
     }
-    await scan(insert);
-    const configHash = createHash('sha256').update(CACHE_VERSION).update('\0alias-resolution-jsx').update('\0contract-typing-v1').update('\0scoped-dependency-fallback-v1').update('\0edge-rendered-v2').update('\0file-dependencies-v1').update('\0tsconfig-extends-v1');
+    await scan(insert, false);
+    const configHash = createHash('sha256').update(STRATA_VERSION).update('\0structural-contract-phase2-v1');
     const configRows = prepare('SELECT path, hash FROM sync_files WHERE config = 1 ORDER BY path');
     for (const row of configRows.iterate() as Iterable<{path: string; hash: string}>) {
       configHash.update(row.path).update('\0').update(row.hash);
@@ -83,7 +102,7 @@ export async function stagedSync(root: string, scopePath: string | undefined, db
       }
     }
     const fingerprint = configHash.digest('hex');
-    const reset = meta(db, 'index_invalid') === '1' || meta(db, 'cache_version') !== CACHE_VERSION || meta(db, 'config_fingerprint') !== fingerprint;
+    const reset = meta(db, 'index_invalid') === '1' || meta(db, 'cache_version') !== STRATA_VERSION || meta(db, 'config_fingerprint') !== fingerprint;
     let scope = normalize(reset ? root : targetScope), prefix = scope + sep;
     const scopeSql = '(s.path = $scope OR substr(s.path, 1, length($prefix)) = $prefix)';
     let bindings = {$scope: scope, $prefix: prefix};
@@ -294,7 +313,7 @@ export async function stagedSync(root: string, scopePath: string | undefined, db
     const routeInsert = prepare('INSERT OR REPLACE INTO sync_routes VALUES (?,?,?,?,?,?)');
     for (const route of manifest.routes) routeInsert.run(route.path, normalize(canonicalizePath(route.filePath)), route.type, JSON.stringify(route.params), JSON.stringify(route.handlers ?? null), JSON.stringify(route.layouts ?? null));
     manifest.routes.length = 0;
-    await scan(verifyInsert);
+    await scan(verifyInsert, true);
     const mismatch = db.query(`
       WITH in_files_only AS (
         SELECT path, hash FROM sync_files EXCEPT SELECT path, hash FROM sync_verify
@@ -326,7 +345,7 @@ export async function stagedSync(root: string, scopePath: string | undefined, db
           const rows = prepare('SELECT path, hash, mtime, size, payload FROM sync_files WHERE payload IS NOT NULL ORDER BY path');
           const insertFile = prepare('INSERT INTO files(path,framework,mtime,size,content_hash,is_page,is_layout,render_boundary,boundary_directive) VALUES (?,?,?,?,?,?,?,?,?)');
           const insertComponent = prepare('INSERT INTO components(file_id,name,contract_json) SELECT id,?,? FROM files WHERE path=?');
-          const insertState = prepare('INSERT INTO state_deps(file_id,kind,identifier,access_mode,line_number,usage_snippet) SELECT id,?,?,?,?,? FROM files WHERE path=?');
+          const insertState = prepare('INSERT INTO state_deps(file_id,kind,identifier,access_mode,line_number,usage_snippet,accessed_properties) SELECT id,?,?,?,?,?,? FROM files WHERE path=?');
           const insertDep = prepare('INSERT OR REPLACE INTO file_dependencies(file_id,dependency_path,content_hash,is_external) SELECT id,?,?,? FROM files WHERE path=?');
           for (const row of rows.iterate() as Iterable<{path: string; hash: string; mtime: number; size: number; payload: string}>) {
             const p = JSON.parse(row.payload);
@@ -337,7 +356,7 @@ export async function stagedSync(root: string, scopePath: string | undefined, db
               ...p.stateDeps.contexts.map((identifier: string) => ({kind: 'context', identifier})),
               ...p.stateDeps.composables.map((identifier: string) => ({kind: 'composable', identifier})),
             ];
-            for (const dep of deps) insertState.run(dep.kind, dep.identifier, dep.accessMode ?? 'read', dep.lineNumber ?? 0, dep.usageSnippet ?? null, row.path);
+            for (const dep of deps) insertState.run(dep.kind, dep.identifier, dep.accessMode ?? 'read', dep.lineNumber ?? 0, dep.usageSnippet ?? null, dep.accessedProperties ? JSON.stringify(dep.accessedProperties) : null, row.path);
             const inputDeps = p.dependencies ?? p.contract?.dependencies;
             if (Array.isArray(inputDeps)) {
               for (const dep of inputDeps) {
@@ -379,7 +398,7 @@ export async function stagedSync(root: string, scopePath: string | undefined, db
           const clearOutgoingEdges = prepare('DELETE FROM edges WHERE parent_file_id = ?');
 
           const insertComponent = prepare('INSERT INTO components(file_id,name,contract_json) SELECT id,?,? FROM files WHERE path=?');
-          const insertState = prepare('INSERT INTO state_deps(file_id,kind,identifier,access_mode,line_number,usage_snippet) SELECT id,?,?,?,?,? FROM files WHERE path=?');
+          const insertState = prepare('INSERT INTO state_deps(file_id,kind,identifier,access_mode,line_number,usage_snippet,accessed_properties) SELECT id,?,?,?,?,?,? FROM files WHERE path=?');
           const insertDep = prepare('INSERT OR REPLACE INTO file_dependencies(file_id,dependency_path,content_hash,is_external) SELECT id,?,?,? FROM files WHERE path=?');
 
           const reparseRows = prepare('SELECT path, hash, mtime, size, payload FROM sync_files WHERE payload IS NOT NULL ORDER BY path');
@@ -402,7 +421,7 @@ export async function stagedSync(root: string, scopePath: string | undefined, db
               ...p.stateDeps.contexts.map((identifier: string) => ({kind: 'context', identifier})),
               ...p.stateDeps.composables.map((identifier: string) => ({kind: 'composable', identifier})),
             ];
-            for (const dep of deps) insertState.run(dep.kind, dep.identifier, dep.accessMode ?? 'read', dep.lineNumber ?? 0, dep.usageSnippet ?? null, row.path);
+            for (const dep of deps) insertState.run(dep.kind, dep.identifier, dep.accessMode ?? 'read', dep.lineNumber ?? 0, dep.usageSnippet ?? null, dep.accessedProperties ? JSON.stringify(dep.accessedProperties) : null, row.path);
             const inputDeps = p.dependencies ?? p.contract?.dependencies;
             if (Array.isArray(inputDeps)) {
               for (const dep of inputDeps) {
@@ -425,7 +444,7 @@ export async function stagedSync(root: string, scopePath: string | undefined, db
       db.run(`INSERT INTO routes(url_path,file_id,type,params_json,handlers_json,layout_chain_json)
         SELECT r.url,f.id,r.type,r.params,r.handlers,r.layouts FROM sync_routes r JOIN files f ON f.path=r.path`);
       const setMeta = prepare('INSERT OR REPLACE INTO meta(key,value) VALUES (?,?)');
-      setMeta.run('cache_version', CACHE_VERSION); setMeta.run('config_fingerprint', fingerprint);
+      setMeta.run('cache_version', STRATA_VERSION); setMeta.run('config_fingerprint', fingerprint);
       setMeta.run('sync_generation', String(Number(generation || 0) + 1));
       setMeta.run('index_invalid', '');
     });

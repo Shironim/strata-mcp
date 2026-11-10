@@ -6,7 +6,7 @@ import { renderBoundaryOmission } from './boundary-evidence';
 import type { RenderBoundaryInfo } from '../types';
 
 /** Decision metadata describes the result, never upgrades the analyzer's evidence. */
-export function withDecisionResponse(result: ToolCallResponse, tool: string, args: Record<string, any>): ToolCallResponse {
+export function withDecisionResponse(result: ToolCallResponse, tool: string, args: Record<string, any>) {
   const data = result.structuredContent ?? {};
   const evidence = data.retrieval as RetrievalEvidence | undefined;
   const message = result.content.map(block => block.text).join('\n');
@@ -46,9 +46,7 @@ export function withDecisionResponse(result: ToolCallResponse, tool: string, arg
           : typeof path === 'string' && /\.(vue|tsx?|jsx?|astro|svelte)$/.test(path)
             ? [{ action: 'inspect-source', tool: 'inspect_component', arguments: { path, view: 'map' }, reason: 'Inspect source regions and diagnostics before editing; use a returned source_ref to retrieve exact source.' }]
             : [{ action: 'review-coverage', reason: 'Review scope, omissions and capability limits before concluding that no usage exists.' }];
-  const decision = { status, emptyOutcome, selection, capability: assessCapability(tool, args), next };
-  const metadata = args.format === 'json' || args.output_format === 'json'
-    ? JSON.stringify({ decision })
-    : `Decision: ${status}; empty=${emptyOutcome}\nSelection: ${selection.subject}; count=${selection.count ?? 'unknown'}. ${selection.boundary}\nCapability: ${decision.capability.syntax}/${decision.capability.operation}=${decision.capability.status}; framework version unknown\n${decision.capability.limitations.map(reason => `Capability limit: ${reason}`).join('\n')}\n${next.map(item => `Next: ${item.action}: ${item.reason}`).join('\n')}`;
-  return { ...result, structuredContent: { ...data, decision }, content: [...result.content, { type: 'text', text: metadata }] };
+  const decision = { status, emptyOutcome, selection, capability: assessCapability(tool, args, data), next };
+
+  return { ...result, structuredContent: { ...data, decision } };
 }

@@ -2,7 +2,7 @@ import { afterEach, expect, test } from 'bun:test';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { mapFrontendScope } from '../../src/engine/frontend-map';
+import { formatFrontendMapAsText, mapFrontendScope } from '../../src/engine/frontend-map';
 
 let root = '';
 afterEach(async () => { if (root) await rm(root, { recursive: true, force: true }); root = ''; });
@@ -30,5 +30,18 @@ test('maps stable bounded frontend inventory with candidate framework evidence a
 
   const second = await mapFrontendScope(root, { limit: 1, offset: 1 });
   expect(second.status).toBe('complete');
+  expect(second.coverage.excludedDirs).toEqual([]);
   expect(second.files[0].path).toBe(join(root, 'pages', 'index.tsx'));
+
+  await mkdir(join(root, 'scripts'));
+  await writeFile(join(root, 'scripts', 'build.ts'), 'console.log(1);');
+  await mkdir(join(root, 'src', 'tools'), { recursive: true });
+  await writeFile(join(root, 'src', 'tools', 'inspector.ts'), 'export const x = 1;');
+
+  const withToolsAndSkipped = await mapFrontendScope(root, { limit: 100, offset: 0 });
+  expect(withToolsAndSkipped.files.map(f => f.path)).toContain(join(root, 'src', 'tools', 'inspector.ts'));
+  expect(withToolsAndSkipped.coverage.excludedDirs).toEqual([{ path: 'scripts', reason: 'default-ignore' }]);
+  const text = formatFrontendMapAsText(withToolsAndSkipped);
+  expect(text).toContain('Status: complete (excluding 1 directory)');
+  expect(text).toContain('Excluded directories: scripts (default-ignore)');
 });

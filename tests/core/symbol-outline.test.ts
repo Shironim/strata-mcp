@@ -60,7 +60,6 @@ const resetCount = (val: number = 0) => {
 
   it('extracts functions, computed, and arrow functions with exact line bounds from a Vue SFC', async () => {
     const outline = await extractComponentOutline(samplePath, {
-      maxFunctionLines: 300,
       resolveCalls: true,
     });
 
@@ -84,21 +83,21 @@ const resetCount = (val: number = 0) => {
     expect(arrowFn?.kind).toBe('arrow-function');
   });
 
-  it('flags high-complexity smell when function exceeds line threshold', async () => {
+  it('preserves function line ranges without assigning quality scores', async () => {
     const outline = await extractComponentOutline(samplePath, {
-      maxFunctionLines: 1,
     });
 
     const clickFn = outline.functions.find((f) => f.name === 'handleClick');
-    expect(clickFn?.complexitySmell).toBeDefined();
-    expect(clickFn?.complexitySmell?.isHighComplexity).toBe(true);
-    expect(clickFn?.complexitySmell?.warning).toContain('exceeds 1-line threshold');
-    expect(outline.highComplexityCount).toBeGreaterThanOrEqual(1);
+    expect(clickFn?.lineCount).toBeGreaterThan(0);
+    expect(clickFn).not.toHaveProperty('complexitySmell');
+    expect(outline).not.toHaveProperty('highComplexityCount');
+    const text = formatOutlineAsText(outline);
+    expect(text).not.toContain('healthy');
+    expect(text).not.toContain('SMELL');
   });
 
   it('formats outline into markdown table with line ranges', async () => {
     const outline = await extractComponentOutline(samplePath, {
-      maxFunctionLines: 300,
     });
 
     const text = formatOutlineAsText(outline);
@@ -109,7 +108,6 @@ const resetCount = (val: number = 0) => {
 
   it('resolves 1-hop cross-file callee line coordinates from direct imports', async () => {
     const outline = await extractComponentOutline(samplePath, {
-      maxFunctionLines: 300,
       resolveCalls: true,
     });
 
@@ -319,6 +317,58 @@ const other = otherFn(10);
       closeWorkspaceDatabase(wsDir);
       fs.rmSync(wsDir, { recursive: true, force: true });
     }
+  });
+
+  it('includes exported interfaces, types, enums, classes, and top-level constants in outlines without leaking local variables', async () => {
+    const detectorFile = path.join(tmpDir, 'framework-detector.ts');
+    fs.writeFileSync(
+      detectorFile,
+      `export interface DetectorConfig {
+  strict: boolean;
+}
+
+export type FrameworkKind = 'vue' | 'react' | 'ts';
+
+export enum DetectionMode {
+  Fast = 'fast',
+  Deep = 'deep',
+}
+
+export const FRAMEWORK_DETECTION_SCRIPT = \`
+  (function () {
+    const localInsideString = find_code({ query: "x" });
+    return localInsideString;
+  })();
+\`;
+
+export class DetectorEngine {
+  run() {
+    const localVarInsideMethod = 42;
+    return localVarInsideMethod;
+  }
+}
+`
+    );
+
+    const outline = await extractComponentOutline(detectorFile, {
+      resolveCalls: false,
+      workspaceRoot: tmpDir,
+    });
+
+    const names = outline.functions.map((item) => [item.name, item.kind, item.isExported]);
+    expect(names).toContainEqual(['DetectorConfig', 'interface', true]);
+    expect(names).toContainEqual(['FrameworkKind', 'type', true]);
+    expect(names).toContainEqual(['DetectionMode', 'enum', true]);
+    expect(names).toContainEqual(['FRAMEWORK_DETECTION_SCRIPT', 'variable', true]);
+    expect(names).toContainEqual(['DetectorEngine', 'class', true]);
+    expect(names).toContainEqual(['run', 'method', false]);
+    expect(outline.functions.find((item) => item.name === 'localInsideString')).toBeUndefined();
+    expect(outline.functions.find((item) => item.name === 'localVarInsideMethod')).toBeUndefined();
+
+    const text = formatOutlineAsText(outline);
+    expect(text).toContain('**Total Symbols:** 6');
+    expect(text).toContain('| `DetectorConfig` | interface | `L1-L3` | 3 | yes |');
+    expect(text).toContain('| `FRAMEWORK_DETECTION_SCRIPT` | variable |');
   });
 });
 

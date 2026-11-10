@@ -2,11 +2,6 @@ import { Database } from 'bun:sqlite';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { canonicalizePath } from '../path-resolver';
-import {
-  startWorkspaceWatcher,
-  stopWorkspaceWatcher,
-  stopAllWorkspaceWatchers,
-} from '../watcher';
 
 export const SUPPORTED_EXTENSIONS = new Set(['.vue', '.astro', '.tsx', '.jsx', '.ts', '.js']);
 
@@ -95,11 +90,6 @@ export function getWorkspaceDatabase(
   }
   dbRegistry.set(absRoot, db);
 
-  // Start reactive background watcher for instant cache updates if enabled (default: true)
-  if (options.enableWatcher === true) {
-    startWorkspaceWatcher(absRoot, db);
-  }
-
   return db;
 }
 
@@ -108,7 +98,6 @@ export function getWorkspaceDatabase(
  */
 export function closeWorkspaceDatabase(workspaceRoot: string): void {
   const absRoot = canonicalizePath(workspaceRoot);
-  stopWorkspaceWatcher(absRoot);
   const db = dbRegistry.get(absRoot);
   if (db) {
     try {
@@ -124,7 +113,6 @@ export function closeWorkspaceDatabase(workspaceRoot: string): void {
  * Closes all open SQLite workspace database connections cleanly.
  */
 export function closeAllDatabases(): void {
-  stopAllWorkspaceWatchers();
   for (const [_, db] of dbRegistry.entries()) {
     try {
       db.close();
@@ -182,7 +170,8 @@ export function initSchema(db: Database): void {
       identifier TEXT NOT NULL,
       access_mode TEXT DEFAULT 'read' CHECK(access_mode IN ('read', 'write', 'watch')),
       line_number INTEGER DEFAULT 0,
-      usage_snippet TEXT
+      usage_snippet TEXT,
+      accessed_properties TEXT
     );
 
     CREATE TABLE IF NOT EXISTS routes (
@@ -220,6 +209,7 @@ export function initSchema(db: Database): void {
   addColumnIfNotExists('state_deps', "access_mode TEXT DEFAULT 'read' CHECK(access_mode IN ('read', 'write', 'watch'))");
   addColumnIfNotExists('state_deps', 'line_number INTEGER DEFAULT 0');
   addColumnIfNotExists('state_deps', 'usage_snippet TEXT');
+  addColumnIfNotExists('state_deps', 'accessed_properties TEXT');
 
   // Drop legacy redundant indexes if present
   try {

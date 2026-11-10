@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { generatePatchPlan } from '../../src/engine/patch-plan';
 import { clearLastKnownProjectRoot } from '../../src/engine/path-resolver';
@@ -48,13 +48,17 @@ describe('patch plan runtime validation', () => {
   it('rejects invalid operations through MCP dispatch and its analysis worker', async () => {
     const server = createMcpServer();
     try {
+      mkdirSync(join(root, '.strata'), { recursive: true });
       const call = (server as any)._requestHandlers.get('tools/call');
       const result = await call({ method: 'tools/call', params: { name: 'generate_patch_plan', arguments: {
-        path: componentPath, target_path: root, refactor_type: 'not_valid', old_name: 'label', format: 'json',
+        root, path: componentPath, target_path: root, refactor_type: 'not_valid', old_name: 'label', format: 'json',
       } } });
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toMatch(/Invalid refactor_type/);
       expect(result.content[0].text).not.toContain('"patches"');
+      expect(result.structuredContent.error.code).toBe('INVALID_ARGUMENT');
+      const events = readFileSync(join(root, '.strata/strata.log'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+      expect(events.at(-1).error.code).toBe('INVALID_ARGUMENT');
     } finally { await server.close(); }
   });
 
@@ -128,4 +132,24 @@ describe('patch plan runtime validation', () => {
       expect(plan.patches[0].newSnippet).toBe(expected);
     });
   }
+
+  it('supports batch_operations in generate_patch_plan MCP handler', async () => {
+    const { patchPlanTool } = await import('../../src/tools/patch-plan');
+    writeFileSync(join(root, 'src/Page.vue'), '<script setup>import Button from "./Button.vue";</script><template><Button label="Hi" @click="handle" /></template>');
+    const res = await patchPlanTool.handler({
+      path: componentPath,
+      target_path: root,
+      batch_operations: [
+        { refactor_type: 'rename_prop', old_name: 'label', new_name: 'title' },
+        { refactor_type: 'rename_event', old_name: 'click', new_name: 'tap' },
+      ],
+      format: 'json',
+    });
+    expect(res.isError).toBeFalsy();
+    const data = JSON.parse(res.content[0].text);
+    const vuePatches = data.patches.filter((p: any) => p.file.endsWith('Page.vue'));
+    expect(vuePatches).toHaveLength(2);
+    expect(vuePatches[0].newSnippet).toBe('title="Hi"');
+    expect(vuePatches[1].newSnippet).toBe('@tap="handle"');
+  });
 });

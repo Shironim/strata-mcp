@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { getSourceLineRange, readSourceFile, readSourceRef, readSourceSnapshot } from './engine/source-file';
-import { mapSourceFile } from './engine/source-map';
-import { mapFrontendScope } from './engine/frontend-map';
+import { mapSourceFile, formatSourceMapAsText } from './engine/source-map';
+import { mapFrontendScope, formatFrontendMapAsText } from './engine/frontend-map';
 import { dumpSyntaxTree } from './engine/astgrep';
 import { extractComponentOutline, formatOutlineAsText } from './engine/outline';
 import { findCodeTool } from './tools/find-code';
@@ -10,15 +10,11 @@ import { findCodeByRule, findComponentUsage, formatMatchesAsText } from './engin
 import { extractComponentContract, formatContractAsText } from './engine/contract';
 import { sliceSymbol, formatSymbolSliceAsText } from './engine/slicer';
 import { auditEventHandlers, formatEventHandlerAuditAsText } from './engine/reactivity';
-import { getComponentTree, formatTreeAsText } from './engine/tree';
+import { getComponentTree, formatTreeAsText, formatTreeAsMermaid } from './engine/tree';
 import { findUnusedComponents, formatUnusedAsText } from './engine/audit';
 import { scanRoutes, formatRoutesAsText } from './engine/routes';
 import { generatePatchPlan } from './engine/patch-plan';
 import { extractWorkspaceApiContracts, formatApiContractsAsText } from './engine/api-contract';
-import { auditPageArchetypeDrift, formatArchetypeAuditAsText } from './engine/archetype';
-import { findSimilarTemplates, formatSimilarTemplatesAsText } from './engine/template-similarity';
-import { auditDesignTokens, formatDesignAuditAsText } from './engine/style-audit';
-import { auditBundleHealth, formatBundleAuditAsText } from './engine/bundle-audit';
 import {
   formatStateImpactAsText,
   formatUnusedStateAsText,
@@ -33,21 +29,18 @@ import { handleStrataInit } from './cli/commands/init';
 import {
   normalizeAuditTarget,
   parseAliasMapInput,
-  parseSafeFloat,
   parseSafePositiveInt,
   parseStringList,
   resolveProjectRoot,
   VALID_AUDIT_TARGETS,
 } from './engine/path-resolver';
 import { STRATA_VERSION } from './version';
-import { checkRuntimeVersion, formatUpdateNotice, type RuntimeVersionMeta } from './utils/version-check';
 import { StrataTelemetry, formatSummaryAsText } from './engine/telemetry';
 import type { PatchRefactorType, RouteFramework } from './types';
 
-export function printRootHelp(versionMeta?: RuntimeVersionMeta) {
-  const notice = versionMeta ? formatUpdateNotice(versionMeta) : null;
+export function printRootHelp() {
   console.log(`
-strata — Frontend Structural Code Search & Intelligence CLI${notice ? `\n\n${notice}` : ''}
+strata — Frontend Structural Code Search & Intelligence CLI
 
 Usage:
   strata <command> [options]
@@ -63,12 +56,12 @@ Core Analytical Commands (Aligned with 6 MCP Tools):
   inspect, contract <file>       Inspect component (--view map|source, --symbol, --outline)
   tree, component-tree [entry]   Inspect component hierarchy tree (--route, --direction)
   trace, impact <state-id>       Trace state blast radius and consumers (--depth, --role)
-  audit [dir]                    Audit frontend architecture (--target, --threshold)
+  audit [dir]                    Inspect topology and unused candidates (--target)
   patch, patch-plan <file>       Generate prescriptive refactoring patch plan
   stats, telemetry [dir]         Show tool latency, error rates, and telemetry stats
 
 Direct Shortcuts:
-  routes, apis, dead-state, archetype, usage, rule
+  routes, apis, dead-state, usage, rule
 
 Global Options:
   -p, --path <dir|file>          Target directory or file (default: .)
@@ -175,26 +168,19 @@ Options:
     case 'apis':
     case 'dead-state':
     case 'unused-state':
-    case 'archetype':
       console.log(`
 Usage: strata audit [target-dir] [options]
 
-Audit frontend architecture for dead code, drift, and contract violations.
+Inspect route/API topology and unused component/state candidates.
 
 Targets (--target <target>):
   dead-components (default)  Find unreferenced components
   dead-state                 Detect unused reactive state / stores
   routes                     Extract client-side route manifest
-  similar-templates          Detect copy-pasted UI template structures
-  design-tokens              Detect raw CSS color/spacing escapes
-  bundle-health              Scan for heavy dependencies and barrel file leaks
-  api-contracts              Extract and validate API endpoint calls
-  archetype-drift            Detect structural drift from page archetype
-  all                        Run all architectural audit targets
+  api-contracts              Extract outbound API endpoint calls
+  all                        Run the four retained audit targets
 
 Options:
-  --threshold <n>            Similarity threshold for templates (default: 0.8)
-  --exemplar <file>          Reference page for archetype-drift comparison
   --ignore <patterns>        Comma-separated glob patterns to ignore
   --include-pages            Include file-based page views in dead-code audit
   --scope-path <dir>         Sub-directory or package scope filter
@@ -278,10 +264,6 @@ export const BOOLEAN_FLAGS = new Set([
   'auditEvents',
   'include-pages',
   'includePages',
-  'infer-props',
-  'inferProps',
-  'resolve-globals',
-  'resolveGlobals',
   'map',
   'dump-ast',
   'dumpAst',
@@ -387,21 +369,15 @@ export async function main(argv: string[] = process.argv.slice(2)) {
 
   if (flags.version) {
     console.log(`strata v${STRATA_VERSION}`);
-    const meta = await checkRuntimeVersion({ timeoutMs: 1200 });
-    const notice = formatUpdateNotice(meta);
-    if (notice) {
-      console.log(notice);
-    }
     return;
   }
 
   if (flags.help || !command || command === 'help') {
     const targetCommand = command === 'help' ? positional[1] : command;
-    const meta = await checkRuntimeVersion({ timeoutMs: 1000 });
     if (targetCommand) {
       printCommandHelp(targetCommand);
     } else {
-      printRootHelp(meta);
+      printRootHelp();
     }
     return;
   }
@@ -465,12 +441,7 @@ export async function main(argv: string[] = process.argv.slice(2)) {
           offset: parseSafePositiveInt(flags.offset, 0) ?? 0,
           excludeDirs: parseStringList(flags['exclude-dirs'] ?? flags.excludeDirs),
         });
-        console.log(isJson ? JSON.stringify(map, null, 2) : [
-          `Frontend map: ${map.root}`,
-          `Status: ${map.status}; ${map.coverage.returnedFiles}/${map.coverage.knownFiles} files returned`,
-          `Framework candidates: ${map.frameworkCandidates.map(item => item.name).join(', ') || 'unknown'}`,
-          ...map.files.map(file => `- ${file.path}${file.roleHint ? ` [${file.roleHint}; heuristic]` : ''}`),
-        ].join('\n'));
+        console.log(isJson ? JSON.stringify(map, null, 2) : formatFrontendMapAsText(map));
         return;
       }
       const componentName = parseStringFlag(flags.component ?? flags.componentName);
@@ -603,12 +574,7 @@ export async function main(argv: string[] = process.argv.slice(2)) {
       const view = parseStringFlag(flags.view);
       if (view === 'map') {
         const map = await mapSourceFile(filePath, { maxRegions: parseSafePositiveInt(flags.limit, 200) });
-        console.log(isJson ? JSON.stringify(map, null, 2) : [
-          `${map.framework} map: ${map.snapshot.file}`, `Status: ${map.status}`,
-          ...map.regions.map(region => `- ${region.kind}${region.name ? ` ${region.name}` : ''}: lines ${region.lineRange ? `${region.lineRange.startLine}-${region.lineRange.endLine}` : 'empty'}; ref ${region.ref.sha256.slice(0, 12)}:${region.ref.startOffset}-${region.ref.endOffset}`),
-          ...map.diagnostics.map(item => `! ${item.code}: ${item.message}`),
-          ...(map.coverage?.truncated || map.coverage?.childRegionsTruncated ? [`Truncated: ${JSON.stringify(map.coverage)}`] : []),
-        ].join('\n'));
+        console.log(isJson ? JSON.stringify(map, null, 2) : formatSourceMapAsText(map));
         return;
       }
       if (view === 'source') {
@@ -637,7 +603,19 @@ export async function main(argv: string[] = process.argv.slice(2)) {
         const expectedHash = parseStringFlag(flags['expected-hash'] ?? flags.expectedHash);
         if (expectedHash && expectedHash !== snapshot.sha256) throw new Error('STALE_SOURCE_REF: expected_hash does not match current source');
         const source = await readSourceRef(filePath, selected.ref);
-        console.log(isJson ? JSON.stringify({ file: filePath, source_ref: selected.ref, source }, null, 2) : source);
+        if (selected.clamped && !isJson) {
+          process.stderr.write(`[strata] Note: end_line ${selected.requestedEndLine} clamped to EOF (L${selected.lineRange.endLine}).\n`);
+        }
+        console.log(isJson
+          ? JSON.stringify({
+              file: filePath,
+              startLine: selected.lineRange.startLine,
+              endLine: selected.lineRange.endLine,
+              ...(selected.clamped ? { clamped: true, requestedEndLine: selected.requestedEndLine } : {}),
+              source_ref: selected.ref,
+              source,
+            }, null, 2)
+          : source);
         return;
       }
 
@@ -672,13 +650,7 @@ export async function main(argv: string[] = process.argv.slice(2)) {
         return;
       }
 
-      const inferProps = flags['infer-props'] !== false;
-      const resolveGlobals = flags['resolve-globals'] !== false;
-
-      const contract = await extractComponentContract(filePath, {
-        inferProps,
-        resolveGlobals,
-      });
+      const contract = await extractComponentContract(filePath);
       if (isJson) {
         console.log(JSON.stringify(contract, null, 2));
       } else {
@@ -722,8 +694,11 @@ export async function main(argv: string[] = process.argv.slice(2)) {
         aliasMap,
       });
 
+      const isMermaid = flags.export === 'mermaid' || Boolean(flags.mermaid) || Boolean(flags.m);
       if (isJson) {
         console.log(JSON.stringify(result, null, 2));
+      } else if (isMermaid) {
+        console.log(formatTreeAsMermaid(result));
       } else {
         console.log(formatTreeAsText(result));
       }
@@ -788,49 +763,6 @@ export async function main(argv: string[] = process.argv.slice(2)) {
         return;
       }
 
-      if (target === 'similar-templates') {
-        const result = await findSimilarTemplates({
-          targetPath: auditPath,
-          scopePath,
-          threshold: parseSafeFloat(flags.threshold),
-          excludeDirs,
-        });
-        if (isJson) {
-          console.log(JSON.stringify(result, null, 2));
-        } else {
-          console.log(formatSimilarTemplatesAsText(result));
-        }
-        return;
-      }
-
-      if (target === 'design-tokens' || target === 'design') {
-        const result = await auditDesignTokens({
-          targetPath: auditPath,
-          scopePath,
-          excludeDirs,
-        });
-        if (isJson) {
-          console.log(JSON.stringify(result, null, 2));
-        } else {
-          console.log(formatDesignAuditAsText(result));
-        }
-        return;
-      }
-
-      if (target === 'bundle-health' || target === 'bundle') {
-        const result = await auditBundleHealth({
-          targetPath: auditPath,
-          scopePath,
-          excludeDirs,
-        });
-        if (isJson) {
-          console.log(JSON.stringify(result, null, 2));
-        } else {
-          console.log(formatBundleAuditAsText(result));
-        }
-        return;
-      }
-
       if (target === 'api-contracts' || target === 'apis') {
         const result = await extractWorkspaceApiContracts({
           targetPath: auditPath,
@@ -845,30 +777,8 @@ export async function main(argv: string[] = process.argv.slice(2)) {
         return;
       }
 
-      if (target === 'archetype-drift' || target === 'archetype') {
-        const exemplarFile = flags.exemplar
-          ? String(flags.exemplar)
-          : flags.exemplarPath
-            ? String(flags.exemplarPath)
-            : undefined;
-        const result = await auditPageArchetypeDrift({
-          targetPath: auditPath,
-          exemplarPath: exemplarFile,
-          workspaceRoot: resolveProjectRoot(auditPath),
-        });
-        if (isJson) {
-          console.log(JSON.stringify(result, null, 2));
-        } else {
-          console.log(formatArchetypeAuditAsText(result));
-        }
-        if (!result.conforms && !isJson) {
-          process.exit(1);
-        }
-        return;
-      }
-
       if (target === 'all') {
-        const [routes, unusedComponents, unusedState, designSystemAudit, bundleAudit, apiContracts] =
+        const [routes, unusedComponents, unusedState, apiContracts] =
           await Promise.all([
             scanRoutes({
               targetPath: auditPath,
@@ -886,16 +796,6 @@ export async function main(argv: string[] = process.argv.slice(2)) {
               excludeDirs,
             }),
             findUnusedState(auditPath, { scopePath, excludeDirs }),
-            auditDesignTokens({
-              targetPath: auditPath,
-              scopePath,
-              excludeDirs,
-            }),
-            auditBundleHealth({
-              targetPath: auditPath,
-              scopePath,
-              excludeDirs,
-            }),
             extractWorkspaceApiContracts({
               targetPath: auditPath,
               scopePath,
@@ -906,7 +806,7 @@ export async function main(argv: string[] = process.argv.slice(2)) {
         if (isJson) {
           console.log(
             JSON.stringify(
-              { routes, unusedComponents, unusedState, designSystemAudit, bundleAudit, apiContracts },
+              { routes, unusedComponents, unusedState, apiContracts },
               null,
               2
             )
@@ -920,10 +820,6 @@ export async function main(argv: string[] = process.argv.slice(2)) {
             formatUnusedAsText(unusedComponents),
             '\n---\n',
             formatUnusedStateAsText(unusedState),
-            '\n---\n',
-            formatDesignAuditAsText(designSystemAudit),
-            '\n---\n',
-            formatBundleAuditAsText(bundleAudit),
             '\n---\n',
             formatApiContractsAsText(apiContracts),
           ].join('\n');
@@ -1074,43 +970,6 @@ export async function main(argv: string[] = process.argv.slice(2)) {
         console.log(JSON.stringify(result, null, 2));
       } else {
         console.log(formatApiContractsAsText(result));
-      }
-      return;
-    }
-
-    if (command === 'archetype') {
-      const candidatePage = positional[1] && !positional[1].startsWith('-') ? positional[1] : undefined;
-      const pageFile = candidatePage || (typeof flags.path === 'string' && flags.path !== '.' ? flags.path : undefined);
-      if (!pageFile) {
-        console.error(
-          'Error: Target page file is required for archetype audit (e.g. strata archetype pages/orders/index.vue --exemplar pages/products/index.vue).'
-        );
-        process.exit(1);
-      }
-      if (!existsSync(pageFile)) {
-        console.error(`Error: Target page file not found: "${pageFile}".`);
-        process.exit(1);
-      }
-
-      const exemplarFile = parseStringFlag(flags.exemplar ?? flags.exemplarPath ?? flags['exemplar-path']);
-      if (exemplarFile && !existsSync(exemplarFile)) {
-        console.error(`Error: Exemplar file not found: "${exemplarFile}".`);
-        process.exit(1);
-      }
-
-      const result = await auditPageArchetypeDrift({
-        targetPath: pageFile,
-        exemplarPath: exemplarFile,
-        workspaceRoot: resolveProjectRoot(pageFile),
-      });
-
-      if (isJson) {
-        console.log(JSON.stringify(result, null, 2));
-      } else {
-        console.log(formatArchetypeAuditAsText(result));
-      }
-      if (!result.conforms) {
-        process.exit(1);
       }
       return;
     }

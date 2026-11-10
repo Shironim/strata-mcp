@@ -44,6 +44,40 @@ function typeText(node: ts.TypeNode, sf: ts.SourceFile, bindings: Map<string, Bo
     result.slice(0, replacement.start) + replacement.text + result.slice(replacement.end), text);
 }
 
+function extractJsDocInfo(node: ts.Node): { description?: string; deprecated?: boolean | string } {
+  let description: string | undefined;
+  let deprecated: boolean | string | undefined;
+
+  const jsDocList: any[] = (node as any).jsDoc || (ts.getJSDocCommentsAndTags ? ts.getJSDocCommentsAndTags(node) : []);
+  for (const doc of jsDocList) {
+    if (doc.comment && !description) {
+      if (typeof doc.comment === 'string') {
+        description = doc.comment.trim().split('\n')[0].trim();
+      } else if (Array.isArray(doc.comment)) {
+        description = doc.comment.map((c: any) => c.text || '').join('').trim().split('\n')[0].trim();
+      }
+    }
+    if (doc.tags) {
+      for (const tag of doc.tags) {
+        const tagName = tag.tagName?.text;
+        if (tagName === 'deprecated') {
+          if (tag.comment) {
+            deprecated = typeof tag.comment === 'string'
+              ? tag.comment.trim()
+              : Array.isArray(tag.comment)
+                ? tag.comment.map((c: any) => c.text || '').join('').trim()
+                : true;
+          } else {
+            deprecated = true;
+          }
+        }
+      }
+    }
+  }
+
+  return { description, deprecated };
+}
+
 function extractPropertyFromSignature(
   member: ts.TypeElement,
   sf: ts.SourceFile,
@@ -66,12 +100,16 @@ function extractPropertyFromSignature(
     unionMembers = member.type.types.map(t => typeText(t, sf, bindings).trim()).filter(Boolean);
   }
 
+  const jsDoc = extractJsDocInfo(member);
+
   propsMap.set(name, {
     name,
     type: text,
     required,
     ...(defaultVal !== undefined ? { default: defaultVal } : {}),
     ...(isUnion && unionMembers && unionMembers.length > 1 ? { isUnion, unionMembers } : {}),
+    ...(jsDoc.description ? { description: jsDoc.description } : {}),
+    ...(jsDoc.deprecated !== undefined ? { deprecated: jsDoc.deprecated } : {}),
   });
 }
 
@@ -129,7 +167,14 @@ export function resolveLocalPropType(
     for (const clause of typeNode.heritageClauses ?? []) {
       for (const base of clause.types) {
         const name = base.expression.getText(sf);
-        if (!reference(name, base.typeArguments)) unknown(base.getText(sf), 'Inherited prop type requires external or generic type resolution.');
+        if (!reference(name, base.typeArguments)) {
+          if (name === 'VariantProps' || name.endsWith('.VariantProps')) {
+            if (extractCvaVariantsFromType(base as any, sf, defaults, propsMap)) {
+              continue;
+            }
+          }
+          unknown(base.getText(sf), 'Inherited prop type requires external or generic type resolution.');
+        }
       }
     }
     collectMembers(typeNode.members);
@@ -154,6 +199,11 @@ export function resolveLocalPropType(
       return;
     }
     if (reference(name, typeNode.typeArguments)) return;
+    if (name === 'VariantProps' || name.endsWith('.VariantProps')) {
+      if (extractCvaVariantsFromType(typeNode, sf, defaults, propsMap)) {
+        return;
+      }
+    }
     const imported = sf.statements.filter(ts.isImportDeclaration).some(statement => {
       const clause = statement.importClause;
       if (clause?.name?.text === name) return true;
@@ -185,5 +235,103 @@ export function resolveLocalPropType(
     }
   }
   unknown(typeNode.getText(sf), 'Prop shape requires external, conditional, mapped, union or unsupported type resolution.');
+}
+
+export function extractCvaVariantsFromType(
+  typeNode: ts.TypeReferenceNode,
+  sf: ts.SourceFile,
+  defaults: Map<string, string>,
+  propsMap: Map<string, ComponentPropContract>
+): boolean {
+  if (!typeNode.typeArguments || typeNode.typeArguments.length === 0) return false;
+  const arg = typeNode.typeArguments[0];
+  let varName: string | undefined;
+  if (ts.isTypeQueryNode(arg) && ts.isIdentifier(arg.exprName)) {
+    varName = arg.exprName.text;
+  } else if (ts.isTypeReferenceNode(arg) && ts.isIdentifier(arg.typeName)) {
+    varName = arg.typeName.text;
+  }
+  if (!varName) return false;
+  return extractCvaVariants(varName, sf, defaults, propsMap);
+}
+
+export function extractCvaVariants(
+  varName: string,
+  sf: ts.SourceFile,
+  defaults: Map<string, string>,
+  propsMap: Map<string, ComponentPropContract>
+): boolean {
+  let matched = false;
+  for (const stmt of sf.statements) {
+    if (!ts.isVariableStatement(stmt)) continue;
+    for (const decl of stmt.declarationList.declarations) {
+      if (!ts.isIdentifier(decl.name) || decl.name.text !== varName) continue;
+      if (!decl.initializer) continue;
+      let init: ts.Expression = decl.initializer;
+      while (ts.isParenthesizedExpression(init)) init = init.expression;
+      if (!ts.isCallExpression(init)) continue;
+
+      let configObj: ts.ObjectLiteralExpression | undefined;
+      for (const arg of init.arguments) {
+        if (ts.isObjectLiteralExpression(arg)) {
+          configObj = arg;
+          break;
+        }
+      }
+      if (!configObj) continue;
+
+      const defaultVariantsMap = new Map<string, string>();
+      for (const prop of configObj.properties) {
+        if (ts.isPropertyAssignment(prop) && prop.name && (ts.isIdentifier(prop.name) || ts.isStringLiteral(prop.name))) {
+          const propKey = prop.name.text;
+          if (propKey === 'defaultVariants' && ts.isObjectLiteralExpression(prop.initializer)) {
+            for (const defProp of prop.initializer.properties) {
+              if (ts.isPropertyAssignment(defProp) && defProp.name && (ts.isIdentifier(defProp.name) || ts.isStringLiteral(defProp.name))) {
+                if (ts.isStringLiteral(defProp.initializer)) {
+                  defaultVariantsMap.set(defProp.name.text, `"${defProp.initializer.text}"`);
+                } else if (ts.isIdentifier(defProp.initializer) || ts.isNumericLiteral(defProp.initializer)) {
+                  defaultVariantsMap.set(defProp.name.text, defProp.initializer.getText(sf));
+                }
+              }
+            }
+          }
+        }
+      }
+
+      for (const prop of configObj.properties) {
+        if (ts.isPropertyAssignment(prop) && prop.name && (ts.isIdentifier(prop.name) || ts.isStringLiteral(prop.name))) {
+          const propKey = prop.name.text;
+          if (propKey === 'variants' && ts.isObjectLiteralExpression(prop.initializer)) {
+            for (const variantGroup of prop.initializer.properties) {
+              if (ts.isPropertyAssignment(variantGroup) && variantGroup.name && (ts.isIdentifier(variantGroup.name) || ts.isStringLiteral(variantGroup.name))) {
+                const variantName = variantGroup.name.text;
+                if (ts.isObjectLiteralExpression(variantGroup.initializer)) {
+                  const options: string[] = [];
+                  for (const opt of variantGroup.initializer.properties) {
+                    if (opt.name && (ts.isIdentifier(opt.name) || ts.isStringLiteral(opt.name))) {
+                      options.push(opt.name.text);
+                    }
+                  }
+                  if (options.length > 0) {
+                    matched = true;
+                    const defaultVal = defaults.get(variantName) ?? defaultVariantsMap.get(variantName);
+                    const isUnion = options.length > 1;
+                    propsMap.set(variantName, {
+                      name: variantName,
+                      type: options.map(o => `"${o}"`).join(' | '),
+                      required: false,
+                      ...(defaultVal !== undefined ? { default: defaultVal } : {}),
+                      ...(isUnion ? { isUnion: true, unionMembers: options } : {}),
+                    });
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  return matched;
 }
 

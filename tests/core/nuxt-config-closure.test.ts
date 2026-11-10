@@ -99,7 +99,7 @@ test('export-star closure excludes type-only names and binds source dependencies
   expect([...result.names].sort()).toEqual(['actual', 'aliased']);
   expect(result.dependencies.some(dep => dep.path === join(root, 'logic.ts'))).toBe(true);
   expect(result.dependencies.some(dep => dep.path === join(root, 'types.ts'))).toBe(false);
-  const response = await inspectComponentTool.handler({path:join(root,'Home.vue'),project_root:root,audit_events:true,resolve_globals:false,format:'json'});
+  const response = await inspectComponentTool.handler({path:join(root,'Home.vue'),project_root:root,audit_events:true,format:'json'});
   expect(response.isError).not.toBe(true);
   const structured = response.structuredContent as any;
   expect(structured.eventAudit.autoImportDependencies.some((dep: any) => dep.path === join(root,'logic.ts'))).toBe(true);

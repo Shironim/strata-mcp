@@ -6,7 +6,6 @@ import { parseSvelte } from '../../src/engine/svelte-sfc';
 import { SvelteDocumentAdapter } from '../../src/adapters/svelte';
 import { mapSourceFile } from '../../src/engine/source-map';
 import { extractSvelteContract } from '../../src/engine/parsers/contract-svelte';
-import { runCanonAudit } from '../../src/engine/canon';
 import { scanRoutes } from '../../src/engine/routes';
 import { readSourceRef, readSourceSnapshot } from '../../src/engine/source-file';
 
@@ -258,92 +257,6 @@ describe('06 - Svelte Framework: Svelte 5 Runes, SFC Parsing, Contracts & Canoni
       expect(contract.slots).toContain('default');
       expect(contract.slots).toContain('prefix');
       expect(contract.exposed).toContain('resetCounter');
-    });
-  });
-
-  // =========================================================================
-  // 5. Canonical Rules (SV05)
-  // =========================================================================
-  describe('SV05: Canonical AST Rules', () => {
-    test('flags all 7 Svelte canonical anti-patterns with exact remediation', async () => {
-      const code = `<script lang="ts">
-  import { createEventDispatcher } from 'svelte';
-
-  // Smell 1: svelte/prefer-runes-props
-  export let count = 0;
-
-  // Smell 2: svelte/prefer-runes-state-derived
-  $: doubled = count * 2;
-
-  // Smell 3: svelte/no-effect-for-derived-state
-  let total = $state(0);
-  $effect(() => {
-    total = count * 10;
-  });
-
-  // Smell 4: svelte/no-non-bindable-prop-mutation
-  let { fixedProp = 100 } = $props();
-  function mutateProp() {
-    fixedProp += 1;
-  }
-
-  // Smell 6: svelte/prefer-callback-props-over-dispatcher
-  const dispatch = createEventDispatcher();
-</script>
-
-<!-- Smell 5: svelte/prefer-snippets-over-slots -->
-<slot name="header" />
-
-<!-- Smell 6 (template): on:click -->
-<button on:click={() => mutateProp()}>Click</button>
-
-<!-- Smell 7: svelte/each-missing-key -->
-{#each items as item}
-  <Card {item} />
-{/each}`;
-
-      const snapshot = {
-        file: '/fake/project/Component.svelte',
-        contentHash: 'mock-hash',
-        totalLines: 35,
-        totalBytes: code.length,
-      };
-
-      const diagnostics = await runCanonAudit(snapshot, code, 'svelte', { majorVersion: 5 });
-
-      // Rule 1: svelte/prefer-runes-props
-      const r1 = diagnostics.find((d) => d.ruleId === 'svelte/prefer-runes-props');
-      expect(r1).toBeDefined();
-      expect(r1!.canon.canonicalCode).toContain('let { count } = $props();');
-
-      // Rule 2: svelte/prefer-runes-state-derived
-      const r2 = diagnostics.find((d) => d.ruleId === 'svelte/prefer-runes-state-derived');
-      expect(r2).toBeDefined();
-      expect(r2!.canon.canonicalCode).toContain('let doubled = $derived(count * 2);');
-
-      // Rule 3: svelte/no-effect-for-derived-state
-      const r3 = diagnostics.find((d) => d.ruleId === 'svelte/no-effect-for-derived-state');
-      expect(r3).toBeDefined();
-      expect(r3!.canon.canonicalCode).toContain('let total = $derived(count * 10);');
-
-      // Rule 4: svelte/no-non-bindable-prop-mutation
-      const r4 = diagnostics.find((d) => d.ruleId === 'svelte/no-non-bindable-prop-mutation');
-      expect(r4).toBeDefined();
-      expect(r4!.canon.canonicalCode).toContain('$bindable()');
-
-      // Rule 5: svelte/prefer-snippets-over-slots
-      const r5 = diagnostics.find((d) => d.ruleId === 'svelte/prefer-snippets-over-slots');
-      expect(r5).toBeDefined();
-      expect(r5!.smell.title).toContain('<slot>');
-
-      // Rule 6: svelte/prefer-callback-props-over-dispatcher
-      const r6 = diagnostics.find((d) => d.ruleId === 'svelte/prefer-callback-props-over-dispatcher');
-      expect(r6).toBeDefined();
-
-      // Rule 7: svelte/each-missing-key
-      const r7 = diagnostics.find((d) => d.ruleId === 'svelte/each-missing-key');
-      expect(r7).toBeDefined();
-      expect(r7!.canon.canonicalCode).toContain('{#each items as item (item.id)}');
     });
   });
 

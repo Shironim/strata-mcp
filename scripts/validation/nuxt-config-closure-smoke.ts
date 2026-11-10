@@ -47,7 +47,7 @@ try {
   for (const [index, response_detail] of ['full', 'summary'].entries()) {
     const id = index + 2;
     send({ jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'inspect_component', arguments: {
-      path: join(root, 'Home.vue'), project_root: root, audit_events: true, resolve_globals: false, format: 'json', response_detail,
+      path: join(root, 'Home.vue'), project_root: root, audit_events: true, format: 'json', response_detail,
     } } });
     const response = (await receive(id)).result;
     assert.ok(response && !response.isError, JSON.stringify(response));

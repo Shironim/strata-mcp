@@ -6,7 +6,7 @@
 export const STRATA_FRONTEND_RULE = `# RULE: Strata-MCP Frontend Structural Intelligence Engine
 
 ## 1. Directive & Core Mission
-Prioritize using \`strata-mcp\` MCP tools over performing raw text searches (\`grep_search\`, \`find_by_name\`, or reading full files via \`view_file\`) when analyzing frontend architecture, UI components, and reactivity flows:
+Frontend templates interlace visual markup, design tokens, and domain logic. Reading whole UI files floods context memory, causing attention dilution (*Lost in the Middle*) and hallucinated refactoring. Prioritize using \`strata-mcp\` MCP tools over performing raw text searches (\`grep_search\`, \`find_by_name\`, or reading full files via \`view_file\`) when analyzing frontend architecture, UI components, and reactivity flows:
 - **Vue Single File Components (\`.vue\`)**
 - **React / Next.js (\`.tsx\`, \`.jsx\`, \`.ts\`, \`.js\`)**
 - **Svelte 4 & Svelte 5 Runes (\`.svelte\`)**
@@ -23,7 +23,7 @@ Prioritize using \`strata-mcp\` MCP tools over performing raw text searches (\`g
 | Tracing global/local reactive state flow (Pinia, Context, Zustand) | \`trace_state\` | Finds static read/write candidates within the selected scope and capability (\`consumers\`, \`dependencies\`, \`both\`); review unresolved and excluded references. |
 | Extracting URL routes, route parameters, and layout hierarchies | \`audit_frontend(target: "routes")\` | Maps page sitemaps across Next.js, Nuxt, Astro, SvelteKit, and Inertia without reading dozens of page files. |
 | Extracting backend API calls (Inertia, TanStack, Axios, fetch) | \`audit_frontend(target: "api-contracts")\` | Discovers endpoint URLs, HTTP methods, form payload fields, and \`backendTargetHint\` to backend controllers. |
-| Auditing dead code, unused state, archetype drift, design tokens, or bundle | \`audit_frontend\` | Verifies architectural health and cleanliness (\`dead-components\`, \`dead-state\`, \`routes\`, \`similar-templates\`, \`design-tokens\`, \`bundle-health\`, \`api-contracts\`, \`archetype-drift\`, \`all\`). |
+| Auditing unused components and state | \`audit_frontend\` | Reports static candidates (\`dead-components\`, \`dead-state\`); \`all\` also includes \`routes\` and \`api-contracts\`. Review scope and omissions before acting. |
 | Refactoring props, events, models, or slots across discovered consumers | \`generate_patch_plan\` | Proposes supported static edits (\`rename_prop\`, \`remove_prop\`, \`rename_event\`, \`rename_model\`, \`rename_slot\`) with hashes; review coverage and preconditions, then verify the edited contract and run relevant application checks. |
 
 ## 3. Protocol & Execution Principles (Selective Context & Map First)
@@ -32,123 +32,112 @@ Prioritize using \`strata-mcp\` MCP tools over performing raw text searches (\`g
 - **Targeted Slicing:** When specific logic needs inspection or editing, extract only the targeted function slice via \`inspect_component(path, symbol: "...")\` or exact verified lines via \`inspect_component(path, source_range: { start_line, end_line })\`. Reserve full-file reading only for broad multi-region refactoring where the whole file text is indispensable.
 - **Evidence Boundaries:** Maps and ranges indicate source locations, not quality or correctness. Treat framework and path hints as candidates/conventions; verify parser diagnostics, status, and coverage before concluding findings.
 - **No Blind Probing:** Never read component files from line 1 when you only need to inspect props, emits, or slots. Use \`inspect_component\`.
-- **Pre-Refactor Verification:** Always verify upstream consumers with \`get_component_tree(direction: "upward")\` or \`generate_patch_plan\` before modifying component props, emits, v-models, or slots.
+- **Pre-Refactor Verification:** Always verify upstream consumers with \`get_component_tree(direction: "upward")\` or \`generate_patch_plan\` before modifying component props, emits, v-models, or slots. When \`generate_patch_plan\` flags \`DYNAMIC_PROP_SPREAD\`, verify the affected consumer manually.
 - **Responsible Budget & Truncation:** When a symbol slice exceeds 50 lines or results hit \`max_results\`, respect the context guard notice and use the exact suggested continuation hint (e.g. \`source_range\`) rather than dumping unbounded text.
 - **Layered Output:** Request \`response_detail: "summary"\` for counts and risk metadata, then repeat the request with \`response_detail: "full"\` for primary analysis. Exact source requires full; summary is not a continuation page.
+- **Format Discipline (Text vs JSON):** Prefer default \`format: "text"\` for interactive reasoning, interface inspection, tree mapping, and reactive tracing to maximize token efficiency (~150-300 tokens) and eliminate cryptographic audit noise. Reserve \`format: "json"\` for automated mechanical refactoring pipelines (such as patch plans). Strata automatically streamlines prompt text in JSON mode while retaining complete cryptographic provenance in \`structuredContent\`.
+- **Fullstack Estafet to Septum:** When \`inspect_component\` or \`audit_frontend(target: "api-contracts")\` reports an outbound HTTP API with \`backendTargetHint\` (e.g. \`POST /api/v1/cadets -> [Backend: CadetController@store]\`), hand off the hint directly to Septum (\`septum_slice\` or \`septum_symbol\`) rather than grep-searching backend controllers.
 `;
 
-export const STRATA_INSPECT_SKILL = `---
-name: strata-inspect
-description: Deep frontend AST component inspection, component trees, reactivity tracking, routes, API contracts, architectural health audits, and deterministic patch planning using strata-mcp.
+export const USE_STRATA_SKILL_TEMPLATE = `---
+name: use-strata
+description: >-
+  Route frontend component discovery, contract inspection, component hierarchy analysis, reactive state tracing, route auditing, and refactoring patch generation using strata-mcp (find_code, inspect_component, get_component_tree, trace_state, audit_frontend, generate_patch_plan). Use when exploring frontend codebases, inspecting component interfaces (props, events/emits, slots, models), extracting AST slices without template bloat, tracing store and state reactivity, assessing component hierarchies, or planning deterministic refactors across Vue, React, Svelte, and Astro.
 ---
 
-# Skill: Strata Frontend Inspector (\`strata-inspect\`)
+# use-strata — Frontend AST Static Analysis & Component Routing
 
-> Use this skill whenever you need to explore, analyze, debug, or refactor modern frontend architectures—including **Vue 3/SFC**, **React / Next.js (App & Pages Router, RSC)**, **Svelte 4 & Svelte 5 Runes**, and **Astro Islands**—without dumping raw UI templates into context.
-
----
-
-## When to Use This Skill (Use-Case Scenarios)
-
-1. **Exploring Unfamiliar Frontend Codebases & Feature Architectures:**
-   - Instead of scanning directories blindly or reading full page files, use \`find_code(action: "map")\` to get a bounded inventory with domain classifications (Feature-Sliced Design layers, DDD bounded contexts, monorepo packages).
-   - Inspect structural outlines without code bodies via \`inspect_component(path, outline: true)\` or \`view: "map"\`.
-   - Inspect public component contracts (props, emits, slots, exposed methods, outbound APIs) via \`inspect_component(path)\` in a high-density summary instead of dumping hundreds of lines of template markup.
-
-2. **Refactoring Component Interfaces (Props, Emits, Models, Slots):**
-   - Before renaming or removing a prop or event, inspect scoped consumer candidates using \`get_component_tree(direction: "upward")\`. For Vue and React/JSX props, request \`inspect_component(impact: "summary")\`; use \`impact: "full"\` for usage refs.
-   - Generate hash-bound proposals for discovered static consumer usages across Vue, Astro, React/JSX, and Svelte with \`generate_patch_plan(refactor_type: "rename_prop" | "remove_prop" | "rename_event" | "rename_model" | "rename_slot")\`. Dynamic prop spread omissions (\`DYNAMIC_PROP_SPREAD\`) are flagged for review.
-
-3. **Verifying Reactivity & State Blast Radius:**
-   - Map dependencies and downstream consumers of global/modular stores (Pinia, Zustand, React Context) via \`trace_state\`.
-   - Audit broken event handler bindings, missing methods, or reactivity anti-patterns after editing a component using \`inspect_component(audit_events: true)\`.
-
-4. **Auditing Meta-Framework Route Hierarchies & Layout Topologies:**
-   - Extract URL route trees, dynamic route parameters, route groups, and nested layouts across Next.js (App Router conventions), Nuxt 3, SvelteKit (\`+page\`, \`+layout\`), and Astro using \`audit_frontend(target: "routes")\`.
-   - Identify Page Archetype Drift (deviations from sibling canonical layouts) using \`audit_frontend(target: "archetype-drift")\`.
-
-5. **Mapping Network Calls & Backend API Contracts:**
-   - Discover client-side API calls (Axios, fetch, Inertia form, TanStack Query) and 1-hop composable outbound endpoints with \`backendTargetHint\` via \`audit_frontend(target: "api-contracts")\` or \`inspect_component(path)\`.
-
-6. **Cleaning Dead Code, Duplicate Templates, & Bundle Health:**
-   - Detect unused components, unreferenced stores, duplicate template AST fragments, and rogue CSS design tokens using \`audit_frontend(target: "all")\` or specific targets (\`dead-components\`, \`dead-state\`, \`similar-templates\`, \`design-tokens\`, \`bundle-health\`). Note that \`similar-templates\` is an opt-in sub-audit that also supports 1-to-N component similarity checks.
-
-7. **Targeted Symbol Extraction (Precision Slicing):**
-   - Retrieve only the targeted function or method slice with verified line numbers, AST call chains, and caller verification without reading the whole file using \`inspect_component(symbol: "...")\` or exact line spans via \`source_range\`. Slices exceeding 50 lines include an exact continuation hint to prevent context bloat.
+Strata provides Abstract Syntax Tree (AST) inspection, reactive state tracking, and component dependency graph analysis for frontend architectures across Vue, React/Next.js, Svelte, and Astro.
 
 ---
 
-## Core Tool Reference & Execution Workflows
+## 1. Core Architectural Principles & Rationale
 
-### 1. Component Contract & Symbol Slicing (\`inspect_component\`)
-* **Extract Public Contract:**
-  \`inspect_component(path: "src/components/ProductCard.vue")\`
-  *Returns props (with types & defaults), emits, slots, models, and external state dependencies.*
-* **Extract Focused Symbol / Function:**
-  \`inspect_component(path: "src/components/ProductCard.vue", symbol: "handleCheckout")\`
-* **Post-Edit Event & Reactivity Quality Gate:**
-  \`inspect_component(path: "src/components/ProductCard.vue", audit_events: true)\`
-* **Hash-Bound Source Slicing:**
-  \`inspect_component(path: "src/components/ProductCard.vue", view: "source", source_ref: { ... })\`
+### Component Interface Isolation vs. Template Ingestion
+Frontend Single File Components (SFCs) and JSX files combine presentational markup (HTML/JSX), styles (CSS), reactive state, and business logic into single files.
+- **Working Memory Overhead:** Reading lines of template markup via \`read_file\` to locate a single method or prop definition consumes excessive context and causes attention dilution on core logic.
+- **Interface Separation:** AST extraction isolates public component interfaces (props, emits/events, slots, two-way bindings) and discrete method implementations without ingesting template bodies.
 
-### 2. Component Hierarchy & Dependency Trees (\`get_component_tree\`)
-* **Downward Hierarchy (Props Drilling & Context Dependencies):**
-  \`get_component_tree(path: "src/pages/Dashboard.tsx", direction: "downward")\`
-* **Upward Traversal (Consumer Blast Radius):**
-  \`get_component_tree(path: "src/components/Button.tsx", direction: "upward")\`
-* **Route-Anchored Tree:**
-  \`get_component_tree(route: "/dashboard", direction: "downward")\`
+### Static AST Analysis Boundaries vs. Dynamic Execution
+- **Static Contract Guarantees:** AST analysis cleanly resolves static import graphs, declared props, and explicit component references.
+- **Dynamic Prop Spreading:** Dynamic prop spreads (\`{...props}\`, \`v-bind="$attrs"\`), dynamic component tags (\`<component :is="...">\`), and ambient event buses escape static dependency graphs. When flagged as \`DYNAMIC_PROP_SPREAD\`, verify the affected consumer manually rather than assuming exhaustive static coverage.
+- **Coordinate Determinism:** Anchor all claims and code edits to verified AST line coordinates (\`file:line\`) or hash-verified \`source_ref\` tokens. Never estimate line numbers from raw text.
 
-### 3. Structural AST Search & Map (\`find_code\`)
-* **Bounded Frontend Inventory Mapping (Zero Raw File Dumps):**
-  \`find_code(action: "map")\`
-* **AST Structural Pattern Matching (Whitespace & Formatting Immune):**
-  \`find_code(pattern: "<Button $PROPS>$$$CHILDREN</Button>")\`
-* **Component Usage Search:**
-  \`find_code(component: "ModalCard")\`
-* **ast-grep YAML Rule Execution:**
-  \`find_code(rule_yaml: "id: no-direct-store\\nlanguage: ts\\nrule:\\n  pattern: useStore.getState()")\`
-
-### 4. Reactive State Flow & Blast Radius (\`trace_state\`)
-* **Trace Store Read/Write Consumers:**
-  \`trace_state(identifier: "useCartStore", depth: 2, direction: "both")\`
-* **Trace State Impact Across Application:**
-  \`trace_state(identifier: "cartItems", direction: "consumers")\`
-
-### 5. Architectural Health & Route Auditing (\`audit_frontend\`)
-* **Comprehensive Health Audit:**
-  \`audit_frontend(target: "all")\`
-* **File-Based Route Mapping:**
-  \`audit_frontend(target: "routes")\`
-* **Backend API Contract Extraction:**
-  \`audit_frontend(target: "api-contracts")\`
-* **Page Archetype Consistency:**
-  \`audit_frontend(target: "archetype-drift")\`
-* **Template Duplication & Dead State:**
-  \`audit_frontend(target: "similar-templates")\`
-  \`audit_frontend(target: "dead-components")\`
-  \`audit_frontend(target: "dead-state")\`
-
-### 6. Prescriptive Refactoring Patch Plans (\`generate_patch_plan\`)
-* **Rename Prop Across All Consumers:**
-  \`generate_patch_plan(path: "src/components/Badge.vue", refactor_type: "rename_prop", old_name: "label", new_name: "text")\`
-* **Remove Deprecated Prop:**
-  \`generate_patch_plan(path: "src/components/Badge.vue", refactor_type: "remove_prop", old_name: "isOutlined")\`
-* **Refactor Models, Events, and Slots:**
-  \`generate_patch_plan(path: "...", refactor_type: "rename_model", old_name: "value", new_name: "modelValue")\`
-  \`generate_patch_plan(path: "...", refactor_type: "rename_event", old_name: "select", new_name: "change")\`
-  \`generate_patch_plan(path: "...", refactor_type: "rename_slot", old_name: "header", new_name: "title")\`
+### Consumer Impact & State Mutation Flow
+- **Interface Stability:** Modifying props, emits, or slots without evaluating upstream parent consumers risks runtime regressions across multiple views.
+- **Reactivity Flow:** Modifying shared stores or context providers (Pinia, Zustand, Redux, React Context) requires tracing both readers (subscribers) and mutators (actions/reducers) across the entire component tree.
 
 ---
 
-## Execution Principles (Selective Context & Token Efficiency)
+## 2. Intent-to-Tool Routing Table
 
-1. **Map First, Read Selectively:** Start broad inquiries with \`find_code(action: "map")\` or \`inspect_component(path, view: "map")\` / \`inspect_component(path, outline: true)\` to view architecture and component coordinates without dumping source bodies.
-2. **Inspect Contracts Over Bodies:** Do not read raw component files from line 1 just to see their props or events. Call \`inspect_component\` for a clean public contract.
-3. **Targeted Slicing for Code Edits:** When modifying code, extract only the targeted function or line span via \`inspect_component(path, symbol: "...")\` or \`inspect_component(path, source_range: { start_line, end_line })\`. Never read whole files line-by-line via generic tools when only targeted logic is needed.
-4. **Verify Blast Radius Before Mutation:** Always run \`get_component_tree(direction: "upward")\` or \`generate_patch_plan\` before touching shared component contracts.
-5. **Responsible Budget & Truncation:** When a symbol slice exceeds 50 lines, respect the context guard notice and follow the suggested continuation hint (\`source_range\`) instead of dumping unbounded text.
+| Engineering Intent | Strata Tool Call | Primary Arguments | Operational Output & Scope |
+|---|---|---|---|
+| **Survey feature directory or component inventory** | \`find_code\` | \`action: "map"\`, \`path?: "..."\` | Bounded file inventory and component catalog without template bodies. |
+| **Search code structurally across components** | \`find_code\` | \`pattern: "..."\`, \`component?: "..."\`, \`prop_name?: "..."\` | Matches component usages, prop bindings, and structural AST patterns. |
+| **Inspect component public interface** | \`inspect_component\` | \`path: "..."\` | Public contract summary: props, emits, slots, models, and outbound API calls. |
+| **Inspect component structural outline** | \`inspect_component\` | \`path: "..."\`, \`outline: true\` (or \`view: "map"\`) | High-level outline of functions, classes, types, constants, computed properties, and hooks. |
+| **Extract targeted method or handler slice** | \`inspect_component\` | \`path: "..."\`, \`symbol: "<methodName>"\` | AST slice of the target function with verified caller references; bounded by \`source_range\`. |
+| **Analyze parent consumer hierarchy (Blast Radius)** | \`get_component_tree\` | \`path: "..."\`, \`direction: "upward"\` | Maps all parent views, pages, and components consuming this component. |
+| **Inspect child component tree & prop drilling** | \`get_component_tree\` | \`path: "..."\`, \`direction: "downward"\`, \`depth?: 3\` | Hierarchical descendant tree showing component nesting and deeply passed props. |
+| **Trace reactive state flow & store mutations** | \`trace_state\` | \`identifier: "<storeOrState>"\`, \`direction: "both"\` | Multi-hop readers (subscribers) and mutators (writers) across store/context boundaries. |
+| **Audit URL routes & nested layout hierarchy** | \`audit_frontend\` | \`target: "routes"\` | Next.js, Nuxt, SvelteKit, and Astro route parameters, nested layouts, and page entrypoints. |
+| **Audit outbound API calls & backend hints** | \`audit_frontend\` | \`target: "api-contracts"\` | Client-side HTTP/API calls mapped to backend controller endpoint hints. |
+| **Audit unused components and state** | \`audit_frontend\` | \`target: "dead-components"\` or \`"dead-state"\` | Static candidates with scope and limitations; no automatic deletion. |
+| **Generate deterministic refactoring patch plan** | \`generate_patch_plan\` | \`path: "..."\`, \`refactor_type: "rename_prop|rename_event|rename_model|rename_slot"\`, \`old_name: "..."\`, \`new_name?: "..."\` | Deterministic multi-file patch plan for renaming/removing props, events, models, or slots (\`rename_model\`, \`rename_slot\`). |
+
+---
+
+## 3. Decision Workflow
+
+Follow this sequence during frontend development tasks:
+
+\`\`\`
+[1. Discovery & Interface Inspection]
+  Need to locate components or map a feature area?
+  ├── YES ──► Execute find_code(action: "map") or find_code(pattern: "...")
+  └── NO  ──► Proceed to target component
+
+  Need to check component props, emits, or API calls?
+  └── ALWAYS ──► Execute inspect_component(path: "...")
+                 Do not read full template markup to inspect interface parameters.
+
+[2. State Flow & Method Slicing]
+  Need to inspect a specific method, computed property, or event handler?
+  └── Execute inspect_component(path: "...", symbol: "...") for a bounded AST slice.
+
+  Is shared state (store, context, signal) involved?
+  └── Execute trace_state(identifier: "...", direction: "both") to identify all readers and mutators.
+
+[3. Impact Analysis & Refactoring]
+  Renaming or removing a prop, event, slot, or v-model?
+  ├── Step 1 ──► Execute get_component_tree(path: "...", direction: "upward")
+  └── Step 2 ──► Execute generate_patch_plan(path: "...", refactor_type: "...", old_name: "...", new_name: "...")
+                 Verify all dynamic spread sites flagged with DYNAMIC_PROP_SPREAD.
+
+[4. Implementation & Post-Edit Audit]
+  Apply targeted, minimal source edits.
+  └── Execute inspect_component(path: "...", audit_events: true) to confirm template bindings and emits remain intact.
+\`\`\`
+
+---
+
+## 4. Operational Boundaries & Budget Discipline
+
+1. **AST Slicing Limits:**
+   - If an AST method slice exceeds 50 lines, Strata returns a continuation notice with a recommended \`source_range\` hint. Use the specified range rather than dumping unconstrained text.
+2. **Dynamic Spread Verification:**
+   - Props passed via object spread (\`{...props}\` or \`v-bind="$attrs"\`) cannot be fully verified via static AST. Manually inspect flagged consumers to ensure prop contract compliance.
+3. **Template Event Verification:**
+   - After modifying template event bindings, run \`inspect_component(path: "...", audit_events: true)\` to verify that handler references remain valid.
+4. **Format & Token Discipline (Text First vs JSON):**
+   - Use default \`format: "text"\` for 90% of interactive queries (component contracts, outlines, trees, state tracing). It emits dense, high-signal markdown without cryptographic audit bloat.
+   - Use \`format: "json"\` primarily for automated patch planning (\`generate_patch_plan\`). Strata provides a lean prompt text mirror by default while preserving complete machine provenance in \`structuredContent\`.
+5. **Fullstack Bridge (Strata &rarr; Septum):**
+   - When outbound APIs disclose \`backendTargetHint\`, hand off the hint directly to Septum (\`septum_slice\` or \`septum_symbol\`) to achieve end-to-end fullstack changes in under 2,500 tokens.
 `;
+
+export const STRATA_INSPECT_SKILL = USE_STRATA_SKILL_TEMPLATE;
 
 export const STRATA_POST_WRITE_HOOK = `#!/usr/bin/env bash
 # Strata-MCP Post-Write Delta Sync Hook
@@ -230,20 +219,88 @@ esac
 exit 0
 `;
 
-export const STRATA_CLAUDE_COMMAND = `---
+export const USE_STRATA_CLAUDE_COMMAND = `---
 description: Deep frontend AST component inspection, component trees, reactivity tracking, routes, API contracts, architectural health audits, and deterministic patch planning using strata-mcp.
 ---
 
-# /strata-inspect
+# /use-strata
 
 Use \`strata-mcp\` tools for structural frontend intelligence rather than reading raw source files:
-- Begin with \`find_code(action: "map")\` to survey files, then use \`inspect_component(view: "map")\` and \`view: "source"\` with the returned \`source_ref\`.
-- \`inspect_component\`: Extract public component contracts (props, emits, slots) & slice functions with precision.
-- \`get_component_tree\`: Map component hierarchies and props drilling (upward/downward).
-- \`find_code\`: Search code patterns structurally using AST matching.
-- \`trace_state\`: Trace reactive state reads and mutations (Pinia, Context, Zustand).
-- \`audit_frontend\`: Audit routes, api-contracts, dead-components, bundle-health, and archetype-drift.
-- \`generate_patch_plan\`: Plan hash-bound patches for discovered static consumer usages; review coverage and verify after editing.
+- **Map & Survey:** Begin with \`find_code(action: "map")\` to survey files, then use \`inspect_component(view: "map")\` or \`outline: true\` and \`view: "source"\` with the returned \`source_ref\`.
+- **Component Contracts:** \`inspect_component\` extracts public contracts (props, emits, slots, models) & slices targeted functions without template bloat.
+- **Hierarchy & Blast Radius:** \`get_component_tree\` maps component hierarchies, props drilling, and upstream page consumers (upward/downward).
+- **Structural Code Search:** \`find_code\` matches code patterns and component usages structurally using AST matching.
+- **Reactivity Flow:** \`trace_state\` traces reactive state readers and mutators across store/context boundaries (Pinia, Context, Zustand).
+- **Architectural Health:** \`audit_frontend\` maps URL routes, api-contracts, and audits unused component/state candidates.
+- **Prescriptive Patching:** \`generate_patch_plan\` dry-runs hash-bound patches for renaming/removing props, events, models, and slots; flags \`DYNAMIC_PROP_SPREAD\` for review.
+`;
+
+export const STRATA_CLAUDE_COMMAND = USE_STRATA_CLAUDE_COMMAND;
+
+export const STRATA_TS_RULE = `# RULE: Strata-MCP TypeScript / JavaScript Structural Intelligence Engine
+
+## Directive & Tool Routing (Map First, Read Selectively)
+Prioritize \`strata-mcp\` tools (\`find_code\`, \`inspect_component\`) over reading whole TypeScript/JavaScript files sequentially:
+- **Survey Workspace Inventory:** Call \`find_code(action: "map", path: "...")\` to map files and review any excluded directories before broad scans.
+- **Structural & Literal Search:** Call \`find_code(pattern: "...", mode: "ast" | "literal" | "auto", path: "...")\` for AST-aware or fast exact literal search.
+- **Module Outlines & 1-Hop Callees:** Call \`inspect_component(path, outline: true)\` to list functions, classes, methods, interfaces, types, enums, and exported constants with exact line ranges and cross-file callee coordinates.
+- **Map & Hash-Verified Slicing:** Call \`inspect_component(path, view: "map")\` to get UTF-16 offsets and SHA-256, then pass \`source_ref\` to \`inspect_component(path, view: "source", source_ref: ...)\` — or request \`inspect_component(path, symbol: "...")\` / \`source_range: { start_line, end_line }\`.
+- **Outbound HTTP Calls:** When auditing HTTP client calls, use \`audit_frontend(target: "api-contracts", path: "...")\`.
+- **Token & Evidence Discipline:** Prefer default \`format: "text"\`. Never guess truncated slices or ignore \`Decision: partial\` / excluded-directory notes.
+`;
+
+export const USE_STRATA_TS_SKILL_TEMPLATE = `---
+name: use-strata
+description: >-
+  Route TypeScript/JavaScript file inventory, symbol outlines, 1-hop callee tracing, AST/literal code search, and hash-verified slicing using strata-mcp (find_code, inspect_component, audit_frontend). Use when exploring TS/JS modules without dumping entire files into context.
+---
+
+# use-strata — TypeScript / JavaScript AST Navigation & Slicing
+
+## Intent-to-Tool Routing Table
+
+| Intent | Tool Call | Canonical Arguments | Output |
+|---|---|---|---|
+| **Map repository files** | \`find_code\` | \`action: "map"\`, \`path?: "..."\`, \`limit?\`, \`offset?\` | Bounded file inventory plus excluded directory report. |
+| **AST pattern or literal search** | \`find_code\` | \`pattern: "..."\`, \`mode: "ast" \| "literal" \| "auto"\`, \`path?: "..."\` | Exact line/column matches without reading full files. |
+| **Module symbol outline & 1-hop callees** | \`inspect_component\` | \`path: "..."\`, \`outline: true\` | Functions, classes, methods, interfaces, types, enums, exported constants, and callee line bounds. |
+| **Map top-level spans & source_ref** | \`inspect_component\` | \`path: "..."\`, \`view: "map"\` | Top-level declaration coordinates with SHA-256 and UTF-16 byte offsets. |
+| **Read targeted symbol or lines** | \`inspect_component\` | \`path: "..."\`, \`symbol: "..."\` or \`source_range: { start_line, end_line }\` or \`view: "source", source_ref\` | Bounded, hash-verified source slice in compact text mode. |
+| **Discover outbound HTTP calls** | \`audit_frontend\` | \`target: "api-contracts"\`, \`path?: "..."\` | Static \`fetch\` / Axios / HTTP call inventory. |
+
+## Discipline
+- Always start with \`find_code(action: "map")\` or \`inspect_component(path, outline: true)\` / \`view: "map"\` before slicing.
+- Keep default \`format: "text"\` for interactive analysis; escalate to \`source_range\` continuation hints if a slice hits budget limits.
+`;
+
+export const STRATA_TS_SKILL = USE_STRATA_TS_SKILL_TEMPLATE;
+
+export const STRATA_TS_CLAUDE_COMMAND = `---
+description: TypeScript/JavaScript AST file inventory, symbol outlines, 1-hop callee tracing, AST/literal search, and hash-verified slicing via strata-mcp.
+---
+
+# /use-strata
+
+Use \`strata-mcp\` tools (\`find_code\`, \`inspect_component\`, \`audit_frontend\`) instead of reading full TS/JS files:
+- \`find_code(action: "map", path: "...")\` — file inventory with exclusion reporting.
+- \`find_code(pattern: "...", mode: "ast" | "literal", path: "...")\` — AST or exact literal search.
+- \`inspect_component(path, outline: true)\` / \`view: "map"\` — declarations, interfaces, constants, line bounds, and 1-hop callees.
+- \`inspect_component(path, symbol: "..." | source_range | view: "source", source_ref)\` — bounded, hash-verified source slices.
+`;
+
+export const STRATA_GEMINI_MD_POINTER = `# strata-mcp Workspace Guidance
+
+Strata-MCP workspace rules are configured in \`.gemini/rules/strata-frontend.md\`. Follow those rules before reading full source files.
+`;
+
+export const STRATA_RULE_REFERENCE_FROM_AGENTS = `# RULE: strata-mcp Workspace Reference
+
+The canonical \`strata-mcp\` rules for this workspace are already defined in \`AGENTS.md\` (use \`find_code(action: "map")\`, \`inspect_component(view: "map" | outline: true | symbol | source_range)\`, and \`view: "source"\` with \`source_ref\` before reading whole files).
+`;
+
+export const STRATA_RULE_REFERENCE_FROM_GEMINI = `# RULE: strata-mcp Workspace Reference
+
+The canonical \`strata-mcp\` rules for this workspace are already defined in \`GEMINI.md\` (use \`find_code(action: "map")\`, \`inspect_component(view: "map" | outline: true | symbol | source_range)\`, and \`view: "source"\` with \`source_ref\` before reading whole files).
 `;
 
 export const STRATA_GEMINI_HOOKS = JSON.stringify(

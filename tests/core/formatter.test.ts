@@ -87,18 +87,6 @@ describe('Formatter Engine (tests/core/formatter.test.ts)', () => {
             unionMembers: ["'active'", "'graduated'", "'suspended'"],
           },
         ],
-        inferredProps: [
-          {
-            propName: 'cadetData',
-            properties: [
-              {
-                property: 'name',
-                inferredType: 'string',
-                usageSnippet: 'cadetData.name',
-              },
-            ],
-          },
-        ],
         models: [
           {
             name: 'modelValue',
@@ -147,29 +135,6 @@ describe('Formatter Engine (tests/core/formatter.test.ts)', () => {
           endpoints: ['/api/cadets'],
           mutations: ['POST /cadets/store'],
         },
-        globalSymbols: [
-          {
-            name: 'route',
-            category: 'ziggy-route',
-            hint: "Ziggy helper route('cadets.store')",
-          },
-        ],
-        styleTokens: {
-          layoutTraps: ['overflow-hidden', 'fixed'],
-          zIndices: ['z-50'],
-          overflow: ['overflow-hidden'],
-          positioning: ['fixed'],
-        },
-        reactivitySmells: [
-          {
-            type: 'vue-props-destructure',
-            severity: 'warning',
-            line: 8,
-            message: 'Reactive prop destructuring loses reactivity tracking in Vue 3',
-            snippet: 'const { cohort } = defineProps()',
-            recommendation: 'Use toRefs(props) or access via props.cohort',
-          },
-        ],
         boundaryContracts: [
           {
             boundaryType: 'inertia-form',
@@ -198,10 +163,10 @@ describe('Formatter Engine (tests/core/formatter.test.ts)', () => {
       expect(output).toContain('Component: CadetCreate (vue)');
       expect(output).toContain("Render Boundary: client ('client:visible')");
 
-      // Props & Inferred Props
+      // Declared props
       expect(output).toContain('- cohort: number (required, default: 2026)');
       expect(output).toContain("status: 'active' | 'graduated' | 'suspended' (optional) [options: 'active' | 'graduated' | 'suspended']");
-      expect(output).toContain('• .name: string (cadetData.name)');
+      expect(output).not.toContain('Inferred');
 
       // Models & Variants
       expect(output).toContain('Models (Two-Way Bindings):');
@@ -224,8 +189,6 @@ describe('Formatter Engine (tests/core/formatter.test.ts)', () => {
       expect(output).toContain('- Form Mutations: POST /cadets/store');
 
       // Diagnostics & Boundary Contracts
-      expect(output).toContain('Reactivity Smells (1 detected):');
-      expect(output).toContain('Line 8: Reactive prop destructuring loses reactivity tracking in Vue 3');
       expect(output).toContain('Data Fetching & Boundary Contracts (1 detected):');
       expect(output).toContain('Line 24: [inertia-form] POST /cadets/store [payload: name, cohort, avatar]');
       expect(output).toContain('Form & Field Contracts:');

@@ -41,7 +41,7 @@ try {
   proc.stdin.write(JSON.stringify({jsonrpc:'2.0',method:'notifications/initialized'})+'\n');proc.stdin.flush();
   for(const fixture of fixtures) {
     const workspace=join(root,fixture.framework);
-    const args={path:join(workspace,fixture.file),project_root:root,format:'json',resolve_globals:false};
+    const args={path:join(workspace,fixture.file),project_root:root,format:'json',};
     const response=await request('tools/call',{name:'inspect_component',arguments:args});
     assert.ok(!response.isError,JSON.stringify(response));
     const data=response.structuredContent ?? JSON.parse(response.content[0].text);
@@ -53,10 +53,7 @@ try {
     if(fixture.framework==='react') assert.ok(!data.renderBoundary.violations?.length);
     if(fixture.framework==='next') assert.ok(data.renderBoundary.violations.some((v:any)=>v.code==='RSC_EVENT_HANDLER_IN_SERVER_COMPONENT' && v.message.includes('onInputCapture')));
     if(fixture.framework==='astro') assert.deepEqual(data.islands.map((v:any)=>v.component),['Card']);
-    if(fixture.framework==='svelte') {
-      const events=data.patternDiagnostics.filter((v:any)=>v.ruleId==='svelte/prefer-callback-props-over-dispatcher');
-      assert.equal(events.length,1);assert.equal(events[0].fact.snippet,'on:click|preventDefault={()=>{save()}}');
-    }
+    for (const field of ['patternDiagnostics','transportContract','styleTokens','reactivitySmells','inferredProps','globalSymbols','runtime_version','cost']) assert.ok(!(field in data));
     const summary=await request('tools/call',{name:'inspect_component',arguments:{...args,response_detail:'summary'}});
     assert.ok(!summary.isError);
     const brief=summary.structuredContent ?? JSON.parse(summary.content[0].text);
@@ -71,12 +68,11 @@ try {
       assert.ok(brief.retrieval.omissions.some((v:any)=>v.code===boundaryCode));
       assert.equal(data.decision.status,'partial');assert.equal(brief.decision.status,'partial');
     }
-    if(fixture.framework==='svelte') assert.ok(JSON.stringify(brief.safetyDetails).includes('preventDefault'));
     console.log(`PASS: ${fixture.framework} inspect full/summary through built MCP stdio`);
   }
   const workspace=join(root,'next');await mkdir(join(workspace,'features/app'),{recursive:true});
   const decoy=join(workspace,'features/app/Fake.tsx');await writeFile(decoy,'export default ()=> <button onClick={()=>save()}/>');
-  const decoyResult=await request('tools/call',{name:'inspect_component',arguments:{path:decoy,project_root:root,format:'json',resolve_globals:false}});
+  const decoyResult=await request('tools/call',{name:'inspect_component',arguments:{path:decoy,project_root:root,format:'json',}});
   assert.ok(!decoyResult.isError);assert.equal(decoyResult.structuredContent.renderBoundary.boundary,'isomorphic');
   const ambiguous=await request('tools/call',{name:'audit_frontend',arguments:{path:root,target:'routes',format:'json',response_detail:'summary'}});
   assert.ok(!ambiguous.isError);

@@ -56,7 +56,7 @@ try {
   send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'react-next-parser-smoke', version: '1' } } });
   assert.ok((await receive(1)).result);
   send({ jsonrpc: '2.0', method: 'notifications/initialized' });
-  const react = await call(2, 'inspect_component', { path: join(root, 'Card.tsx'), project_root: root, format: 'json', resolve_globals: false });
+  const react = await call(2, 'inspect_component', { path: join(root, 'Card.tsx'), project_root: root, format: 'json', });
   assert.ok(react.props.some((prop: any) => prop.name === 'value' && prop.type === 'number'));
   assert.ok(react.dependencies.some((dep: any) => dep.path === join(root, 'props.ts') && /^[a-f0-9]{64}$/.test(dep.hash)));
   const routes = await call(3, 'audit_frontend', { path: root, target: 'routes', format: 'json' });
@@ -67,17 +67,17 @@ try {
   assert.ok(routes.retrieval.omissions.some((issue: any) => issue.code === 'NEXT_EFFECTIVE_CONFIG_PARTIAL'));
   const summary = await call(4, 'audit_frontend', { path: root, target: 'routes', format: 'json', response_detail: 'summary' });
   assert.ok(summary.retrieval.omissions.some((issue: any) => issue.code === 'NEXT_EFFECTIVE_CONFIG_PARTIAL'));
-  const hooks = await call(5, 'inspect_component', { path: join(root, 'Hooks.tsx'), project_root: root, format: 'json', resolve_globals: false });
+  const hooks = await call(5, 'inspect_component', { path: join(root, 'Hooks.tsx'), project_root: root, format: 'json', });
   assert.deepEqual(hooks.stateDependencies.stores, []);
   assert.deepEqual(hooks.stateDependencies.contexts, ['ThemeContext']);
   assert.ok(hooks.retrieval.omissions.some((issue: any) => issue.code === 'REACT_USE_RESOURCE_UNVERIFIED'));
-  const bound = await call(6, 'inspect_component', { path: join(root, 'app/Bound.tsx'), project_root: root, format: 'json', resolve_globals: false });
+  const bound = await call(6, 'inspect_component', { path: join(root, 'app/Bound.tsx'), project_root: root, format: 'json', });
   assert.ok(bound.renderBoundary.violations.some((issue: any) => issue.code === 'RSC_CLIENT_HOOK_IN_SERVER_COMPONENT'));
-  const decoy = await call(7, 'inspect_component', { path: join(root, 'app/Decoy.tsx'), project_root: root, format: 'json', resolve_globals: false });
+  const decoy = await call(7, 'inspect_component', { path: join(root, 'app/Decoy.tsx'), project_root: root, format: 'json', });
   assert.ok(!decoy.renderBoundary.violations?.some((issue: any) => issue.code === 'RSC_CLIENT_HOOK_IN_SERVER_COMPONENT'));
-  const dom = await call(8, 'inspect_component', { path: join(root, 'app/Dom.tsx'), project_root: root, format: 'json', resolve_globals: false });
+  const dom = await call(8, 'inspect_component', { path: join(root, 'app/Dom.tsx'), project_root: root, format: 'json', });
   assert.ok(dom.renderBoundary.violations.some((issue: any) => issue.code === 'RSC_EVENT_HANDLER_IN_SERVER_COMPONENT' && issue.message.includes('onInputCapture')));
-  const eventDecoy = await call(9, 'inspect_component', { path: join(root, 'app/EventDecoy.tsx'), project_root: root, format: 'json', resolve_globals: false });
+  const eventDecoy = await call(9, 'inspect_component', { path: join(root, 'app/EventDecoy.tsx'), project_root: root, format: 'json', });
   assert.ok(!eventDecoy.renderBoundary.violations?.some((issue: any) => issue.code === 'RSC_EVENT_HANDLER_IN_SERVER_COMPONENT'));
   console.log('PASS: built MCP stdio — React props/hashes and scoped hook/context dependencies; Next layout config, partial summary and lexical hook/AST DOM diagnostics');
 } finally {

@@ -250,3 +250,20 @@ describe('strata serve bug fixes (SERVE-01 to SERVE-05)', () => {
     });
   });
 });
+
+describe('telemetry selection counts', () => {
+  for (const count of [81, 0, null]) {
+    it(`preserves summary count ${count} in structured and text-only responses`, () => {
+      const payload = { resultSummary: { version: 1, tool: 'find_code', selection: { subject: 'inventory-files', count, collections: ['files'], boundary: 'selected files only' } } };
+      const content = [{ type: 'text', text: JSON.stringify(payload) }];
+      const expected = count ?? undefined;
+      expect(extractItemsFound('find_code', { action: 'map' }, { content })).toBe(expected);
+      expect(extractItemsFound('find_code', { action: 'map' }, { structuredContent: payload, content })).toBe(expected);
+    });
+  }
+  it('uses full selected collections and does not count metadata or JSON lines', () => {
+    expect(extractItemsFound('find_code', { action: 'map' }, { structuredContent: { files: [1, 2] } })).toBe(2);
+    expect(extractItemsFound('find_code', { action: 'map' }, { structuredContent: { coverage: { knownFiles: 81 } } })).toBeUndefined();
+    expect(extractItemsFound('audit_frontend', { target: 'routes' }, { structuredContent: { routes: [1, 2, 3] } })).toBe(3);
+  });
+});

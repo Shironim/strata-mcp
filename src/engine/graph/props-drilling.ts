@@ -54,7 +54,7 @@ function extractVueElementProp(prop: any, seenProps: Set<string>, passedProps: P
         const expression = prop.exp.content.trim();
         if (!seenProps.has(propName)) {
           seenProps.add(propName);
-          passedProps.push({ propName, expression });
+          passedProps.push({ propName, expression, isSpread: true });
         }
       }
     } else if (prop.name === 'model') {
@@ -125,7 +125,7 @@ function extractJsxAttributeProp(
     const expression = attr.expression.getText(sourceFile).trim();
     if (!seenProps.has(propName)) {
       seenProps.add(propName);
-      passedProps.push({ propName, expression });
+      passedProps.push({ propName, expression, isSpread: true });
     }
   }
 }

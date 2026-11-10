@@ -4,12 +4,6 @@ import {
   scanDynamicImportsAndGlobals,
   type DynamicRegistry,
 } from '../../src/engine/dynamic-imports';
-import {
-  findSimilarTemplates,
-  formatSimilarTemplatesAsText,
-} from '../../src/engine/template-similarity';
-import { auditBundleHealth, formatBundleAuditAsText } from '../../src/engine/bundle-audit';
-import { auditDesignTokens, formatDesignAuditAsText } from '../../src/engine/style-audit';
 
 describe('Resilience & Boundary Edge Cases (tests/core/resilience.test.ts)', () => {
   describe('Path Resolver Self-Contained Edge Cases', () => {
@@ -60,66 +54,6 @@ describe('Resilience & Boundary Edge Cases (tests/core/resilience.test.ts)', () 
       expect(registry.asyncComponents.length).toBe(1);
       expect(registry.asyncComponents[0].specifier).toBe('./components/Modal.vue');
       expect(registry.asyncComponents[0].name).toBe('AsyncModal');
-    });
-  });
-
-  describe('Template Similarity Self-Contained Boundaries', () => {
-    it('formats clean message when no clusters are detected', () => {
-      const emptyResult = {
-        workspaceRoot: '/mock/app',
-        clusters: [],
-        totalComponentsAudited: 5,
-      };
-      const text = formatSimilarTemplatesAsText(emptyResult);
-      expect(text).toContain('Template Similarity & Abstraction Opportunities');
-      expect(text).toContain('No duplicate template patterns found');
-    });
-
-    it('formats cluster details with similarity percentage and recommendations', () => {
-      const clusterResult = {
-        workspaceRoot: '/mock/app',
-        clusters: [
-          {
-            similarity: 0.95,
-            files: ['src/components/UserCard.vue', 'src/components/AdminCard.vue'],
-            sharedStructure: ['CardHeader', 'CardContent', 'Badge'],
-            recommendation: 'Extract shared layout to BaseCard.vue',
-          },
-        ],
-        totalComponentsAudited: 10,
-      };
-      const text = formatSimilarTemplatesAsText(clusterResult);
-      expect(text).toContain('95% similarity');
-      expect(text).toContain('UserCard.vue');
-      expect(text).toContain('AdminCard.vue');
-      expect(text).toContain('Extract shared layout to BaseCard.vue');
-    });
-  });
-
-  describe('Bundle Audit & Style Audit Text Formatters', () => {
-    it('formats bundle audit results when clean with 0 warnings', () => {
-      const cleanResult = {
-        workspaceRoot: '/mock/app',
-        totalFilesAudited: 25,
-        heavyEagerImports: [],
-        totalWarnings: 0,
-      };
-      const text = formatBundleAuditAsText(cleanResult);
-      expect(text).toContain('Zero-Bloat Bundle & Island Architecture Audit');
-      expect(text).toContain('No heavy synchronous imports or eager island hydration warnings detected');
-    });
-
-    it('formats design audit text cleanly when no violations are found', () => {
-      const cleanDesign = {
-        totalFilesAudited: 10,
-        arbitraryTokens: [],
-        a11yViolations: [],
-        radiusDistribution: { 'rounded-md': 15 },
-        totalIssues: 0,
-      };
-      const text = formatDesignAuditAsText(cleanDesign);
-      expect(text).toContain('DESIGN SYSTEM & A11Y AUDIT');
-      expect(text).toContain('Clean! No arbitrary Tailwind values found');
     });
   });
 });

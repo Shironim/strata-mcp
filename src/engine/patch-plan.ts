@@ -689,22 +689,47 @@ function scanSvelteProps(
  * Generates an automated, prescriptive AST patch plan across all upward consumers of a component.
  */
 export async function generatePatchPlan(options: PatchPlanOptions): Promise<PatchPlanResult> {
-  const { componentPath, refactorType, oldName, newName, targetPath } = options;
+  const { componentPath, targetPath } = options;
   const validRefactorTypes: PatchRefactorType[] = [
     'rename_prop', 'remove_prop', 'rename_event', 'remove_event',
     'rename_model', 'remove_model', 'rename_slot', 'remove_slot',
   ];
-  if (!validRefactorTypes.includes(refactorType)) {
-    throw new Error(`Invalid refactor_type. Supported operations: ${validRefactorTypes.join(', ')}.`);
-  }
-  const cleanOld = typeof oldName === 'string' ? cleanIdentifier(oldName.trim()) : '';
-  const cleanNew = typeof newName === 'string' ? cleanIdentifier(newName.trim()) : undefined;
-  if (!cleanOld) {
-    throw new Error('"old_name" is required and must not be empty.');
-  }
-  if (refactorType.startsWith('rename_') && !cleanNew) {
-    throw new Error(`"new_name" is required when refactor_type is "${refactorType}".`);
-  }
+
+  const rawOps =
+    options.operations && Array.isArray(options.operations) && options.operations.length > 0
+      ? options.operations
+      : [
+          {
+            refactorType: options.refactorType as PatchRefactorType,
+            oldName: options.oldName as string,
+            newName: options.newName,
+          },
+        ];
+
+  const normalizedOps = rawOps.map((op) => {
+    if (!validRefactorTypes.includes(op.refactorType)) {
+      throw Object.assign(
+        new Error(`Invalid refactor_type. Supported operations: ${validRefactorTypes.join(', ')}.`),
+        { code: 'INVALID_ARGUMENT' }
+      );
+    }
+    const cleanOld = typeof op.oldName === 'string' ? cleanIdentifier(op.oldName.trim()) : '';
+    const cleanNew = typeof op.newName === 'string' ? cleanIdentifier(op.newName.trim()) : undefined;
+    if (!cleanOld) {
+      throw Object.assign(new Error('"old_name" is required and must not be empty.'), { code: 'INVALID_ARGUMENT' });
+    }
+    if (op.refactorType.startsWith('rename_') && !cleanNew) {
+      throw Object.assign(new Error(`"new_name" is required when refactor_type is "${op.refactorType}".`), { code: 'INVALID_ARGUMENT' });
+    }
+    return {
+      refactorType: op.refactorType,
+      oldName: op.oldName,
+      newName: op.newName,
+      cleanOld,
+      cleanNew,
+    };
+  });
+
   const projectRoot = targetPath ? resolve(targetPath) : findProjectRoot(componentPath);
   const absComponentPath = resolve(componentPath);
 
@@ -732,6 +757,8 @@ export async function generatePatchPlan(options: PatchPlanOptions): Promise<Patc
     entryPath: absComponentPath,
     direction: 'upward',
     targetPath: projectRoot,
+    maxDepth: 1,
+    limit: 20,
   });
 
   const consumerFiles = new Set<string>();
@@ -829,6 +856,8 @@ export async function generatePatchPlan(options: PatchPlanOptions): Promise<Patc
         coverage.omissions.push({ file: consumerPath, code: 'TARGET_BINDING_UNRESOLVED', resolution: 'candidate', message: 'Graph discovery identified this candidate, but no supported local binding to the target was resolved from the analyzed source.' });
       }
 
+      const filePatches: ComponentPatchItem[] = [];
+
       if (ext === '.vue') {
         const sfc = parseSfc(content, consumerPath);
         if (sfc.diagnostics?.length) throw new Error(`PARSE_FAILED: ${sfc.diagnostics.map(d => d.message).join('; ')}`);
@@ -839,60 +868,93 @@ export async function generatePatchPlan(options: PatchPlanOptions): Promise<Patc
             continue;
           }
           coverage.omissions.push(...collectVuePatchOmissions(sfc.template.content, sfc.template.loc.start.offset, consumerPath, snapshot.sha256, consumerTags));
-          const templatePatches = scanVueTemplateProps(
-            sfc.template.content,
-            sfc.template.loc.start.line,
-            sfc.template.loc.start.column,
-            consumerTags,
-            refactorType,
-            cleanOld,
-            cleanNew,
-            consumerPath
-          );
-          allPatches.push(...templatePatches);
+          for (const op of normalizedOps) {
+            const templatePatches = scanVueTemplateProps(
+              sfc.template.content,
+              sfc.template.loc.start.line,
+              sfc.template.loc.start.column,
+              consumerTags,
+              op.refactorType,
+              op.cleanOld,
+              op.cleanNew,
+              consumerPath
+            );
+            filePatches.push(...templatePatches);
+          }
         }
       } else if (ext === '.astro') {
         coverage.omissions.push({ file: consumerPath, code: 'USAGE_COVERAGE_NOT_ENUMERATED', resolution: 'unsupported', message: 'Astro patches cover supported static usages; spread, forwarding and dynamic usages are not exhaustively inventoried.' });
-        const astroTemplatePatches = scanAstroProps(
-          content,
-          consumerTags,
-          refactorType,
-          cleanOld,
-          cleanNew,
-          consumerPath
-        );
-        allPatches.push(...astroTemplatePatches);
+        for (const op of normalizedOps) {
+          const astroTemplatePatches = scanAstroProps(
+            content,
+            consumerTags,
+            op.refactorType,
+            op.cleanOld,
+            op.cleanNew,
+            consumerPath
+          );
+          filePatches.push(...astroTemplatePatches);
+        }
       } else if (ext === '.tsx' || ext === '.jsx') {
         coverage.omissions.push(...collectJsxPatchOmissions(content, consumerPath, snapshot.sha256, consumerTags));
-        const jsxPatches = scanJsxProps(
-          content,
-          consumerTags,
-          refactorType,
-          cleanOld,
-          cleanNew,
-          consumerPath
-        );
-        allPatches.push(...jsxPatches);
+        for (const op of normalizedOps) {
+          const jsxPatches = scanJsxProps(
+            content,
+            consumerTags,
+            op.refactorType,
+            op.cleanOld,
+            op.cleanNew,
+            consumerPath
+          );
+          filePatches.push(...jsxPatches);
+        }
       } else if (ext === '.svelte') {
         coverage.omissions.push(...collectJsxPatchOmissions(content, consumerPath, snapshot.sha256, consumerTags));
-        const sveltePatches = scanSvelteProps(
-          content,
-          consumerTags,
-          refactorType,
-          cleanOld,
-          cleanNew,
-          consumerPath
-        );
-        allPatches.push(...sveltePatches);
+        for (const op of normalizedOps) {
+          const sveltePatches = scanSvelteProps(
+            content,
+            consumerTags,
+            op.refactorType,
+            op.cleanOld,
+            op.cleanNew,
+            consumerPath
+          );
+          filePatches.push(...sveltePatches);
+        }
       }
-      for (const patch of allPatches.slice(patchesBefore)) {
-        const lines = content.split('\n');
+
+      const lines = content.split('\n');
+      for (const patch of filePatches) {
         if (patch.line < 1 || patch.line > lines.length || patch.column < 1) throw new Error('INVALID_PATCH_SPAN: invalid source coordinates');
         const startOffset = lines.slice(0, patch.line - 1).reduce((sum, line) => sum + line.length + 1, 0) + patch.column - 1;
         const ref = { sha256: snapshot.sha256, startOffset, endOffset: startOffset + patch.oldSnippet.length };
         if (sliceSourceSnapshot(snapshot, content, ref) !== patch.oldSnippet) throw new Error('INVALID_PATCH_SPAN: snippet does not match source coordinates');
         patch.sourceRef = ref;
       }
+
+      // Sort patches by startOffset
+      filePatches.sort((a, b) => (a.sourceRef?.startOffset ?? 0) - (b.sourceRef?.startOffset ?? 0));
+
+      // Filter overlapping patch spans to avoid corrupted byte offsets
+      const nonColliding: ComponentPatchItem[] = [];
+      for (const patch of filePatches) {
+        if (nonColliding.length > 0) {
+          const prev = nonColliding[nonColliding.length - 1];
+          if (prev.sourceRef && patch.sourceRef && patch.sourceRef.startOffset < prev.sourceRef.endOffset) {
+            coverage.omissions.push({
+              file: consumerPath,
+              code: 'PATCH_SPAN_COLLISION',
+              resolution: 'unsupported',
+              message: `Patch for ${patch.targetTag} (${patch.oldSnippet}) collides with overlapping patch span (${prev.oldSnippet}).`,
+              sourceRef: patch.sourceRef,
+            });
+            continue;
+          }
+        }
+        nonColliding.push(patch);
+      }
+      allPatches.push(...nonColliding);
+
       coverage.analyzedCount++;
       if (allPatches.length > patchesBefore) coverage.analyzedWithPatchCount++;
       else coverage.analyzedWithoutPatchCount++;
@@ -909,9 +971,10 @@ export async function generatePatchPlan(options: PatchPlanOptions): Promise<Patc
 
   return {
     component: absComponentPath,
-    refactorType,
-    oldName: cleanOld,
-    newName: cleanNew,
+    refactorType: normalizedOps[0].refactorType,
+    oldName: normalizedOps[0].cleanOld,
+    newName: normalizedOps[0].cleanNew,
+    operations: options.operations,
     totalConsumersAudited: coverage.analyzedCount,
     coverage,
     totalPatches: allPatches.length,

@@ -9,11 +9,9 @@ export interface ResultSelection {
 
 const auditCollections: Record<string, string[]> = {
   routes: ['routes'], 'dead-components': ['unusedComponents'], 'dead-state': ['unusedState'],
-  'similar-templates': ['clusters'], 'design-tokens': ['arbitraryTokens', 'a11yViolations'],
-  'bundle-health': ['heavyEagerImports'], 'api-contracts': ['endpoints'], 'archetype-drift': ['violations'],
+  'api-contracts': ['endpoints'],
   all: ['routes.routes', 'unusedComponents.unusedComponents', 'unusedState.unusedState',
-    'designSystemAudit.arbitraryTokens', 'designSystemAudit.a11yViolations',
-    'bundleAudit.heavyEagerImports', 'apiContracts.endpoints'],
+    'apiContracts.endpoints'],
 };
 
 /** Only explicit primary payloads establish a count. Missing data is never treated as []. */
@@ -31,7 +29,7 @@ export function describeResultSelection(tool: string, args: Record<string, any>,
       break;
     case 'inspect_component':
       subject = operation === 'symbol' ? 'selected-symbol' : `component-${operation}`;
-      collections = operation === 'map' ? ['regions'] : operation === 'sfc_sections' ? ['blocks'] : operation === 'outline' ? ['functions'] : [];
+      collections = operation === 'map' ? ['regions'] : operation === 'sfc_sections' ? ['blocks'] : operation === 'outline' ? ['functions'] : Array.isArray((data as any)?.propImpact?.props) ? ['propImpact.props'] : [];
       if (operation === 'symbol' && data.found === false) return { subject, count: 0, collections: [], boundary: 'The requested symbol was not returned; this does not prove no callers or runtime uses exist.' };
       break;
     case 'get_component_tree':

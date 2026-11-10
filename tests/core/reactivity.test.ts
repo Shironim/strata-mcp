@@ -142,4 +142,62 @@ describe('Vue Event Handler & Reactivity Audit Engine', () => {
 
     await fs.rm(tempDir, { recursive: true, force: true });
   });
+
+  it('links UI event handlers to 1-hop outbound API calls and backend target hints', async () => {
+    const tempDir = join(tmpdir(), `strata-event-api-${Date.now()}`);
+    await fs.mkdir(tempDir, { recursive: true });
+    const vueFile = join(tempDir, 'CadetForm.vue');
+
+    const content = [
+      '<template>',
+      '  <div>',
+      '    <button @click="saveCadet">Save Cadet</button>',
+      '    <button @click="isDeleting = true; axios.delete(\'/api/v1/cadets/1\')">Delete Cadet</button>',
+      '  </div>',
+      '</template>',
+      '',
+      '<script setup lang="ts">',
+      'import { ref } from "vue";',
+      'import axios from "axios";',
+      '',
+      'const isDeleting = ref(false);',
+      '',
+      'async function saveCadet() {',
+      '  await axios.post("/api/v1/cadets", { name: "John" });',
+      '}',
+      '</script>',
+    ].join('\n');
+
+    await fs.writeFile(vueFile, content, 'utf8');
+
+    const result = await auditEventHandlers({ path: vueFile });
+
+    expect(result.totalEventBindings).toBe(2);
+
+    // 1. Valid handler saveCadet with 1-hop API link
+    const saveHandler = result.validHandlers.find((h) => h.handlerName === 'saveCadet');
+    expect(saveHandler).toBeDefined();
+    expect(saveHandler?.outboundApi).toBeDefined();
+    expect(saveHandler?.outboundApi?.boundaryType).toBe('axios');
+    expect(saveHandler?.outboundApi?.method).toBe('POST');
+    expect(saveHandler?.outboundApi?.targetEndpoint).toBe('/api/v1/cadets');
+    expect(saveHandler?.outboundApi?.backendTargetHint?.suggestedSymbols[0]).toContain('Cadet');
+
+    // 2. Inline expression with 1-hop API link
+    const deleteInline = result.inlineExpressions.find((ie) => ie.handlerName.includes('axios.delete'));
+    expect(deleteInline).toBeDefined();
+    expect(deleteInline?.outboundApi).toBeDefined();
+    expect(deleteInline?.outboundApi?.boundaryType).toBe('axios');
+    expect(deleteInline?.outboundApi?.method).toBe('DELETE');
+    expect(deleteInline?.outboundApi?.targetEndpoint).toBe('/api/v1/cadets/1');
+
+    // 3. Formatted markdown output includes the outbound API and backend hint
+    const formatted = formatEventHandlerAuditAsText(result);
+    expect(formatted).toContain('@click="saveCadet"');
+    expect(formatted).toContain('[axios] POST /api/v1/cadets');
+    expect(formatted).toContain('Backend: Cadet');
+    expect(formatted).toContain('[axios] DELETE /api/v1/cadets/1');
+
+    await fs.rm(tempDir, { recursive: true, force: true });
+  });
 });

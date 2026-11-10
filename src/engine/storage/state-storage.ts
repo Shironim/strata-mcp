@@ -40,7 +40,7 @@ export async function queryStateImpact(
   const rows = db
     .query(
       `
-    SELECT f.path, f.is_page, f.render_boundary, s.kind, s.identifier, s.access_mode, s.line_number, s.usage_snippet
+    SELECT f.path, f.is_page, f.render_boundary, s.kind, s.identifier, s.access_mode, s.line_number, s.usage_snippet, s.accessed_properties
     FROM state_deps s
     JOIN files f ON s.file_id = f.id
     WHERE s.identifier = ?
@@ -56,6 +56,7 @@ export async function queryStateImpact(
     access_mode: 'read' | 'write' | 'watch';
     line_number: number;
     usage_snippet: string | null;
+    accessed_properties: string | null;
   }>;
 
   // Aggregate rows by consumer path so that a file with write actions is classified as mutator
@@ -74,9 +75,19 @@ export async function queryStateImpact(
         accessMode: r.access_mode,
         lineNumber: r.line_number || undefined,
         actionsCalled: [],
+        accessedProperties: [],
         usageSnippet: r.usage_snippet || undefined,
       };
       consumerMap.set(r.path, consumer);
+    }
+
+    if (r.accessed_properties) {
+      try {
+        const parsed = JSON.parse(r.accessed_properties);
+        if (Array.isArray(parsed)) {
+          consumer.accessedProperties = Array.from(new Set([...(consumer.accessedProperties || []), ...parsed]));
+        }
+      } catch {}
     }
 
     if (r.access_mode === 'write') {
@@ -109,6 +120,11 @@ export async function queryStateImpact(
       c.actionsCalled = Array.from(new Set(c.actionsCalled));
     } else {
       c.actionsCalled = undefined;
+    }
+    if (c.accessedProperties && c.accessedProperties.length > 0) {
+      c.accessedProperties = Array.from(new Set(c.accessedProperties));
+    } else {
+      c.accessedProperties = undefined;
     }
   }
 
@@ -168,8 +184,9 @@ export function formatStateImpactAsText(result: StateImpactResult): string {
     lines.push(`\nMutators / Actions (Trigger / Write State) [${result.mutatorsCount || 0}]:`);
     for (const c of result.consumers) {
       const pageBadge = c.isPage ? ' [Page]' : '';
+      const fieldsBadge = c.accessedProperties && c.accessedProperties.length > 0 ? ` [fields: ${c.accessedProperties.join(', ')}]` : '';
       const actionBadge = c.usageSnippet ? ` -> ${c.usageSnippet}` : '';
-      lines.push(`  - ${c.path}${pageBadge}${actionBadge}`);
+      lines.push(`  - ${c.path}${pageBadge}${fieldsBadge}${actionBadge}`);
     }
     return lines.join('\n');
   }
@@ -178,8 +195,9 @@ export function formatStateImpactAsText(result: StateImpactResult): string {
     lines.push(`\nReaders / Renderers (Display & Watch State) [${result.readersCount || 0}]:`);
     for (const c of result.consumers) {
       const pageBadge = c.isPage ? ' [Page]' : '';
+      const fieldsBadge = c.accessedProperties && c.accessedProperties.length > 0 ? ` [fields: ${c.accessedProperties.join(', ')}]` : '';
       const usageBadge = c.usageSnippet ? ` -> ${c.usageSnippet}` : '';
-      lines.push(`  - ${c.path}${pageBadge}${usageBadge}`);
+      lines.push(`  - ${c.path}${pageBadge}${fieldsBadge}${usageBadge}`);
     }
     return lines.join('\n');
   }
@@ -189,8 +207,9 @@ export function formatStateImpactAsText(result: StateImpactResult): string {
     lines.push(`\nMutators / Actions (Trigger / Write State) [${result.mutators.length}]:`);
     for (const c of result.mutators) {
       const pageBadge = c.isPage ? ' [Page]' : '';
+      const fieldsBadge = c.accessedProperties && c.accessedProperties.length > 0 ? ` [fields: ${c.accessedProperties.join(', ')}]` : '';
       const actionBadge = c.usageSnippet ? ` -> ${c.usageSnippet}` : '';
-      lines.push(`  - ${c.path}${pageBadge}${actionBadge}`);
+      lines.push(`  - ${c.path}${pageBadge}${fieldsBadge}${actionBadge}`);
     }
   }
 
@@ -198,8 +217,9 @@ export function formatStateImpactAsText(result: StateImpactResult): string {
     lines.push(`\nReaders / Renderers (Display & Watch State) [${result.readers.length}]:`);
     for (const c of result.readers) {
       const pageBadge = c.isPage ? ' [Page]' : '';
+      const fieldsBadge = c.accessedProperties && c.accessedProperties.length > 0 ? ` [fields: ${c.accessedProperties.join(', ')}]` : '';
       const usageBadge = c.usageSnippet ? ` -> ${c.usageSnippet}` : '';
-      lines.push(`  - ${c.path}${pageBadge}${usageBadge}`);
+      lines.push(`  - ${c.path}${pageBadge}${fieldsBadge}${usageBadge}`);
     }
   }
 

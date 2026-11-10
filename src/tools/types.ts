@@ -1,11 +1,9 @@
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
-import type { RuntimeVersionMeta } from '../utils/version-check';
 
 export interface ToolCallResponse {
   content: Array<{ type: 'text'; text: string }>;
   isError?: boolean;
   structuredContent?: Record<string, unknown>;
-  runtime_version?: RuntimeVersionMeta;
   [key: string]: unknown;
 }
 

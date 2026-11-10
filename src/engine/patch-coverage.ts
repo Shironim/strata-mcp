@@ -62,10 +62,14 @@ export function collectJsxPatchOmissions(
       if (matches(tag)) {
         for (const prop of node.attributes.properties) {
           if (ts.isJsxSpreadAttribute(prop)) {
+            const exprText = prop.expression.getText(sf).trim();
+            const isCascading = /^(props|rest|\.\.\.props|\.\.\.rest)$/i.test(exprText) || exprText.includes('props');
             omissions.push({
               file,
               code: 'DYNAMIC_PROP_SPREAD',
-              message: `JSX spread attribute on <${tag}> is not rewritten; check passed props manually.`,
+              message: isCascading
+                ? `JSX spread {...${exprText}} on <${tag}> acts as cascading wrapper; verify caller and passed props manually.`
+                : `JSX spread attribute on <${tag}> is not rewritten; check passed props manually.`,
               resolution: 'unsupported',
               sourceRef: {
                 sha256,

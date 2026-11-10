@@ -54,18 +54,22 @@ export function getSourceLineRange(
   content: string,
   startLine: number,
   endLine: number
-): { lineRange: SourceLineRange; ref: SourceRef } {
+): { lineRange: SourceLineRange; ref: SourceRef; clamped: boolean; requestedEndLine: number } {
   if (!Number.isSafeInteger(startLine) || !Number.isSafeInteger(endLine) ||
-      startLine < 1 || endLine < startLine || endLine > snapshot.lineCount) {
+      startLine < 1 || startLine > snapshot.lineCount || endLine < startLine) {
     throw new Error(`INVALID_SOURCE_RANGE: expected lines 1-${snapshot.lineCount}, received ${startLine}-${endLine}`);
   }
+  const clamped = endLine > snapshot.lineCount;
+  const effectiveEndLine = clamped ? snapshot.lineCount : endLine;
   const starts = lineStarts(content);
   const startOffset = starts[startLine - 1];
-  let endOffset = starts[endLine - 1];
+  let endOffset = starts[effectiveEndLine - 1];
   while (endOffset < content.length && content[endOffset] !== '\r' && content[endOffset] !== '\n') endOffset++;
   return {
-    lineRange: { startLine, endLine },
+    lineRange: { startLine, endLine: effectiveEndLine },
     ref: { sha256: snapshot.sha256, startOffset, endOffset },
+    clamped,
+    requestedEndLine: endLine,
   };
 }
 

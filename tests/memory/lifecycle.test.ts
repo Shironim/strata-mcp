@@ -6,7 +6,6 @@ import { parseSfc } from '../../src/engine/splitter';
 import { getProjectEcosystem } from '../../src/engine/contract';
 import { getWorkspaceDatabase, closeAllDatabases } from '../../src/engine/storage/schema';
 import { syncWorkspace } from '../../src/engine/storage/delta-sync';
-import { WorkspaceWatcher, startWorkspaceWatcher } from '../../src/engine/watcher';
 
 const roots: string[] = [];
 function root() {
@@ -42,50 +41,6 @@ test('project ecosystem follows framework config creation, replacement and delet
   unlinkSync(join(r, 'next.config.js'));
   unlinkSync(join(r, 'next.config.mjs'));
   expect(getProjectEcosystem(r).hasNext).toBe(false);
-});
-
-test('watcher refreshes graph after config changes including ignored files and mjs framework config', async () => {
-  const r = root(); const file = join(r, 'App.vue');
-  writeFileSync(file, '<template><div /></template>');
-  const db = getWorkspaceDatabase(r);
-  await syncWorkspace(r);
-  const watcher = new WorkspaceWatcher(r, db, { debounceMs: 60000, scopeSubdirs: ['src'] });
-  try {
-    writeFileSync(join(r, '.gitignore'), 'App.vue\n');
-    (watcher as any).handleFsEvent('.gitignore');
-    await watcher.flushQueue();
-    expect(db.query('SELECT path FROM files').all()).toEqual([]);
-    unlinkSync(join(r, '.gitignore'));
-    (watcher as any).handleFsEvent('.gitignore');
-    await watcher.flushQueue();
-    expect(db.query('SELECT framework FROM files WHERE path = ?').get(file)).toEqual({ framework: 'vue' });
-    writeFileSync(join(r, 'package.json'), '{"dependencies":{"nuxt":"3"}}');
-    (watcher as any).handleFsEvent('package.json');
-    await watcher.flushQueue();
-    expect(db.query('SELECT framework FROM files WHERE path = ?').get(file)).toEqual({ framework: 'nuxt' });
-    writeFileSync(join(r, 'package.json'), '{"dependencies":{"vue":"3"}}');
-    (watcher as any).handleFsEvent('package.json');
-    await watcher.flushQueue();
-    writeFileSync(join(r, 'nuxt.config.mjs'), 'export default {}');
-    (watcher as any).handleFsEvent('nuxt.config.mjs');
-    await watcher.flushQueue();
-    expect(db.query('SELECT framework FROM files WHERE path = ?').get(file)).toEqual({ framework: 'nuxt' });
-    unlinkSync(join(r, 'nuxt.config.mjs'));
-    (watcher as any).handleFsEvent('nuxt.config.mjs');
-    await watcher.flushQueue();
-    expect(db.query('SELECT framework FROM files WHERE path = ?').get(file)).toEqual({ framework: 'vue' });
-  } finally { watcher.close(); }
-});
-
-test('closed watchers release their dirty queue and can be replaced in the registry', () => {
-  const r = root(); const db = getWorkspaceDatabase(r, { enableWatcher: false });
-  const watcher = startWorkspaceWatcher(r, db, { debounceMs: 60000 })!;
-  expect(watcher).not.toBeNull();
-  (watcher as any).handleFsEvent('transient.ts'); watcher.close();
-  expect((watcher as any).pendingDirtyPaths.size).toBe(0);
-  const next = startWorkspaceWatcher(r, db);
-  expect(next).not.toBe(watcher);
-  next?.close();
 });
 
 test('same-size edits with identical timestamps replace stale indexed contracts', async () => {

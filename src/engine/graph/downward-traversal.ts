@@ -14,7 +14,6 @@ import {
   mergeAliasConfigs,
   type AliasConfig,
 } from "../resolver";
-import { resolveRouteEntry } from "../routes";
 import { getWorkspaceDatabase } from "../database";
 import type {
   ComponentTreeNode,
@@ -33,14 +32,13 @@ import {
   isPageFile,
   resolveImportPath,
   resolveBarrelExport,
-} from "./resolution";
+} from "./path-helpers";
 import { extractImports } from './path-helpers';
 import {
   extractPassedProps,
   detectPropsDrilling,
 } from "./props-drilling";
 import { extractComponentContextNodes } from "./context-analyzer";
-import { getUpwardComponentTree } from "./upward-traversal";
 
 export interface DynamicComponentWarning {
   component: string;
@@ -348,7 +346,7 @@ export function isPathInScope(filePath: string, scopeFilters: string[]): boolean
 /**
  * Resolves downward component hierarchy tree starting from a root page or layout.
  */
-async function getDownwardComponentTree(
+export async function getDownwardComponentTree(
   options: ComponentTreeOptions & { entryPath: string }
 ): Promise<ComponentTreeResult> {
   const entryPath = resolve(options.entryPath);
@@ -533,6 +531,9 @@ async function getDownwardComponentTree(
         const passedProps = extractPassedProps(content, candidateNames);
         if (passedProps.length > 0) {
           childNode.passedProps = passedProps;
+          if (passedProps.some((p) => p.isSpread || p.propName === '...spread' || p.propName === '...v-bind')) {
+            childNode.isCascadingWrapper = true;
+          }
         }
 
         node.children.push(childNode);
@@ -579,6 +580,9 @@ async function getDownwardComponentTree(
           const passedProps = extractPassedProps(content, candidateNames);
           if (passedProps.length > 0) {
             childNode.passedProps = passedProps;
+            if (passedProps.some((p) => p.isSpread || p.propName === '...spread' || p.propName === '...v-bind')) {
+              childNode.isCascadingWrapper = true;
+            }
           }
 
           node.children.push(childNode);
@@ -658,64 +662,6 @@ async function getDownwardComponentTree(
 }
 
 /**
- * Resolves the component hierarchy tree starting from a root/target file or route path.
- * Supports both downward (root -> children) and upward (leaf -> consumers) directions.
- */
-export async function getComponentTree(
-  options: ComponentTreeOptions
-): Promise<ComponentTreeResult> {
-  let entryPath: string;
-  let resolvedRouteInfo: ComponentTreeResult['resolvedRoute'] | undefined;
-
-  if (options.routePath) {
-    const targetPath = resolve(options.targetPath || '.');
-    const routeResolution = await resolveRouteEntry(targetPath, options.routePath);
-    if (!routeResolution.matched || !routeResolution.filePath) {
-      const avail =
-        routeResolution.availableRoutes && routeResolution.availableRoutes.length > 0
-          ? `\nAvailable routes:\n  ${routeResolution.availableRoutes.slice(0, 20).join('\n  ')}`
-          : '';
-      throw new Error(
-        `Route "${options.routePath}" could not be resolved in "${targetPath}".${avail}`
-      );
-    }
-
-    entryPath = resolve(routeResolution.filePath);
-    resolvedRouteInfo = {
-      routePath: options.routePath,
-      matchedRoute: routeResolution.matchedPattern || options.routePath,
-      filePath: routeResolution.filePath,
-      framework: routeResolution.framework || 'unknown',
-      layouts: routeResolution.layouts,
-    };
-  } else if (options.entryPath) {
-    entryPath = resolve(options.entryPath);
-  } else {
-    throw new Error('Either "entryPath" or "routePath" must be provided to getComponentTree.');
-  }
-
-  if (!existsSync(entryPath)) {
-    throw new Error(`Entry component file not found: ${entryPath}`);
-  }
-
-  const effectiveOptions: ComponentTreeOptions & { entryPath: string } = {
-    ...options,
-    entryPath,
-  };
-
-  const isUpward = options.direction === 'upward' || options.direction === 'up';
-  const result = isUpward
-    ? await getUpwardComponentTree(effectiveOptions)
-    : await getDownwardComponentTree(effectiveOptions);
-
-  if (resolvedRouteInfo) {
-    result.resolvedRoute = resolvedRouteInfo;
-  }
-
-  return result;
-}
-
-/**
 
  */
 export function formatTreeAsText(result: ComponentTreeResult): string {
@@ -753,6 +699,7 @@ export function formatTreeAsText(result: ComponentTreeResult): string {
           .join(', ');
         label += ` [props: ${propsStr}]`;
       }
+      if (node.isCascadingWrapper) label += ` [cascading-wrapper: spread]`;
       if (node.isDynamic && !node.warning) label += ` [dynamic/lazy]`;
       if (node.isAutoImported) label += ` [auto-imported]`;
       if (node.isPage) label += ` [Page]`;
@@ -811,4 +758,78 @@ export function formatTreeAsText(result: ComponentTreeResult): string {
   }
 
   return output;
+}
+
+/**
+ * Formats a component tree result as a standard Mermaid flowchart diagram.
+ */
+export function formatTreeAsMermaid(result: ComponentTreeResult): string {
+  const isUpward = result.direction === 'upward';
+  const lines: string[] = ['graph TD'];
+  const nodeMap = new Map<ComponentTreeNode, string>();
+  let counter = 0;
+
+  function sanitize(str: string): string {
+    return str.replace(/"/g, "'").replace(/[<>]/g, '');
+  }
+
+  function getNodeId(node: ComponentTreeNode): string {
+    let id = nodeMap.get(node);
+    if (!id) {
+      id = `n${counter++}`;
+      nodeMap.set(node, id);
+    }
+    return id;
+  }
+
+  function buildNodeLabel(node: ComponentTreeNode, isRoot: boolean): string {
+    let label = sanitize(node.component);
+    if (isRoot) {
+      label += isUpward ? ' (Target)' : ' (Root)';
+    } else {
+      if (node.alias) label += ` (${sanitize(node.alias)})`;
+      if (node.isPage) label += ' [Page]';
+    }
+    return label;
+  }
+
+  function traverse(node: ComponentTreeNode, isRoot = true) {
+    const parentId = getNodeId(node);
+    if (isRoot) {
+      lines.push(`  ${parentId}["${buildNodeLabel(node, true)}"]:::rootNode`);
+    }
+
+    for (const child of node.children || []) {
+      const childId = getNodeId(child);
+      const childLabel = buildNodeLabel(child, false);
+      const isDynamic = child.isDynamic;
+      const isImportOnly = child.isRendered === false || child.relationKind === 'import';
+
+      lines.push(`  ${childId}["${childLabel}"]`);
+
+      let edgeLabel = '';
+      if (child.isCascadingWrapper) {
+        edgeLabel = '|"...spread"|';
+      } else if (child.passedProps && child.passedProps.length > 0) {
+        const propNames = child.passedProps.slice(0, 2).map((p) => p.propName).join(', ');
+        const extra = child.passedProps.length > 2 ? '...' : '';
+        edgeLabel = `|"${propNames}${extra}"|`;
+      } else if (isImportOnly) {
+        edgeLabel = '|"import"|';
+      }
+
+      if (isDynamic) {
+        lines.push(`  ${parentId} -.->${edgeLabel} ${childId}`);
+      } else {
+        lines.push(`  ${parentId} -->${edgeLabel} ${childId}`);
+      }
+
+      traverse(child, false);
+    }
+  }
+
+  traverse(result.root);
+  lines.push('  classDef rootNode fill:#4f46e5,stroke:#3730a3,color:#fff,stroke-width:2px;');
+
+  return lines.join('\n');
 }

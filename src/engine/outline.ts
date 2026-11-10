@@ -40,8 +40,9 @@ export {
 };
 
 /**
- * Extracts a complete outline of all declared functions and methods in a component file,
- * with exact start/end line bounds, 1-hop cross-file callee resolution, and complexity smell detection.
+ * Extracts a complete outline of declared symbols in a component or script file
+ * (functions, methods, classes, interfaces, types, enums, composables, and top-level constants),
+ * with exact start/end line bounds and 1-hop cross-file callee resolution.
  */
 export async function extractComponentOutline(
   filePath: string,
@@ -50,7 +51,6 @@ export async function extractComponentOutline(
   const targetFile = resolve(filePath);
   const fileContent = await readSourceFile(targetFile);
   const workspaceRoot = options.workspaceRoot || findProjectRoot(targetFile) || dirname(targetFile);
-  const threshold = options.maxFunctionLines ?? 300;
   const shouldResolveCalls = options.resolveCalls !== false;
 
   const adapter = createDocumentAdapter(targetFile, fileContent);
@@ -107,12 +107,13 @@ export async function extractComponentOutline(
       }
     }
 
-    // 2. Collect functions, methods, computed properties, and watchers
+    // 2. Collect functions, methods, classes, types, composables, and top-level bindings
     function registerFunctionItem(
       fnName: string,
       kind: FunctionOutlineItem['kind'],
       targetNode: ts.Node,
-      isExported: boolean
+      isExported: boolean,
+      extractCalls: boolean = true
     ) {
       if (!fnName) return;
 
@@ -129,7 +130,7 @@ export async function extractComponentOutline(
       const firstLine = nodeText.split('\n')[0].trim();
       const signature = firstLine.endsWith('{') ? firstLine.slice(0, -1).trim() : firstLine;
 
-      const internalCalls = extractInternalCalls(nodeText, fnName, 30);
+      const internalCalls = extractCalls ? extractInternalCalls(nodeText, fnName, 30) : [];
 
       const item: FunctionOutlineItem = {
         name: fnName,
@@ -142,42 +143,53 @@ export async function extractComponentOutline(
         internalCalls,
       };
 
-      if (lineCount > threshold) {
-        item.complexitySmell = {
-          isHighComplexity: true,
-          threshold,
-          totalLines: lineCount,
-          warning: `Function '${fnName}' spans ${lineCount} lines (exceeds ${threshold}-line threshold). Candidate for decomposition/refactoring.`,
-        };
-      }
-
       functions.push(item);
     }
 
-    function isNodeExported(node: ts.Node): boolean {
+    function hasModifier(node: ts.Node, modKind: ts.SyntaxKind): boolean {
       if (ts.canHaveModifiers(node)) {
         for (const mod of ts.getModifiers(node) ?? []) {
-          if (mod.kind === ts.SyntaxKind.ExportKeyword) return true;
+          if (mod.kind === modKind) return true;
         }
       }
       return false;
     }
 
+    function isNodeExported(node: ts.Node): boolean {
+      return hasModifier(node, ts.SyntaxKind.ExportKeyword);
+    }
+
     function inspectNode(node: ts.Node) {
+      const isModuleTopLevel = node.parent === sourceFile || (Boolean(node.parent) && ts.isModuleBlock(node.parent));
+
       if (ts.isFunctionDeclaration(node)) {
-        const fnName = node.name ? node.name.text : 'anonymous_function';
+        const isDefault = hasModifier(node, ts.SyntaxKind.DefaultKeyword);
+        const fnName = node.name ? node.name.text : (isDefault ? 'default' : 'anonymous_function');
         registerFunctionItem(fnName, 'function', node, isNodeExported(node));
+      } else if (ts.isClassDeclaration(node)) {
+        const isDefault = hasModifier(node, ts.SyntaxKind.DefaultKeyword);
+        const clsName = node.name ? node.name.text : (isDefault ? 'default' : 'anonymous_class');
+        registerFunctionItem(clsName, 'class', node, isNodeExported(node), false);
+      } else if (isModuleTopLevel && ts.isInterfaceDeclaration(node)) {
+        registerFunctionItem(node.name.text, 'interface', node, isNodeExported(node), false);
+      } else if (isModuleTopLevel && ts.isTypeAliasDeclaration(node)) {
+        registerFunctionItem(node.name.text, 'type', node, isNodeExported(node), false);
+      } else if (isModuleTopLevel && ts.isEnumDeclaration(node)) {
+        registerFunctionItem(node.name.text, 'enum', node, isNodeExported(node), false);
       } else if (ts.isVariableStatement(node)) {
         const exported = isNodeExported(node);
+        const declCount = node.declarationList.declarations.length;
         for (const decl of node.declarationList.declarations) {
-          if (ts.isIdentifier(decl.name) && decl.initializer) {
+          if (ts.isIdentifier(decl.name)) {
             const init = decl.initializer;
             const name = decl.name.text;
-            if (ts.isArrowFunction(init)) {
+            if (init && ts.isArrowFunction(init)) {
               registerFunctionItem(name, 'arrow-function', decl, exported);
-            } else if (ts.isFunctionExpression(init)) {
+            } else if (init && ts.isFunctionExpression(init)) {
               registerFunctionItem(name, 'function', decl, exported);
-            } else if (ts.isCallExpression(init)) {
+            } else if (init && ts.isClassExpression(init)) {
+              registerFunctionItem(name, 'class', decl, exported, false);
+            } else if (init && ts.isCallExpression(init)) {
               const callText = init.expression.getText(sourceFile);
               if (callText === 'computed') {
                 registerFunctionItem(name, 'computed', decl, exported);
@@ -185,7 +197,14 @@ export async function extractComponentOutline(
                 registerFunctionItem(name, 'watcher', decl, exported);
               } else if (callText.startsWith('use')) {
                 registerFunctionItem(name, 'composable', decl, exported);
+              } else if (isModuleTopLevel) {
+                const targetNode = declCount === 1 ? node : decl;
+                registerFunctionItem(name, 'variable', targetNode, exported);
               }
+            } else if (isModuleTopLevel) {
+              const targetNode = declCount === 1 ? node : decl;
+              const hasDynamicExpr = Boolean(init && ts.isTemplateExpression(init));
+              registerFunctionItem(name, 'variable', targetNode, exported, hasDynamicExpr);
             }
           }
         }
@@ -212,6 +231,7 @@ export async function extractComponentOutline(
     const resolvedCache = new Map<string, ResolvedCalleeReference>();
 
     for (const fn of functions) {
+      if (fn.internalCalls.length === 0) continue;
       const resolvedCalls = await resolveCalleesForCalls(
         fn.internalCalls,
         targetFile,
@@ -227,7 +247,6 @@ export async function extractComponentOutline(
     }
   }
 
-  const highComplexityCount = functions.filter((f) => f.complexitySmell?.isHighComplexity).length;
 
   const dependencies = trackedDeps.size > 0
     ? Array.from(trackedDeps.entries()).map(([p, hash]) => ({
@@ -241,7 +260,6 @@ export async function extractComponentOutline(
     filePath: targetFile,
     framework,
     totalFunctions: functions.length,
-    highComplexityCount,
     functions,
     ...(dependencies ? { dependencies } : {}),
   };
@@ -253,21 +271,20 @@ export async function extractComponentOutline(
 export function formatOutlineAsText(outline: ComponentSymbolOutline): string {
   const lines: string[] = [];
   lines.push(`### Component Symbol Outline: \`${outline.filePath}\``);
-  lines.push(`**Framework:** ${outline.framework} | **Total Functions:** ${outline.totalFunctions} | **High-Complexity Functions:** ${outline.highComplexityCount}`);
+  lines.push(`**Framework:** ${outline.framework} | **Total Symbols:** ${outline.totalFunctions}`);
 
   if (outline.functions.length === 0) {
-    lines.push('\n_No function or method declarations found in script blocks._');
+    lines.push('\n_No symbol or declaration definitions found in script blocks._');
     return lines.join('\n');
   }
 
-  lines.push('\n| Function / Symbol | Kind | Range | Lines | Exported | Complexity |');
-  lines.push('|---|---|---|---|---|---|');
+  lines.push('\n| Function / Symbol | Kind | Range | Lines | Exported |');
+  lines.push('|---|---|---|---|---|');
 
   for (const fn of outline.functions) {
     const range = `L${fn.startLine}-L${fn.endLine}`;
     const exportedBadge = fn.isExported ? 'yes' : 'no';
-    const complexityBadge = fn.complexitySmell ? `⚠️ SMELL (> ${fn.complexitySmell.threshold}L)` : 'healthy';
-    lines.push(`| \`${fn.name}\` | ${fn.kind} | \`${range}\` | ${fn.lineCount} | ${exportedBadge} | ${complexityBadge} |`);
+    lines.push(`| \`${fn.name}\` | ${fn.kind} | \`${range}\` | ${fn.lineCount} | ${exportedBadge} |`);
   }
 
   // Cross-file call resolution section
@@ -285,15 +302,6 @@ export function formatOutlineAsText(outline: ComponentSymbolOutline): string {
           lines.push(`  - Calls \`${call.symbol}\` ➔ module \`${call.sourceModule}\``);
         }
       }
-    }
-  }
-
-  // Complexity smell recommendations
-  const smellyFunctions = outline.functions.filter((f) => f.complexitySmell);
-  if (smellyFunctions.length > 0) {
-    lines.push('\n#### ⚠️ High-Complexity Refactoring Smells:');
-    for (const fn of smellyFunctions) {
-      lines.push(`- **\`${fn.name}\`** (${fn.lineCount} lines, \`L${fn.startLine}-L${fn.endLine}\`): ${fn.complexitySmell?.warning}`);
     }
   }
 

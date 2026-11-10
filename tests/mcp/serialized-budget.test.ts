@@ -1,5 +1,9 @@
 import { expect, test } from 'bun:test';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { withRetrievalEvidence } from '../../src/tools/retrieval-response';
+import { inspectComponentTool } from '../../src/tools/inspect-component';
 import { applyContextBudget, decodeAndVerifyContinuationToken, encodeContinuationToken, enforceResponseLimit, measureResponseBytes } from '../../src/engine/context-budget';
 import { createMcpServer } from '../../src/mcp';
 import type { ToolCallResponse } from '../../src/tools/types';
@@ -24,9 +28,22 @@ test('full UTF-8 serialization fits and text/JSON pages expose only the selected
       expect(measureResponseBytes(result)).toBeLessThanOrEqual(16000);
       expect(result.content[0]!.text).not.toContain('UNPAGED_TEXT_MUST_NOT_LEAK');
       const data = result.structuredContent as any;
-      expect(data.cost.responseBytes).toBe(measureResponseBytes(result));
+      expect(data).not.toHaveProperty('cost');
       expect(data.retrieval.budget.estimatedBytes).toBe(measureResponseBytes(result));
-      expect(JSON.parse(result.content[0]!.text).matches).toEqual(data.matches);
+      if (format === 'json') {
+        expect(JSON.parse(result.content[0]!.text).matches).toEqual(data.matches);
+      } else {
+        expect(() => JSON.parse(result.content[0]!.text)).toThrow();
+        const selectedFiles = new Set(data.matches.map((item: any) => item.file));
+        for (const selectedFile of selectedFiles) {
+          expect(result.content[0]!.text).toContain(selectedFile);
+        }
+        for (const item of items) {
+          if (!selectedFiles.has(item.file)) {
+            expect(result.content[0]!.text).not.toContain(item.file);
+          }
+        }
+      }
       expect(data.matches.length).toBeGreaterThan(0);
       expect(data.offset).toBe(collected.length);
       collected.push(...data.matches.map((item: any) => item.id));
@@ -147,4 +164,98 @@ test('budget pagination preserves inventory-window coverage and original truncat
   expect(page.coverage.offset).toBe(50 + data.files.length);
   expect(page.isTruncated).toBe(true);
   expect(measureResponseBytes(second)).toBeLessThanOrEqual(16000);
+});
+
+test('all six wrappers default to 16 KiB and retain safety evidence when paging or rejecting', async () => {
+  const diagnostic = { code: 'UNRESOLVED', reason: 'Dynamic binding requires review' };
+  const samples = [
+    ['find_code', {}, { matches: items }],
+    ['inspect_component', { symbol: 'large' }, { source: 'é🙂'.repeat(10000) }],
+    ['get_component_tree', {}, { root: { children: items } }],
+    ['trace_state', {}, { consumers: items }],
+    ['audit_frontend', { target: 'routes' }, { routes: items }],
+    ['generate_patch_plan', { refactor_type: 'rename_prop' }, { patches: items }],
+  ] as const;
+  for (const [name, args, payload] of samples) {
+    const tool = fixture(name, { content: [{ type: 'text', text: JSON.stringify(payload) }], structuredContent: { ...payload, diagnostics: [diagnostic] } });
+    const response = await tool.handler(args);
+    expect(measureResponseBytes(response)).toBeLessThanOrEqual(16384);
+    const data = response.structuredContent as any;
+    if (!response.isError) {
+      expect(data.diagnostics).toEqual([diagnostic]);
+      expect(data.retrieval.completeness).toBe('partial');
+      expect(data.continuationToken).toBeDefined();
+    } else expect(response.content[0]!.text).toContain('BUDGET_');
+    const larger = await tool.handler({ ...args, max_bytes: 2000000 });
+    expect(larger.isError).not.toBe(true);
+    expect(larger.structuredContent?.diagnostics).toEqual([diagnostic]);
+  }
+});
+
+test('contract output excludes unrequested impact and unrelated API capabilities', async () => {
+  const response = await fixture('inspect_component', { content: [{ type: 'text', text: '{"props":[]}' }], structuredContent: { props: [] } }).handler({ path: 'Child.vue', response_detail: 'summary' });
+  const data = response.structuredContent as any;
+  expect(data.decision.capability.features.map((item: any) => item.id)).not.toContain('consumer-count-per-prop');
+  expect(data.decision.capability.features.map((item: any) => item.id)).not.toContain('imported-composable-api');
+  expect(data.decision.capability.limitations).toHaveLength(1);
+  expect(response.content).toHaveLength(1);
+  const mirror = JSON.parse(response.content[0]!.text);
+  expect(mirror.resultSummary).toEqual(data.resultSummary);
+  expect(mirror.retrieval).toEqual(data.retrieval);
+  expect(mirror.decision.status).toBe(data.decision.status);
+  expect(mirror.decision.capability.features).toBeUndefined();
+  expect(new Set(mirror.decision.capability.limitations).size).toBe(mirror.decision.capability.limitations.length);
+  expect(mirror.decision.capability.limitations.some((reason: string) => reason.includes('runtime behavior not certified'))).toBe(true);
+  expect(data).not.toHaveProperty('cost');
+});
+
+test('exact JSON-shaped source remains byte-for-byte intact under the default budget', async () => {
+  const source = '{ "answer": "é🙂" }\n';
+  const response = await fixture('inspect_component', { content: [{ type: 'text', text: source }], structuredContent: { source } }).handler({ path: 'data.ts', view: 'source' });
+  expect(response.content[0]!.text).toBe(source);
+  expect(measureResponseBytes(response)).toBeLessThanOrEqual(16384);
+});
+
+test('paginated inspect_component outline preserves Markdown formatting across continuation pages in text mode', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'strata-outline-page-'));
+  try {
+    const file = join(dir, 'browser-manager.ts');
+    const fns = Array.from({ length: 39 }, (_, i) => `export function manageBrowserAction_${String(i).padStart(2, '0')}(x: number) {\n  return x + ${i};\n}`);
+    await writeFile(file, fns.join('\n\n'));
+
+    let continuation_token: string | undefined;
+    const collectedNames: string[] = [];
+    let pages = 0;
+    do {
+      const res = await inspectComponentTool.handler({
+        path: file,
+        project_root: dir,
+        outline: true,
+        format: 'text',
+        max_bytes: 7500,
+        continuation_token,
+      });
+      expect(res.isError).not.toBe(true);
+      expect(measureResponseBytes(res)).toBeLessThanOrEqual(7500);
+      const primaryText = res.content[0]!.text;
+      expect(() => JSON.parse(primaryText)).toThrow();
+      expect(primaryText).toContain('### Component Symbol Outline:');
+      expect(primaryText).toContain('| Function / Symbol | Kind | Range | Lines | Exported |');
+      expect(primaryText).toContain('Page: entries ');
+      const data = res.structuredContent as any;
+      expect(data.functions.length).toBeGreaterThan(0);
+      for (const fn of data.functions) {
+        expect(primaryText).toContain(fn.name);
+        collectedNames.push(fn.name);
+      }
+      continuation_token = data.continuationToken;
+      pages++;
+      expect(pages).toBeLessThan(20);
+    } while (continuation_token);
+
+    expect(pages).toBeGreaterThan(1);
+    expect(collectedNames).toHaveLength(39);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

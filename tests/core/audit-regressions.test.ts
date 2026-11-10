@@ -6,14 +6,12 @@ import { Database } from 'bun:sqlite';
 import { initSchema } from '../../src/engine/storage/schema';
 import { getWorkspaceDatabase, closeAllDatabases } from '../../src/engine/storage/schema';
 import { syncWorkspace } from '../../src/engine/storage/delta-sync';
-import { WorkspaceWatcher } from '../../src/engine/watcher';
 import { generatePatchPlan } from '../../src/engine/patch-plan';
 import { collectFiles } from '../../src/engine/collector';
 import { extractApiContractsFromCode } from '../../src/engine/api-contract';
 import { getComponentTree } from '../../src/engine/tree';
 
 const roots: string[] = [];
-const watchers: WorkspaceWatcher[] = [];
 function workspace() {
   const root = mkdtempSync('/tmp/strata-regression-');
   roots.push(root);
@@ -25,7 +23,6 @@ function put(root: string, file: string, content: string) {
   writeFileSync(join(root, file), content);
 }
 afterEach(() => {
-  watchers.splice(0).forEach(w => w.close());
   closeAllDatabases();
   roots.splice(0).forEach(root => rmSync(root, { recursive: true, force: true }));
 });
@@ -117,39 +114,6 @@ describe('Audit regression cases', () => {
     expect(tree.root.children.find(child => child.component === 'Button.tsx')?.alias).toBe('ActionButton');
     const warm = await syncWorkspace(root);
     expect(warm.modified).toBe(0);
-  });
-  it('watcher updates the database supplied by its caller', async () => {
-    const root = workspace();
-    put(root, 'App.tsx', 'export default () => <div />;');
-    const db = new Database(':memory:');
-    initSchema(db);
-    const watcher = new WorkspaceWatcher(root, db, { debounceMs: 60_000 });
-    watchers.push(watcher);
-    try {
-      (watcher as any).handleFsEvent('App.tsx');
-      await watcher.flushQueue();
-      expect(db.query('SELECT path FROM files').all()).toEqual([{ path: join(root, 'App.tsx') }]);
-    } finally {
-      watcher.close();
-      db.close();
-    }
-  });
-
-  it('watcher updates and deletes the same canonical file rows as full sync', async () => {
-    const root = workspace();
-    put(root, 'App.tsx', 'export default () => <div />;');
-    const db = getWorkspaceDatabase(root, { enableWatcher: false, create: true });
-    await syncWorkspace(root);
-    const watcher = new WorkspaceWatcher(root, db, { debounceMs: 60_000 });
-    watchers.push(watcher);
-    put(root, 'App.tsx', 'export default () => <main />;');
-    (watcher as any).handleFsEvent('App.tsx');
-    await watcher.flushQueue();
-    expect(db.query('SELECT path FROM files').all()).toEqual([{ path: join(root, 'App.tsx') }]);
-    unlinkSync(join(root, 'App.tsx'));
-    (watcher as any).handleFsEvent('App.tsx');
-    await watcher.flushQueue();
-    expect(db.query('SELECT path FROM files').all()).toEqual([]);
   });
 
   it('scoped sync preserves sibling directories with the same prefix', async () => {
@@ -255,18 +219,6 @@ describe('Audit regression cases', () => {
     put(root, 'src/a.generated.ts', 'export {};');
     const files = (await collectFiles(root)).map(p => p.slice(root.length + 1)).sort();
     expect(files).toEqual(['ignored/Keep.ts', 'src/root-only.ts']);
-  });
-
-  it('watcher does not index files excluded by ignore globs', async () => {
-    const root = workspace();
-    put(root, '.gitignore', 'ignored/**\n');
-    const db = getWorkspaceDatabase(root, { enableWatcher: false, create: true });
-    const watcher = new WorkspaceWatcher(root, db, { debounceMs: 60_000 });
-    watchers.push(watcher);
-    put(root, 'ignored/Secret.ts', 'export const secret = 1;');
-    (watcher as any).handleFsEvent('ignored/Secret.ts');
-    await watcher.flushQueue();
-    expect(db.query('SELECT path FROM files').all()).toEqual([]);
   });
 
   it('API extraction ignores comments and strings while retaining real call positions', () => {

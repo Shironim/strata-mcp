@@ -106,7 +106,7 @@ const props = withDefaults(defineProps<Props>(), {
     expect(formatted).toContain("variant: 'primary' | 'secondary' | 'ghost' (optional, default: 'primary') [options: 'primary' | 'secondary' | 'ghost']");
   });
 
-  it('extracts layout traps and style tokens from Tailwind CSS classes', async () => {
+  it('keeps structural slots without adding style-token diagnostics', async () => {
     const vueCode = `
 <template>
   <div class="fixed inset-0 z-[999] overflow-hidden flex items-center justify-center">
@@ -118,20 +118,12 @@ const props = withDefaults(defineProps<Props>(), {
 `;
 
     const contract = await extractComponentContract('ModalTrap.vue', vueCode);
-    expect(contract.styleTokens).toBeDefined();
-    expect(contract.styleTokens?.overflow).toContain('overflow-hidden');
-    expect(contract.styleTokens?.overflow).toContain('overflow-y-auto');
-    expect(contract.styleTokens?.zIndices).toContain('z-[999]');
-    expect(contract.styleTokens?.zIndices).toContain('z-50');
-    expect(contract.styleTokens?.positioning).toContain('fixed');
-    expect(contract.styleTokens?.layoutTraps).toContain('overflow-hidden');
-    expect(contract.styleTokens?.layoutTraps).toContain('fixed');
-    expect(contract.styleTokens?.layoutTraps).toContain('z-[999]');
+    expect(contract).not.toHaveProperty('styleTokens');
+    expect(contract.slots).toContain('default');
 
     const formatted = formatContractAsText(contract);
-    expect(formatted).toContain('Layout & Style Tokens (Tailwind/CSS):');
-    expect(formatted).toContain('Layout Traps:');
-    expect(formatted).toContain('Z-Indices:');
+    expect(formatted).not.toContain('Layout & Style Tokens');
+    expect(formatted).toContain('Slots:');
   });
 
   it('audits v-model two-way reactivity bindings in Vue template', async () => {
