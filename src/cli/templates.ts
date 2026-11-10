@@ -209,6 +209,10 @@ case "$FILE_PATH" in
       strata sync "$WORKSPACE_ROOT" --json >/dev/null 2>&1 || true
     elif command -v bun >/dev/null 2>&1 && [ -f "$WORKSPACE_ROOT/node_modules/.bin/strata" ]; then
       "$WORKSPACE_ROOT/node_modules/.bin/strata" sync "$WORKSPACE_ROOT" --json >/dev/null 2>&1 || true
+    elif command -v npx >/dev/null 2>&1; then
+      npx --no-install strata sync "$WORKSPACE_ROOT" --json >/dev/null 2>&1 || true
+    elif command -v bunx >/dev/null 2>&1; then
+      bunx strata sync "$WORKSPACE_ROOT" --json >/dev/null 2>&1 || true
     fi
     ;;
   *)
@@ -312,7 +316,8 @@ export const STRATA_GEMINI_HOOKS = JSON.stringify(
           hooks: [
             {
               type: 'command',
-              command: 'strata sync --json',
+              command:
+                "sh -c 'ROOT=\".\"; if [ ! -f \"$ROOT/.gemini/hooks/strata-post-write.sh\" ] && [ ! -f \"$ROOT/.agents/hooks/strata-post-write.sh\" ]; then ROOT=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\"; fi; if [ -f \"$ROOT/.gemini/hooks/strata-post-write.sh\" ]; then exec \"$ROOT/.gemini/hooks/strata-post-write.sh\" \"$@\"; elif [ -f \"$ROOT/.agents/hooks/strata-post-write.sh\" ]; then exec \"$ROOT/.agents/hooks/strata-post-write.sh\" \"$@\"; else strata sync --json 2>/dev/null || true; fi'",
             },
           ],
         },

@@ -333,7 +333,8 @@ async function configureGeminiHooks(projectRoot: string): Promise<HarnessConfigR
         hooks: [
           {
             type: 'command',
-            command: 'strata sync --json',
+            command:
+              "sh -c 'ROOT=\".\"; if [ ! -f \"$ROOT/.gemini/hooks/strata-post-write.sh\" ] && [ ! -f \"$ROOT/.agents/hooks/strata-post-write.sh\" ]; then ROOT=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\"; fi; if [ -f \"$ROOT/.gemini/hooks/strata-post-write.sh\" ]; then exec \"$ROOT/.gemini/hooks/strata-post-write.sh\" \"$@\"; elif [ -f \"$ROOT/.agents/hooks/strata-post-write.sh\" ]; then exec \"$ROOT/.agents/hooks/strata-post-write.sh\" \"$@\"; else strata sync --json 2>/dev/null || true; fi'",
           },
         ],
       },
@@ -368,9 +369,14 @@ async function configureCodexHooks(projectRoot: string): Promise<HarnessConfigRe
 
   if (!hasStrataHook) {
     postToolHooks.push({
-      type: 'command',
       matcher: 'write|edit|write_file|edit_file|replace_file_content|write_to_file',
-      command: '.codex/hooks/strata-post-write.sh',
+      hooks: [
+        {
+          type: 'command',
+          command:
+            "sh -c 'ROOT=\".\"; if [ ! -f \"$ROOT/.codex/hooks/strata-post-write.sh\" ] && [ ! -f \"$ROOT/.agents/hooks/strata-post-write.sh\" ]; then ROOT=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\"; fi; if [ -f \"$ROOT/.codex/hooks/strata-post-write.sh\" ]; then exec \"$ROOT/.codex/hooks/strata-post-write.sh\" \"$@\"; elif [ -f \"$ROOT/.agents/hooks/strata-post-write.sh\" ]; then exec \"$ROOT/.agents/hooks/strata-post-write.sh\" \"$@\"; fi'",
+        },
+      ],
     });
     hooks.PostToolUse = postToolHooks;
     config.hooks = hooks;
@@ -403,8 +409,9 @@ async function configureOpenCodeHooks(projectRoot: string): Promise<HarnessConfi
   if (!hasStrataHook) {
     hooks.push({
       event: 'post_tool_use',
-      matcher: 'write|edit|replace_file_content|write_to_file',
-      command: 'opencode/hooks/strata-post-write.sh',
+      matcher: 'write|edit|write_file|edit_file|replace_file_content|write_to_file',
+      command:
+        "sh -c 'ROOT=\".\"; if [ ! -f \"$ROOT/opencode/hooks/strata-post-write.sh\" ] && [ ! -f \"$ROOT/.agents/hooks/strata-post-write.sh\" ]; then ROOT=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\"; fi; if [ -f \"$ROOT/opencode/hooks/strata-post-write.sh\" ]; then exec \"$ROOT/opencode/hooks/strata-post-write.sh\" \"$@\"; elif [ -f \"$ROOT/.agents/hooks/strata-post-write.sh\" ]; then exec \"$ROOT/.agents/hooks/strata-post-write.sh\" \"$@\"; fi'",
     });
     config.hooks = hooks;
     await fs.writeFile(hooksPath, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
@@ -437,7 +444,8 @@ async function configureAgentsHooks(projectRoot: string): Promise<HarnessConfigR
     hooks.push({
       event: 'post_tool_use',
       matcher: 'write|edit|write_file|edit_file|replace_file_content|write_to_file',
-      command: '.agents/hooks/strata-post-write.sh',
+      command:
+        "sh -c 'ROOT=\".\"; if [ ! -f \"$ROOT/.agents/hooks/strata-post-write.sh\" ]; then ROOT=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\"; fi; if [ -f \"$ROOT/.agents/hooks/strata-post-write.sh\" ]; then exec \"$ROOT/.agents/hooks/strata-post-write.sh\" \"$@\"; fi'",
     });
     config.hooks = hooks;
     await fs.writeFile(hooksPath, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
