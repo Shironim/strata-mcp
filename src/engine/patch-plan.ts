@@ -758,7 +758,7 @@ export async function generatePatchPlan(options: PatchPlanOptions): Promise<Patc
     direction: 'upward',
     targetPath: projectRoot,
     maxDepth: 1,
-    limit: 20,
+    limit: 1000,
   });
 
   const consumerFiles = new Set<string>();
@@ -792,7 +792,12 @@ export async function generatePatchPlan(options: PatchPlanOptions): Promise<Patc
         coverage.unsupportedCount++;
         coverage.candidateCount++;
         coverage.diagnostics.push({ file: d.filePath, code: d.code, message: d.reason });
-      } else if (d.code === 'MAX_DEPTH_REACHED' || d.code === 'SCOPE_BOUNDARY' || d.code === 'CYCLE_TRUNCATED') {
+      } else if (
+        d.code === 'MAX_DEPTH_REACHED' ||
+        d.code === 'SCOPE_BOUNDARY' ||
+        d.code === 'CYCLE_TRUNCATED' ||
+        d.code === 'UPWARD_RESULTS_TRUNCATED'
+      ) {
         coverage.diagnostics.push({ file: d.filePath, code: d.code, message: d.reason });
       }
     }

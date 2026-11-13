@@ -240,4 +240,37 @@ export function Page() {
     expect(res.content[0].text).toBe('Component file not found: /home/shironim/Project/toko-km/resources/js/Pages/NonExistent.vue');
     expect(res.content[0].text).not.toContain('/home/shironim/Project/toko-km/home/shironim/Project/toko-km');
   });
+
+  it('audits more than 20 upward consumers without truncating at the default tree limit of 20', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'strata-patch-many-consumers-'));
+    try {
+      const btnPath = join(root, 'BaseButton.vue');
+      await writeFile(
+        btnPath,
+        '<script setup lang="ts">\ndefineProps<{ oldProp?: string }>();\n</script>\n<template><button>{{ oldProp }}</button></template>'
+      );
+
+      const consumerCount = 25;
+      for (let i = 1; i <= consumerCount; i++) {
+        const consumerPath = join(root, `Consumer${String(i).padStart(2, '0')}.vue`);
+        await writeFile(
+          consumerPath,
+          `<script setup lang="ts">\nimport BaseButton from './BaseButton.vue';\n</script>\n<template><BaseButton oldProp="val-${i}" /></template>`
+        );
+      }
+
+      const result = await generatePatchPlan({
+        componentPath: btnPath,
+        refactorType: 'rename_prop',
+        oldName: 'oldProp',
+        newName: 'newProp',
+        targetPath: root,
+      });
+
+      expect(result.totalConsumersAudited).toBe(consumerCount);
+      expect(result.totalPatches).toBe(consumerCount);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });
