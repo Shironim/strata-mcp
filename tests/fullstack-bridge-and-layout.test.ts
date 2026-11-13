@@ -38,6 +38,18 @@ describe('Fullstack Vertical Slice Target Hinting', () => {
     expect(ziggyHint.targetIntent).toBe('POST orders.store');
     expect(ziggyHint.suggestedSymbols).toContain('OrderController');
     expect(ziggyHint.suggestedSymbols).toContain('OrderController@store');
+    expect(ziggyHint.suggestedSymbols).toContain('OrderHandler');
+
+    const kebabZiggy = synthesizeBackendTargetHint('POST', "route('order-items.store')");
+    expect(kebabZiggy.suggestedSymbols).toContain('OrderItemController');
+    expect(kebabZiggy.suggestedSymbols).toContain('OrderItemController@store');
+    expect(kebabZiggy.suggestedSymbols).toContain('OrderItemHandler');
+
+    const nestedAction = synthesizeBackendTargetHint('POST', '/api/v1/orders/:id/approve');
+    expect(nestedAction.suggestedSymbols).toContain('OrderController');
+    expect(nestedAction.suggestedSymbols).toContain('OrderController@approve');
+    expect(nestedAction.suggestedSymbols).toContain('OrderService');
+    expect(nestedAction.suggestedSymbols).toContain('OrderHandler');
   });
 
   it('attaches backendTargetHint during extractApiContractsFromCode', () => {

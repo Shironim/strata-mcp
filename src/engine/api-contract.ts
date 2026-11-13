@@ -26,6 +26,15 @@ function capitalize(str: string): string {
   return str.charAt(0).toUpperCase() + str.slice(1);
 }
 
+function toPascalCase(str: string): string {
+  if (!str) return '';
+  return str
+    .split(/[-_.\s]+/)
+    .filter(Boolean)
+    .map((part) => capitalize(part))
+    .join('');
+}
+
 function singularize(word: string): string {
   if (!word) return '';
   const lower = word.toLowerCase();
@@ -81,18 +90,32 @@ export function synthesizeBackendTargetHint(
     const resource = parts[0];
     const action = parts[parts.length - 1];
     const entityName = capitalize(singularize(resource));
+    const pascalEntity = toPascalCase(singularize(resource));
     const targetIntent = `${normMethod} ${namedRoute}`;
+
+    const suggestedSymbols = Array.from(
+      new Set([
+        `${entityName}Controller`,
+        `${entityName}Controller@${action}`,
+        `${entityName}Action`,
+        `${entityName}Service`,
+        ...(pascalEntity && pascalEntity !== entityName
+          ? [
+              `${pascalEntity}Controller`,
+              `${pascalEntity}Controller@${action}`,
+              `${pascalEntity}Action`,
+              `${pascalEntity}Service`,
+            ]
+          : []),
+        `${pascalEntity || entityName}Handler`,
+      ])
+    );
 
     return {
       targetIntent,
       routePattern: namedRoute,
       namedRoute,
-      suggestedSymbols: [
-        `${entityName}Controller`,
-        `${entityName}Controller@${action}`,
-        `${entityName}Action`,
-        `${entityName}Service`,
-      ],
+      suggestedSymbols,
       isHeuristic: true,
       disclaimer: 'Pure Naming Convention Heuristic; verify actual route mapping in routes/web.php or routes/api.php',
     };
@@ -118,6 +141,7 @@ export function synthesizeBackendTargetHint(
     segments[segments.length - 1]?.startsWith('{');
 
   const entityName = capitalize(singularize(lastResource));
+  const pascalEntity = toPascalCase(singularize(lastResource));
 
   // Determine standard REST action from HTTP method & path shape
   let suggestedAction = 'handle';
@@ -135,6 +159,14 @@ export function synthesizeBackendTargetHint(
     'cancel',
     'process',
     'sync',
+    'approve',
+    'reject',
+    'activate',
+    'deactivate',
+    'archive',
+    'restore',
+    'publish',
+    'submit',
   ];
 
   if (knownActionVerbs.includes(lowerResource)) {
@@ -149,12 +181,39 @@ export function synthesizeBackendTargetHint(
     suggestedAction = 'destroy';
   }
 
-  const suggestedSymbols = [
-    `${entityName}Controller`,
-    `${entityName}Controller@${suggestedAction}`,
-    `${entityName}Action`,
-    `${entityName}Service`,
-  ];
+  // If the trailing segment is an action verb preceded by a parent resource (e.g. /api/orders/:id/approve),
+  // include parent resource controller/service/handler symbols alongside the primary symbols.
+  const parentResource =
+    knownActionVerbs.includes(lowerResource) && resourceSegments.length >= 2
+      ? resourceSegments[resourceSegments.length - 2]
+      : undefined;
+  const parentPascal = parentResource ? toPascalCase(singularize(parentResource)) : undefined;
+
+  const suggestedSymbols = Array.from(
+    new Set([
+      `${entityName}Controller`,
+      `${entityName}Controller@${suggestedAction}`,
+      `${entityName}Action`,
+      `${entityName}Service`,
+      ...(pascalEntity && pascalEntity !== entityName
+        ? [
+            `${pascalEntity}Controller`,
+            `${pascalEntity}Controller@${suggestedAction}`,
+            `${pascalEntity}Action`,
+            `${pascalEntity}Service`,
+          ]
+        : []),
+      ...(parentPascal && parentPascal !== pascalEntity
+        ? [
+            `${parentPascal}Controller`,
+            `${parentPascal}Controller@${suggestedAction}`,
+            `${parentPascal}Service`,
+            `${parentPascal}Handler`,
+          ]
+        : []),
+      `${pascalEntity || entityName}Handler`,
+    ])
+  );
 
   const targetIntent = `${normMethod} ${cleanPath || trimmedEndpoint}`;
 
