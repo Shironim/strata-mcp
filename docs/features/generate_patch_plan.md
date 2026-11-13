@@ -2,7 +2,7 @@
 
 **Status:** Single Source of Truth (SSOT)  
 **Feature Owner:** Tool Call `generate_patch_plan` (`src/tools/patch-plan.ts`)  
-**Last Updated:** 2026-11-11  
+**Last Updated:** 2026-11-13
 
 ---
 
@@ -51,7 +51,7 @@ Before generating patches, Strata inspects the target component:
 * Verifies whether `old_name` is explicitly declared on the component. If missing, the operation is rejected early with clear diagnostic messaging.
 
 ### B. Upward Consumer Traversal
-Utilizes the upward component tree algorithm to discover all consumer files importing and rendering the target component.
+Utilizes the upward component tree algorithm (`maxDepth: 1`, `limit: 1000`) to discover all direct consumer files (`.vue`, `.tsx`, `.jsx`, `.astro`, `.svelte`) importing and rendering the target component, forwarding `UPWARD_RESULTS_TRUNCATED` into `coverage.diagnostics` if a component exceeds 1,000 direct consumers.
 
 ### C. Precise Offset & Snippet Slicing
 * **Props (`rename_prop` / `remove_prop`):** Matches static attributes (`is-active="true"`), dynamic bindings (`:is-active="val"`), and kebab/camel-case (`:isActive="val"`). Computes replacement characters and cleans up whitespace when removing.

@@ -2,7 +2,7 @@
 
 **Status:** Single Source of Truth (SSOT)  
 **Feature Owner:** Tool Call `audit_frontend` (`src/tools/audit-frontend.ts`)  
-**Last Updated:** 2026-11-11  
+**Last Updated:** 2026-11-13
 
 ---
 
@@ -54,10 +54,13 @@ Understanding the macro architecture of a frontend application is often challeng
   * Inertia.js (`useForm`, `router.post`)
   * Nuxt `$fetch` / `useFetch`
 * Extracts HTTP methods, URL endpoints, form payload fields, and caller file/line coordinates.
-* **`backendTargetHint` Synthesis:** Translates REST endpoints or Ziggy named routes into backend controller symbols (e.g., `POST /api/v1/cadets` &rarr; `CadetController@store`).
+* **`backendTargetHint` Synthesis:** Translates REST endpoints or Ziggy named routes into backend controller, action, service, and handler symbols:
+  * Standard REST: `POST /api/v1/cadets` &rarr; `CadetController`, `CadetController@store`, `CadetAction`, `CadetService`, `CadetHandler`.
+  * Kebab/Snake-Case Normalization: `/barang-masuk` or `route('order-items.store')` &rarr; includes PascalCase candidates (`BarangMasukController`, `OrderItemController@store`, `OrderItemHandler`).
+  * Nested Resource Actions: `POST /api/v1/orders/:id/approve` &rarr; includes parent resource candidates (`OrderController`, `OrderController@approve`, `OrderService`, `OrderHandler`).
 
 ### C. Dead Components (`target: "dead-components"`)
-* Detects UI components that are never imported or rendered anywhere across the workspace.
+* Detects UI components (`.vue`, `.astro`, `.svelte`, `.tsx`, `.jsx`) that are never imported or rendered anywhere across the workspace.
 
 ### D. Dead State (`target: "dead-state"`)
 * Detects stores (Pinia/Zustand), Contexts, or Composables that have no active consumers (*neither readers nor mutators*).

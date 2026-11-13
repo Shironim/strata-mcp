@@ -2,7 +2,7 @@
 
 **Status:** Single Source of Truth (SSOT)  
 **Feature Owner:** Tool Call `get_component_tree` (`src/tools/component-tree.ts`)  
-**Last Updated:** 2026-11-11  
+**Last Updated:** 2026-11-13
 
 ---
 
@@ -59,7 +59,7 @@ When provided with a URL route:
 4. **Props Drilling Detection:**
    Tracks the chain of prop forwarding. If a prop is passed across $\ge 2$ intermediate layers without being utilized locally, Strata issues a **`PropsDrillingAlert`** complete with recommendations to introduce a store or provide/inject.
 5. **Context Integrity & Dangling Context:**
-   Tracks `provide` and `inject` (Vue) or `<Context.Provider>` and `useContext` (React). Issues warnings if a child component calls `inject('key')` but no ancestor in the tree provides it.
+   Tracks `provide` and `inject` (Vue), `setContext` and `getContext` (Svelte), or `<Context.Provider>` and `useContext` (React). Issues warnings if a child component consumes a context key that no ancestor in the tree provides.
 6. **Cycle Detection (`CYCLE_TRUNCATED`):**
    Prevents recursive loops (e.g., `TreeMenu.vue` rendering itself). Recursive nodes are flagged with `isCircular: true` and depth recursion halts.
 

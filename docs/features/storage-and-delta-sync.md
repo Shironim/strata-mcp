@@ -2,7 +2,7 @@
 
 **Status:** Single Source of Truth (SSOT)  
 **Feature Owner:** Storage & Synchronization Engine (`src/engine/storage/`)  
-**Last Updated:** 2026-11-11  
+**Last Updated:** 2026-11-13
 
 ---
 
@@ -23,7 +23,7 @@ Medium to large frontend applications can easily span hundreds or thousands of c
 The database is initialized automatically during `strata init`:
 * File location: `<workspace_root>/.strata/graph.db`
 * Isolated from Git: The `.strata` directory is automatically scaffolded with a `.gitignore` containing `*`.
-* **High-Performance PRAGMAs:**
+* **High-Performance PRAGMAs & Schema Fast-Path:**
   ```sql
   PRAGMA journal_mode = WAL;
   PRAGMA synchronous = NORMAL;
@@ -31,7 +31,10 @@ The database is initialized automatically during `strata init`:
   PRAGMA busy_timeout = 15000;
   PRAGMA cache_size = -8192;
   PRAGMA temp_store = FILE;
+  PRAGMA user_version = 2;
   ```
+  * **Warm Connection Fast-Path (`SCHEMA_USER_VERSION = 2`):** On subsequent connection opens, `initSchema` checks `PRAGMA user_version` and verifies the 7 core tables in `sqlite_master`. When already initialized, it skips redundant `CREATE TABLE`, `CREATE INDEX`, and `ALTER TABLE` statements, eliminating DDL overhead across isolated worker calls.
+  * **Supported Indexed Extensions:** `.vue`, `.astro`, `.svelte`, `.tsx`, `.jsx`, `.ts`, `.js`.
 
 ---
 
