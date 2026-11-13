@@ -61,6 +61,7 @@ export async function extractComponentOutline(
   if (ext === '.vue') framework = 'vue';
   else if (ext === '.tsx' || ext === '.jsx') framework = 'react';
   else if (ext === '.astro') framework = 'astro';
+  else if (ext === '.svelte') framework = 'svelte';
   else if (ext === '.ts' || ext === '.js') framework = 'ts-module';
 
   const functions: FunctionOutlineItem[] = [];

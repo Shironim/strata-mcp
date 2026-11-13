@@ -346,7 +346,7 @@ inputSchema: {
       },
       framework: {
         type: 'string',
-        enum: ['next-app', 'next-pages', 'nuxt', 'astro', 'inertia', 'vue-router', 'unknown'],
+        enum: ['next-app', 'next-pages', 'nuxt', 'astro', 'sveltekit', 'inertia', 'vue-router', 'unknown'],
         description: 'Optional framework hint for route scanner',
       },
       ignore_patterns: {

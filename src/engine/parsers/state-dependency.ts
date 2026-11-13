@@ -25,7 +25,10 @@ export function extractStateDependencies(
   const markup = /^\s*<(?:template|script)\b/.test(content);
   const astro = /^\s*---/.test(content);
   const leading = astro ? content.length - content.trimStart().length : 0;
-  const adapter = createDocumentAdapter(astro ? 'file.astro' : markup ? 'file.vue' : 'file.tsx', content.slice(leading));
+  const adapter = createDocumentAdapter(
+    astro ? 'file.astro' : _framework === 'svelte' ? 'file.svelte' : markup ? 'file.vue' : 'file.tsx',
+    content.slice(leading)
+  );
   const blocks = adapter.getScriptBlocks().map(b => ({ code: b.content, offset: leading + b.loc.start.offset }));
   if (astro && !blocks.length) {
     const match = content.match(/^\s*---[^\S\r\n]*\r?\n([\s\S]*?)\r?\n[ \t]*---/);
@@ -83,7 +86,7 @@ export function extractStateDependencies(
           const arg = node.arguments[0];
           if (name === 'useStore' && arg && ts.isIdentifier(arg)) stores.add(arg.text);
           else if (name === 'useState' && arg && (ts.isIdentifier(arg) || ts.isStringLiteralLike(arg))) stores.add(arg.text);
-          else if ((name === 'useContext' || name === 'inject') && arg && (ts.isIdentifier(arg) || ts.isStringLiteralLike(arg))) contexts.add(arg.text);
+          else if ((name === 'useContext' || name === 'inject' || name === 'getContext' || name === 'setContext') && arg && (ts.isIdentifier(arg) || ts.isStringLiteralLike(arg))) contexts.add(arg.text);
           else if (name === 'use' && arg && (ts.isIdentifier(arg) || ts.isPropertyAccessExpression(arg))) {
             const argText = arg.getText(sf);
             if (/Context$/.test(argText) || /^[A-Z]/.test(argText)) contexts.add(argText);

@@ -128,7 +128,7 @@ export async function findUnusedComponents(
 
   for (const file of allFiles) {
     const ext = extname(file).toLowerCase();
-    if (!['.vue', '.astro', '.tsx', '.jsx'].includes(ext)) continue;
+    if (!['.vue', '.astro', '.svelte', '.tsx', '.jsx'].includes(ext)) continue;
     if (absScope) {
       const rel = relative(absScope, file);
       if (rel.startsWith('..') || isAbsolute(rel)) continue;

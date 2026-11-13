@@ -435,7 +435,7 @@ function buildAliasConfigFromResolvedHierarchy(hierarchy: TsConfigHierarchyResul
               try { if (statSync(source).isFile()) return source; } catch {}
             }
           }
-          if (['', '.vue', '.tsx', '.jsx', '.astro', '.ts', '.js', '/index.vue', '/index.tsx', '/index.jsx', '/index.astro', '/index.ts', '/index.js']
+          if (['', '.vue', '.tsx', '.jsx', '.astro', '.svelte', '.ts', '.js', '/index.vue', '/index.tsx', '/index.jsx', '/index.astro', '/index.svelte', '/index.ts', '/index.js']
             .some(suffix => {
               try { return statSync(candidate + suffix).isFile(); } catch { return false; }
             })) return candidate;

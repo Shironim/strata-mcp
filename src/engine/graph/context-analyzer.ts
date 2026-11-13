@@ -1,7 +1,8 @@
-import { basename } from "node:path";
+import { basename, extname } from "node:path";
 import { parse as parseDom, NodeTypes, type ElementNode } from "@vue/compiler-dom";
 import ts from "typescript";
 import { parseSfc } from "../splitter";
+import { parseSvelte } from "../svelte-sfc";
 import type { ContextDependencyNode } from "../../types";
 import { walkVueDom } from "./ast-helpers";
 import { reactBindings } from '../parsers/react-bindings';
@@ -45,8 +46,27 @@ export function extractComponentContextNodes(
   // 1. Process script blocks using TypeScript AST
   const scriptBlocks: Array<{ code: string; lineOffset: number }> = [];
   let templateBlock: { code: string; lineOffset: number } | null = null;
+  const ext = extname(filePath).toLowerCase();
 
-  if (content.includes('<template') || content.includes('<script')) {
+  if (ext === '.svelte') {
+    try {
+      const svelte = parseSvelte(content, basename(filePath));
+      if (svelte.module) {
+        scriptBlocks.push({
+          code: svelte.module.content,
+          lineOffset: svelte.module.loc.start.line - 1,
+        });
+      }
+      if (svelte.instance) {
+        scriptBlocks.push({
+          code: svelte.instance.content,
+          lineOffset: svelte.instance.loc.start.line - 1,
+        });
+      }
+    } catch {
+      scriptBlocks.push({ code: content, lineOffset: 0 });
+    }
+  } else if (content.includes('<template') || content.includes('<script')) {
     try {
       const sfc = parseSfc(content, basename(filePath));
       if (sfc.scriptSetup) {
@@ -98,13 +118,13 @@ export function extractComponentContextNodes(
 
           if (ts.isIdentifier(node.expression)) {
             const fn = node.expression.text;
-            if (fn === 'provide') isProvide = true;
-            else if (fn === 'inject') isInject = true;
+            if (fn === 'provide' || fn === 'setContext') isProvide = true;
+            else if (fn === 'inject' || fn === 'getContext') isInject = true;
             else if (fn === 'useContext' && !bindings.binding(node.expression)) isUseContext = true;
           } else if (ts.isPropertyAccessExpression(node.expression)) {
             const fn = node.expression.name.text;
-            if (fn === 'provide') isProvide = true;
-            else if (fn === 'inject') isInject = true;
+            if (fn === 'provide' || fn === 'setContext') isProvide = true;
+            else if (fn === 'inject' || fn === 'getContext') isInject = true;
           }
 
           const { line } = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));

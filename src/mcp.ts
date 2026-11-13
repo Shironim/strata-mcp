@@ -40,7 +40,7 @@ export function coerceToolArguments(toolName: string, rawArgs: any): Record<stri
         if (
           trimmed.startsWith('.') ||
           trimmed.startsWith('/') ||
-          /\.(vue|tsx|jsx|astro|ts|js)$/i.test(trimmed)
+          /\.(vue|tsx|jsx|svelte|astro|ts|js)$/i.test(trimmed)
         ) {
           return { path: trimmed };
         }

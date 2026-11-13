@@ -8,6 +8,10 @@ import { mapSourceFile } from '../../src/engine/source-map';
 import { extractSvelteContract } from '../../src/engine/parsers/contract-svelte';
 import { scanRoutes } from '../../src/engine/routes';
 import { readSourceRef, readSourceSnapshot } from '../../src/engine/source-file';
+import { closeAllDatabases, getWorkspaceDatabase, syncWorkspace, queryStateImpact } from '../../src/engine/database';
+import { extractComponentOutline } from '../../src/engine/outline';
+import { extractComponentContextNodes } from '../../src/engine/graph/context-analyzer';
+import { findUnusedComponents } from '../../src/engine/audit';
 
 describe('06 - Svelte Framework: Svelte 5 Runes, SFC Parsing, Contracts & Canonical Rules', () => {
   // =========================================================================
@@ -320,6 +324,87 @@ export async function POST() { return new Response('Created'); }`
       expect(api!.handlers).toContain('POST');
 
       await fs.rm(tempDir, { recursive: true, force: true });
+    });
+  });
+
+  // =========================================================================
+  // 7. Svelte SQLite Graph Sync, Outline, Context, & Unused Audit (SV07)
+  // =========================================================================
+  describe('SV07: Svelte SQLite Graph Indexing, Context, Outline & Unused Audit', () => {
+    test('indexes .svelte components, edges, state dependencies, and routes in SQLite graph.db', async () => {
+      const tempDir = await fs.mkdtemp(join(tmpdir(), 'strata-svelte-db-'));
+      try {
+        await fs.writeFile(join(tempDir, 'package.json'), JSON.stringify({ dependencies: { svelte: '^5.0.0' } }));
+        const compDir = join(tempDir, 'src', 'components');
+        const routesDir = join(tempDir, 'src', 'routes');
+        await fs.mkdir(compDir, { recursive: true });
+        await fs.mkdir(routesDir, { recursive: true });
+
+        const buttonPath = join(compDir, 'ActionButton.svelte');
+        const unusedPath = join(compDir, 'UnusedWidget.svelte');
+        const pagePath = join(routesDir, '+page.svelte');
+
+        await fs.writeFile(
+          buttonPath,
+          `<script lang="ts">
+  import { getContext } from 'svelte';
+  let { label = 'Click' }: { label?: string } = $props();
+  const theme = getContext('theme');
+  export function triggerAction() { return label; }
+</script>
+<button>{label}</button>`
+        );
+
+        await fs.writeFile(
+          unusedPath,
+          `<script lang="ts">let { title = 'Unused' } = $props();</script><div>{title}</div>`
+        );
+
+        await fs.writeFile(
+          pagePath,
+          `<script lang="ts">
+  import { setContext } from 'svelte';
+  import ActionButton from '../components/ActionButton.svelte';
+  import { useCartStore } from '../stores/useCartStore';
+  setContext('theme', 'dark');
+  const cartStore = useCartStore();
+  cartStore.addItem('sku-1');
+</script>
+<ActionButton label="Buy" />`
+        );
+
+        const db = getWorkspaceDatabase(tempDir, { create: true });
+        const stats = await syncWorkspace(tempDir);
+        expect(stats.total).toBe(3);
+        expect(stats.added).toBe(3);
+
+        const files = db.query('SELECT path, framework FROM files ORDER BY path').all() as Array<{ path: string; framework: string }>;
+        expect(files).toHaveLength(3);
+        expect(files.every((f) => f.framework === 'svelte')).toBe(true);
+
+        const edges = db.query('SELECT count(*) as c FROM edges WHERE is_rendered = 1').get() as { c: number };
+        expect(edges.c).toBe(1);
+
+        const stateImpact = await queryStateImpact(tempDir, 'useCartStore');
+        expect(stateImpact.totalConsumers).toBe(1);
+        expect(stateImpact.mutatorsCount).toBe(1);
+
+        const outline = await extractComponentOutline(buttonPath, { path: buttonPath, workspaceRoot: tempDir });
+        expect(outline.framework).toBe('svelte');
+        expect(outline.functions.some((fn) => fn.name === 'triggerAction')).toBe(true);
+
+        const pageCtx = extractComponentContextNodes(pagePath, await fs.readFile(pagePath, 'utf8'));
+        const btnCtx = extractComponentContextNodes(buttonPath, await fs.readFile(buttonPath, 'utf8'));
+        expect(pageCtx.providers.some((p) => p.key === 'theme')).toBe(true);
+        expect(btnCtx.consumers.some((c) => c.key === 'theme')).toBe(true);
+
+        const unusedAudit = await findUnusedComponents({ targetPath: tempDir });
+        expect(unusedAudit.unusedComponents.some((u) => u.name === 'UnusedWidget')).toBe(true);
+        expect(unusedAudit.unusedComponents.some((u) => u.name === 'ActionButton')).toBe(false);
+      } finally {
+        closeAllDatabases();
+        await fs.rm(tempDir, { recursive: true, force: true });
+      }
     });
   });
 });

@@ -104,7 +104,7 @@ export async function batchParser(
             potentialTarget = aliasConfig.resolve(imp.source);
           }
           if (potentialTarget) {
-            const candidateExtensions = ['', '.vue', '.tsx', '.jsx', '.ts', '.js'];
+            const candidateExtensions = ['', '.vue', '.tsx', '.jsx', '.astro', '.svelte', '.ts', '.js'];
             for (const ext of candidateExtensions) {
               const cand = canonicalizePath(potentialTarget + ext);
               if (!fileDependencies.some(d => d.path === cand)) {
