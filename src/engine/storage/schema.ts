@@ -3,7 +3,8 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { canonicalizePath } from '../path-resolver';
 
-export const SUPPORTED_EXTENSIONS = new Set(['.vue', '.astro', '.tsx', '.jsx', '.ts', '.js']);
+export const SUPPORTED_EXTENSIONS = new Set(['.vue', '.astro', '.svelte', '.tsx', '.jsx', '.ts', '.js']);
+export const SCHEMA_USER_VERSION = 2;
 
 /**
  * Checks if a file path represents a layout file.
@@ -125,8 +126,23 @@ export function closeAllDatabases(): void {
 
 /**
  * Initializes table schemas and indexes if they do not exist.
+ * Uses PRAGMA user_version to fast-path warm connection opens without repeating DDL/ALTER statements.
  */
 export function initSchema(db: Database): void {
+  const userVersion = (db.query('PRAGMA user_version;').get() as { user_version: number } | null)?.user_version ?? 0;
+  if (userVersion === SCHEMA_USER_VERSION) {
+    const coreTables = (
+      db
+        .query(
+          "SELECT count(*) AS c FROM sqlite_master WHERE type = 'table' AND name IN ('meta', 'files', 'components', 'edges', 'state_deps', 'routes', 'file_dependencies')"
+        )
+        .get() as { c: number } | null
+    )?.c ?? 0;
+    if (coreTables === 7) {
+      return;
+    }
+  }
+
   db.run(`
     CREATE TABLE IF NOT EXISTS meta (
       key TEXT PRIMARY KEY,
@@ -139,6 +155,7 @@ export function initSchema(db: Database): void {
       framework TEXT NOT NULL,
       mtime INTEGER NOT NULL,
       size INTEGER NOT NULL,
+      content_hash TEXT,
       is_page INTEGER DEFAULT 0,
       is_layout INTEGER DEFAULT 0,
       render_boundary TEXT,
@@ -194,9 +211,19 @@ export function initSchema(db: Database): void {
   `);
 
   // Auto-migration: ensure existing databases get new columns before indexing
+  const tableColumnsCache = new Map<string, Set<string>>();
   function addColumnIfNotExists(table: string, columnDef: string): void {
+    const colName = columnDef.trim().split(/\s+/)[0];
+    let cols = tableColumnsCache.get(table);
+    if (!cols) {
+      const info = db.query(`PRAGMA table_info(${table});`).all() as Array<{ name: string }>;
+      cols = new Set(info.map((c) => c.name));
+      tableColumnsCache.set(table, cols);
+    }
+    if (cols.has(colName)) return;
     try {
       db.run(`ALTER TABLE ${table} ADD COLUMN ${columnDef};`);
+      cols.add(colName);
     } catch {
       // column already exists
     }
@@ -231,5 +258,6 @@ export function initSchema(db: Database): void {
     CREATE INDEX IF NOT EXISTS idx_state_deps_ident_mode ON state_deps(identifier, access_mode);
     CREATE INDEX IF NOT EXISTS idx_routes_file ON routes(file_id);
     CREATE INDEX IF NOT EXISTS idx_file_deps_dep_path ON file_dependencies(dependency_path);
+    PRAGMA user_version = ${SCHEMA_USER_VERSION};
   `);
 }

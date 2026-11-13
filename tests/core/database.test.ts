@@ -128,4 +128,27 @@ describe('Persistent SQLite Codebase Graph Cache Engine (bun:sqlite)', () => {
     expect(isLayoutFile('src/components/GridLayoutIcon.vue')).toBe(false);
     expect(isLayoutFile('src/stores/useLayoutStore.ts')).toBe(false);
   });
+
+  it('sets PRAGMA user_version = SCHEMA_USER_VERSION and skips redundant DDL on warm open', async () => {
+    const { SCHEMA_USER_VERSION, initSchema } = await import('../../src/engine/storage/schema');
+    const db = getWorkspaceDatabase(FIXTURES_DIR);
+    const uv = db.query('PRAGMA user_version;').get() as { user_version: number };
+    expect(uv.user_version).toBe(SCHEMA_USER_VERSION);
+
+    // Calling initSchema again on an already-initialized DB should fast-path without running CREATE/ALTER DDL
+    let ddlExecuted = false;
+    const origRun = db.run.bind(db);
+    db.run = ((sql: string, ...args: any[]) => {
+      if (sql.includes('CREATE TABLE') || sql.includes('ALTER TABLE')) {
+        ddlExecuted = true;
+      }
+      return origRun(sql, ...args);
+    }) as typeof db.run;
+    try {
+      initSchema(db);
+      expect(ddlExecuted).toBe(false);
+    } finally {
+      db.run = origRun;
+    }
+  });
 });
