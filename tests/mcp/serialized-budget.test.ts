@@ -129,7 +129,7 @@ test('malformed continuation offsets cannot create non-progressing pages', () =>
 test('non-integer budgets reject before running the analyzer', async () => {
   let calls = 0;
   const tool = withRetrievalEvidence({ name: 'find_code', description: '', inputSchema: { type: 'object' }, handler: async () => { calls++; return { content: [] }; } });
-  for (const max_bytes of [NaN, Infinity, 512.5, '512', Number.MAX_SAFE_INTEGER + 1]) {
+  for (const max_bytes of [null, NaN, Infinity, 512.5, '512', Number.MAX_SAFE_INTEGER + 1]) {
     expect((await tool.handler({ max_bytes })).isError).toBe(true);
   }
   expect(calls).toBe(0);
@@ -258,4 +258,50 @@ test('paginated inspect_component outline preserves Markdown formatting across c
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test('text transport budget ignores omitted structuredContent and deduplicates omissions', async () => {
+  const bigRegions = Array.from({ length: 80 }, (_, i) => ({
+    id: `region-${i}`,
+    kind: 'function',
+    name: `fn_${i}`,
+    padding: 'x'.repeat(250),
+  }));
+  const tool = withRetrievalEvidence({
+    name: 'inspect_component',
+    description: '',
+    inputSchema: { type: 'object' },
+    handler: async () => ({
+      content: [{ type: 'text', text: '# Source Map\nSmall 2.7KB-style text summary.' }],
+      structuredContent: {
+        regions: bigRegions,
+        retrieval: {
+          version: 1,
+          workspace: '/fixture',
+          scope: '/fixture/App.vue',
+          queryId: 'q1',
+          retrievalId: 'r1',
+          policy: 'file-map-v1',
+          engineRevision: 'rev',
+          index: null,
+          config: { applicability: 'not-used', reason: 'test' },
+          freshness: 'current',
+          freshnessBoundary: 'source-rechecked-after-selection',
+          completeness: 'partial',
+          basis: 'source',
+          selectionReason: 'test',
+          omissions: [
+            { code: 'MAX_DEPTH_REACHED', reason: 'depth 3' },
+            { code: 'MAX_DEPTH_REACHED', reason: 'depth 3' },
+          ],
+          limitations: [],
+        },
+      },
+    }),
+  });
+  const res = await tool.handler({ path: '/fixture/App.vue', view: 'map', format: 'text', max_bytes: 16384, _omitStructuredForText: true });
+  expect(res.isError).not.toBe(true);
+  expect(res.content[0]!.text).toContain('# Source Map');
+  const retrieval = (res.structuredContent as any).retrieval;
+  expect(retrieval.omissions).toHaveLength(1);
 });

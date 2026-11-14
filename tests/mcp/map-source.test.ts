@@ -123,7 +123,8 @@ test('find_code action map includes src/tools and reports excluded directories i
   const res = await findCodeTool.handler({ path: root, action: 'map', format: 'text' });
   expect(res.isError).not.toBe(true);
   const text = res.content[0].text;
-  expect(text).toContain(join(root, 'src', 'tools', 'network.ts'));
+  expect(text).toContain(`Frontend map: ${root}`);
+  expect(text).toContain('- src/tools/network.ts');
   expect(text).toContain('Status: complete (excluding 1 directory); 2/2 files returned');
   expect(text).toContain('Excluded directories: scripts (default-ignore)');
 });

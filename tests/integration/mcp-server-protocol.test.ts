@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test';
 import { join } from 'node:path';
 
 test('MCP server loaded runtime - JSON-RPC protocol handshake, tool enumeration and execution', async () => {
-  const mcpEntrypoint = join(import.meta.dir, '../../src/mcp.ts');
+  const mcpEntrypoint = process.env.STRATA_MCP_ENTRYPOINT || join(import.meta.dir, '../../src/mcp.ts');
   const fixturesDir = join(import.meta.dir, '../fixtures');
 
   // Spawn actual MCP server process communicating via stdio pipes
