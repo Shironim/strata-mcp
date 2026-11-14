@@ -5,6 +5,11 @@ import { getCandidateNames, toKebabCase } from './template';
 import { detectFramework } from './contract';
 import { escapeRegExp } from './patterns';
 import { renderedComponentKeys } from './graph/downward-traversal';
+import { extractLocalImports, resolveImportPath, resolveBarrelExport } from './graph/path-helpers';
+import { loadAliasConfig } from './resolver';
+import ts from 'typescript';
+import { parseTypeScript } from './source-parser';
+import { reactBindings } from './parsers/react-bindings';
 import { scanDynamicImportsAndGlobals } from './dynamic-imports';
 import type { UnusedComponentInfo, UnusedComponentsOptions, UnusedComponentsResult } from '../types';
 
@@ -150,11 +155,40 @@ export async function findUnusedComponents(
   // Scan dynamic imports, Inertia glob resolvers, and global component registrations
   const dynamicRegistry = await scanDynamicImportsAndGlobals(targetDir, fileContents, allFiles);
   const referencedBy = new Map<string, Set<string>>();
+  const renderedFiles = new Set<string>();
   for (const { file, content } of fileContents) {
-    for (const key of renderedComponentKeys(content)) {
+    const renderedKeys = renderedComponentKeys(content);
+    for (const key of renderedKeys) {
       let files = referencedBy.get(key);
       if (!files) referencedBy.set(key, files = new Set());
       files.add(file);
+    }
+    const aliases = await loadAliasConfig(file);
+    const jsxImports = new Set<string>();
+    const isJsx = /\.[jt]sx$/.test(file);
+    if (isJsx) {
+      const sf = parseTypeScript(file, content, ts.ScriptKind.TSX);
+      const bindings = reactBindings(sf);
+      function visit(node: ts.Node) {
+        if (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) {
+          const binding = bindings.imported(node.tagName as ts.Expression);
+          if (binding?.source) jsxImports.add(`${binding.source}\0${node.tagName.getText(sf)}`);
+        }
+        ts.forEachChild(node, visit);
+      }
+      visit(sf);
+    }
+    for (const imp of extractLocalImports(content, aliases, file)) {
+      const local = imp.alias ?? imp.name;
+      if (!renderedKeys.has(`case:${local.toLowerCase()}`)) continue;
+      if (isJsx && !imp.isDynamic && !jsxImports.has(`${imp.source}\0${local}`)) continue;
+      let target = resolveImportPath(file, imp.source, aliases);
+      const visited = new Set<string>();
+      while (target && !visited.has(target)) {
+        visited.add(target);
+        if (target !== file) renderedFiles.add(normalize(target));
+        target = resolveBarrelExport(target, imp.name, aliases);
+      }
     }
   }
   fileContents.length = 0;
@@ -165,6 +199,7 @@ export async function findUnusedComponents(
     // Whitelist components matched by import.meta.glob, defineAsyncComponent, or registered globally
     if (
       dynamicRegistry.globMatchedFiles.has(normCompPath) ||
+      renderedFiles.has(normCompPath) ||
       dynamicRegistry.globalComponents.has(comp.name.toLowerCase())
     ) {
       comp.usageCount++;
