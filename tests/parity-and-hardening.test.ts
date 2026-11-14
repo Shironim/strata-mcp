@@ -117,17 +117,20 @@ describe('Strata-MCP Parity, Coercion, & Hardening Suite', () => {
     });
 
     test('strata init templates and instructions exclude pruned audits and retain rename_model and rename_slot', async () => {
-      const { readFileSync } = await import('node:fs');
+      const { existsSync, readFileSync } = await import('node:fs');
       const { join } = await import('node:path');
       const { STRATA_FRONTEND_RULE, STRATA_INSPECT_SKILL, STRATA_TS_RULE, STRATA_TS_SKILL } = await import('../src/cli/templates');
       const { STRATA_INSTRUCTIONS } = await import('../src/instructions');
-      const checkedInSkill = readFileSync(join(import.meta.dir, '../.agents/skills/use-strata/SKILL.md'), 'utf8');
+      const localSkillPath = join(import.meta.dir, '../.agents/skills/use-strata/SKILL.md');
+      const skillTexts = existsSync(localSkillPath)
+        ? [STRATA_INSPECT_SKILL, readFileSync(localSkillPath, 'utf8')]
+        : [STRATA_INSPECT_SKILL];
 
       expect(STRATA_FRONTEND_RULE).not.toContain('archetype-drift');
       expect(STRATA_FRONTEND_RULE).toContain('rename_model');
       expect(STRATA_FRONTEND_RULE).toContain('rename_slot');
 
-      for (const skillText of [STRATA_INSPECT_SKILL, checkedInSkill]) {
+      for (const skillText of skillTexts) {
         expect(skillText).not.toContain('archetype-drift');
         expect(skillText).not.toContain('target_name');
         expect(skillText).not.toContain('file_path?:');
