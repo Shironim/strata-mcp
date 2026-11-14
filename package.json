@@ -1,6 +1,6 @@
 {
   "name": "@dimassetoid/strata-mcp",
-  "version": "0.8.2",
+  "version": "0.9.0",
   "description": "Multi-framework frontend structural AST search, component graph, and route topology engine for AI agents (Vue, React, Next, Nuxt, Astro, Svelte)",
   "type": "module",
   "main": "dist/index.js",
