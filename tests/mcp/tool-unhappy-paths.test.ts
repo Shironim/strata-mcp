@@ -1,5 +1,6 @@
 import { describe, expect, it, beforeAll, afterAll } from 'bun:test';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { promises as fs } from 'node:fs';
 import { createMcpServer } from '../../src/mcp';
 import { getWorkspaceDatabase, closeAllDatabases } from '../../src/engine/database';
@@ -208,8 +209,7 @@ describe('MCP Tools Unhappy Paths & Edge Cases Suite', () => {
     });
 
     it('returns NOT_INDEXED status when target workspace is unindexed', async () => {
-      const emptyTmp = join(import.meta.dir, '../fixtures/empty-unindexed-test');
-      await fs.mkdir(emptyTmp, { recursive: true });
+      const emptyTmp = await fs.mkdtemp(join(tmpdir(), 'strata-unindexed-'));
       try {
         const res = await callTool('trace_state', {
           target_path: emptyTmp,
