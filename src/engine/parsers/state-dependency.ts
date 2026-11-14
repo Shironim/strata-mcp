@@ -13,6 +13,8 @@ import { createDocumentAdapter } from '../../adapters/factory';
 import { extractTemplateExpressions } from '../template';
 import { extractReactStateDependencies } from './react-state-dependency';
 
+const PURE_GETTER = /^(?:(?:get|is|has|can|should|will|check|validate|format|parse|compute|map|to|use)(?:[A-Z_$]|$)|t$|_)/;
+
 export function extractStateDependencies(
   content: string,
   _framework: FrontendFramework | 'vue-composable' | string,
@@ -36,11 +38,18 @@ export function extractStateDependencies(
     if (match) blocks.push({ code: match[1], offset: content.indexOf(match[1], leading + 3) });
   }
   const template = adapter.getTemplateBlock();
+  const templateBindings = new Map<number, Array<{ expression: string; directive?: string }>>();
   if (template && adapter.type === 'vue') {
+    const starts = [0];
+    for (let i = 0; i < template.content.length; i++) if (template.content[i] === '\n') starts.push(i + 1);
+    const firstLine = content.slice(0, leading + template.loc.start.offset).split('\n').length;
     for (const exp of extractTemplateExpressions(template.content)) {
-      const lines = template.content.split('\n');
-      const offset = lines.slice(0, exp.start.line - 1).reduce((n, line) => n + line.length + 1, 0) + exp.start.column - 1;
+      const offset = starts[exp.start.line - 1] + exp.start.column - 1;
       blocks.push({ code: exp.content, offset: leading + template.loc.start.offset + offset });
+      const line = firstLine + exp.start.line - 1;
+      const bindings = templateBindings.get(line) ?? [];
+      bindings.push({ expression: exp.content, directive: exp.directive });
+      templateBindings.set(line, bindings);
     }
   }
   const declaredDefinitions = new Set<string>();
@@ -151,7 +160,7 @@ export function extractStateDependencies(
     for (const match of executableContent.matchAll(destructureRegex)) {
       const vars = match[1]
         .split(',')
-        .map((v) => v.trim().split(':')[0].trim())
+        .map((v) => v.trim().split(':').pop()!.trim().split('=')[0].trim())
         .filter(Boolean);
       for (const v of vars) {
         const isAction =
@@ -259,7 +268,7 @@ export function extractStateDependencies(
         // Direct method call on instance: cart.checkout(), router.post(), auth.login()
         for (const inst of dep.instanceVars) {
           const methodCallRegex = new RegExp(`\\b${escapeRegExp(inst)}\\.([A-Za-z0-9_$]+)\\s*\\(`, 'g');
-          const methodMatch = methodCallRegex.exec(line);
+          const methodMatch = Array.from(line.matchAll(methodCallRegex)).find(match => !PURE_GETTER.test(match[1]));
           if (methodMatch) {
             matchedMode = 'write';
             snippet = `${inst}.${methodMatch[1]}()`;
@@ -267,7 +276,7 @@ export function extractStateDependencies(
           }
           // Direct mutation: cart.count++, cart.foo = 'bar', cart.$patch(...)
           const mutationRegex = new RegExp(
-            `\\b${escapeRegExp(inst)}\\.(?:\\$patch|\\$reset|[A-Za-z0-9_$]+(?:\\+\\+|--|\\s*=[^=]))`
+            `\\b${escapeRegExp(inst)}(?:\\.[A-Za-z0-9_$]+)+\\s*(?:\\+\\+|--|(?:\\*\\*|&&|\\|\\||\\?\\?|>>>|>>|<<|[+*/%&|^\\x2d])?=(?!=|>))`
           );
           if (mutationRegex.test(line)) {
             matchedMode = 'write';
@@ -279,7 +288,6 @@ export function extractStateDependencies(
 
       if (!matchedMode) {
         // Invoking destructured action: checkout(), setCount(), dispatch(), logout(), login()
-        const isPureGetter = /^(?:get|is|has|can|should|will|check|validate|format|parse|compute|map|to|use|t$|_)/;
         for (const act of dep.actionVars) {
           if (new RegExp(`\\b${escapeRegExp(act)}\\s*\\(`).test(line)) {
             matchedMode = 'write';
@@ -289,7 +297,7 @@ export function extractStateDependencies(
         }
         if (!matchedMode) {
           for (const rv of dep.readVars) {
-            if (!isPureGetter.test(rv) && new RegExp(`\\b${escapeRegExp(rv)}\\s*\\(`).test(line)) {
+            if (!PURE_GETTER.test(rv) && new RegExp(`\\b${escapeRegExp(rv)}\\s*\\(`).test(line)) {
               matchedMode = 'write';
               snippet = `${rv}()`;
               break;
@@ -304,9 +312,22 @@ export function extractStateDependencies(
           `\\b${escapeRegExp(dep.identifier)}\\s*\\([^)]*\\)\\.([A-Za-z0-9_$]+)\\s*\\(`
         );
         const chainMatch = chainedRegex.exec(line);
-        if (chainMatch) {
+        if (chainMatch && !PURE_GETTER.test(chainMatch[1])) {
           matchedMode = 'write';
           snippet = `${dep.identifier}().${chainMatch[1]}()`;
+        }
+      }
+
+      // Directive semantics are lost when their value is parsed as plain JavaScript.
+      for (const binding of templateBindings.get(lineNum) ?? []) {
+        const exp = binding.expression.trim();
+        const member = /^([A-Za-z_$][\w$]*)\.([\w$.]+)$/.exec(exp);
+        const instanceMember = member && dep.instanceVars.has(member[1]);
+        const localState = dep.readVars.has(exp) || dep.actionVars.has(exp);
+        if (binding.directive === 'model' && (instanceMember || localState)
+          || binding.directive === 'on' && (instanceMember && !PURE_GETTER.test(member![2].split('.').pop()!) || localState && !PURE_GETTER.test(exp))) {
+          matchedMode = 'write';
+          snippet = exp;
         }
       }
 

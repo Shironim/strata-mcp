@@ -208,6 +208,7 @@ export function findComponentInTemplateBlock(
 export interface TemplateExpression {
   content: string;
   start: { line: number; column: number };
+  directive?: string;
 }
 
 /**
@@ -224,14 +225,17 @@ export function extractTemplateExpressions(templateContent: string): TemplateExp
 
   const expressions: TemplateExpression[] = [];
 
-  function pushExpression(exp: ExpressionNode | undefined): void {
+  function pushExpression(exp: ExpressionNode | undefined, directive?: string): void {
     if (!exp || !('content' in exp)) return;
     const content = exp.content.trim();
     if (!content) return;
+    const leading = exp.content.slice(0, exp.content.length - exp.content.trimStart().length).split('\n');
 
     expressions.push({
       content,
-      start: { line: exp.loc.start.line, column: exp.loc.start.column },
+      start: { line: exp.loc.start.line + leading.length - 1,
+        column: leading.length > 1 ? leading[leading.length - 1].length + 1 : exp.loc.start.column + leading[0].length },
+      ...(directive ? { directive } : {}),
     });
   }
 
@@ -239,7 +243,7 @@ export function extractTemplateExpressions(templateContent: string): TemplateExp
     if (node.type === NodeTypes.ELEMENT) {
       for (const prop of node.props) {
         if (prop.type === NodeTypes.DIRECTIVE && prop.exp) {
-          pushExpression(prop.exp);
+          pushExpression(prop.exp, prop.name);
         }
       }
     } else if (node.type === NodeTypes.INTERPOLATION) {
