@@ -220,13 +220,16 @@ test('audit_frontend cleanly separates filesystem-direct evidence from SQLite in
   expect(fsJson.retrieval.index).toBeNull();
   expect(fsJson.retrieval.omissions.some((o: any) => o.code === 'DIRECT_FILESYSTEM_SCAN')).toBe(true);
 
-  // Database-backed target: dead-components (after workspace is indexed)
+  const components = await auditFrontendTool.handler({ target_path: root, target: 'dead-components', format: 'json' });
+  expect(components.structuredContent?.retrieval).toMatchObject({ policy: 'filesystem-audit-v1', index: null });
+
+  // State queries use the refreshed SQLite index.
   getWorkspaceDatabase(root, { create: true, enableWatcher: false });
   await syncWorkspace(root);
 
   const dbResult = await auditFrontendTool.handler({
     target_path: root,
-    target: 'dead-components',
+    target: 'dead-state',
     output_format: 'json',
   });
   const dbJson = JSON.parse(dbResult.content[0].text);

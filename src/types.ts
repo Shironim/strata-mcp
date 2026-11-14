@@ -213,7 +213,7 @@ export interface ResolvedMatch {
   endLine?: number;
   endColumn?: number;
   blockType?: SfcBlockType;
-  usageKind?: 'import' | 'render';
+  usageKind?: 'import' | 'export' | 'render';
   snippet: string;
   clientDirective?: string;
 }
@@ -568,6 +568,8 @@ export interface ComponentTreeResult {
 }
 
 export interface ComponentTreeOptions {
+  /** Prepared internal callers own index freshness and can avoid a duplicate preflight. */
+  skipSync?: boolean;
   entryPath?: string;
   routePath?: string;
   targetPath?: string;
@@ -894,6 +896,7 @@ export interface StateChainNode {
   kind: 'store' | 'composable' | 'component' | 'helper';
   direction: 'consumer' | 'dependency';
   depth: number;
+  role?: 'mutator' | 'reader';
 }
 
 export interface StateChainResult {
@@ -1033,6 +1036,8 @@ export interface PatchOperation {
 }
 
 export interface PatchPlanOptions {
+  /** Internal prepared callers may avoid a duplicate sync; they own the freshness preflight. */
+  skipSync?: boolean;
   componentPath: string;
   refactorType?: PatchRefactorType;
   oldName?: string;
@@ -1042,6 +1047,7 @@ export interface PatchPlanOptions {
 }
 
 export interface PatchPlanResult {
+  patchValidation?: { valid: boolean; validatedPatchCount: number; errors: string[] };
   component: string;
   refactorType: PatchRefactorType;
   oldName: string;
