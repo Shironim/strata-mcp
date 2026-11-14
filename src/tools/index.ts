@@ -1,29 +1,26 @@
-import { TOOL_CATALOG } from './catalog';
+import { TOOL_CATALOG, type ToolName } from './catalog';
 import type { McpToolDefinition } from './types';
 export * from './types';
 
-async function loadTool(index: number): Promise<McpToolDefinition> {
-  switch (index) {
-    case 0: return (await import('./find-code')).findCodeTool;
-    case 1: return (await import('./inspect-component')).inspectComponentTool;
-    case 2: return (await import('./component-tree')).componentTreeTool;
-    case 3: return (await import('./trace-state')).traceStateTool;
-    case 4: return (await import('./audit-frontend')).auditFrontendTool;
-    case 5: return (await import('./patch-plan')).patchPlanTool;
-    default: throw new Error('Unknown tool index');
-  }
-}
+const loaders: Record<ToolName, () => Promise<McpToolDefinition>> = {
+  find_code: async () => (await import('./find-code')).findCodeTool,
+  inspect_component: async () => (await import('./inspect-component')).inspectComponentTool,
+  get_component_tree: async () => (await import('./component-tree')).componentTreeTool,
+  trace_state: async () => (await import('./trace-state')).traceStateTool,
+  audit_frontend: async () => (await import('./audit-frontend')).auditFrontendTool,
+  generate_patch_plan: async () => (await import('./patch-plan')).patchPlanTool,
+};
 
-export const TOOLS: McpToolDefinition[] = TOOL_CATALOG.map((tool, index) => ({
-  ...tool, handler: async args => (await loadTool(index)).handler(args),
+export const TOOLS: McpToolDefinition[] = TOOL_CATALOG.map(tool => ({
+  ...tool, handler: async args => (await loaders[tool.name]()).handler(args),
 }));
 
-export const findCodeTool = TOOLS[0];
-export const inspectComponentTool = TOOLS[1];
-export const componentTreeTool = TOOLS[2];
-export const traceStateTool = TOOLS[3];
-export const auditFrontendTool = TOOLS[4];
-export const patchPlanTool = TOOLS[5];
+export const findCodeTool = findTool('find_code')!;
+export const inspectComponentTool = findTool('inspect_component')!;
+export const componentTreeTool = findTool('get_component_tree')!;
+export const traceStateTool = findTool('trace_state')!;
+export const auditFrontendTool = findTool('audit_frontend')!;
+export const patchPlanTool = findTool('generate_patch_plan')!;
 
 export function findTool(name: string): McpToolDefinition | undefined {
   return TOOLS.find(tool => tool.name === name);

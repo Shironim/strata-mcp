@@ -1,12 +1,14 @@
-import { TOOL_CATALOG } from './catalog';
+import { toolMetadata } from './catalog';
 import { withRetrievalEvidence } from './retrieval-response';
-import { observeRetrievalIndex, indexedRetrievalEvidence } from '../engine/index-retrieval-evidence';
+import { indexedRetrievalEvidence } from '../engine/index-retrieval-evidence';
 import { formatRetrievalEvidence } from '../engine/retrieval-evidence';
-import { syncWorkspace } from '../engine/storage/delta-sync';
+import { prepareIndexedAnalysis } from '../engine/prepare-index';
 import fs from 'node:fs';
 import {
   queryStateImpact,
   formatStateImpactAsText,
+  queryFileStateDeps,
+  formatFileStateDepsAsText,
   traceStateChain,
   formatStateChainAsText,
 } from '../engine/database';
@@ -19,21 +21,24 @@ import {
 import type { McpToolDefinition } from './types';
 
 const traceStateToolDefinition: McpToolDefinition = {
-  ...TOOL_CATALOG[3],
+  ...toolMetadata('trace_state'),
   handler: async (args: Record<string, any>) => {
     let identifier = (args.identifier || args.state || args.state_name || args.store || args.store_name || args.composable || args.name || args.symbol)
       ? String(args.identifier || args.state || args.state_name || args.store || args.store_name || args.composable || args.name || args.symbol).trim()
       : '';
 
-    const rawTargetPath = (args.target_path || args.path || args.file_path || args.filePath)
-      ? String(args.target_path || args.path || args.file_path || args.filePath)
+    const rawTargetPath = (args.file_path || args.filePath || args.path || args.target_path)
+      ? String(args.file_path || args.filePath || args.path || args.target_path)
       : undefined;
 
     // If identifier is missing but a file path was supplied, attempt to auto-detect store/composable identifiers
+    let fileTargetForStateLookup: string | undefined;
     if (!identifier && rawTargetPath) {
       try {
-        const fullPath = resolveWorkspacePath(rawTargetPath);
+        const rootHint = typeof args.root === 'string' && args.root.trim() ? args.root.trim() : undefined;
+        const fullPath = resolveWorkspacePath(rawTargetPath, rootHint);
         if (fs.existsSync(fullPath) && fs.statSync(fullPath).isFile()) {
+          fileTargetForStateLookup = fullPath;
           const content = fs.readFileSync(fullPath, 'utf8');
           const storeMatches = [...content.matchAll(/defineStore\(\s*['"`]([^'"`]+)['"`]/g)].map((m) => m[1]);
           const composableMatches = [...content.matchAll(/export\s+(?:const|function)\s+(use[A-Za-z0-9_]+)/g)].map((m) => m[1]);
@@ -55,7 +60,7 @@ const traceStateToolDefinition: McpToolDefinition = {
       } catch (_) {}
     }
 
-    if (!identifier) {
+    if (!identifier && !fileTargetForStateLookup) {
       return {
         isError: true,
         content: [
@@ -68,16 +73,17 @@ const traceStateToolDefinition: McpToolDefinition = {
     }
 
     try {
+      const rootHint = typeof args.root === 'string' && args.root.trim() ? args.root.trim() : undefined;
       let targetPath: string;
       if (rawTargetPath) {
-        const resolved = resolveWorkspacePath(rawTargetPath);
+        const resolved = resolveWorkspacePath(rawTargetPath, rootHint);
         if (fs.existsSync(resolved) && fs.statSync(resolved).isFile()) {
-          targetPath = findProjectRoot(resolved) || resolveProjectRoot(rawTargetPath);
+          targetPath = rootHint ? resolveProjectRoot(rootHint) : (findProjectRoot(resolved) || resolveProjectRoot(rawTargetPath));
         } else {
           targetPath = resolveProjectRoot(rawTargetPath);
         }
       } else {
-        targetPath = resolveProjectRoot();
+        targetPath = resolveProjectRoot(rootHint);
       }
 
       const isJson = args.output_format === 'json' || args.format === 'json';
@@ -110,12 +116,29 @@ const traceStateToolDefinition: McpToolDefinition = {
       const depth = parseSafePositiveInt(args.depth ?? args.max_depth ?? args.maxDepth, 1) ?? 1;
 
       const shouldMultiHop = depth > 1 || args.direction === 'dependencies' || args.direction === 'both';
-      try {
-        await syncWorkspace(targetPath);
-      } catch {
-        // Unindexed or uninitialized workspace will be handled by observeRetrievalIndex
+      const before = await prepareIndexedAnalysis(targetPath);
+      if (!identifier && fileTargetForStateLookup) {
+        const fileResult = await queryFileStateDeps(targetPath, fileTargetForStateLookup, role, { skipSync: true });
+        const retrieval = indexedRetrievalEvidence({
+          workspace: targetPath,
+          scope: fileTargetForStateLookup,
+          policy: 'state-trace-v1',
+          before,
+          query: { filePath: fileTargetForStateLookup, role },
+          selectionReason: 'Indexed state dependencies selected by file path and role.',
+        });
+        return {
+          structuredContent: { ...fileResult, retrieval },
+          content: [
+            {
+              type: 'text',
+              text: isJson
+                ? JSON.stringify({ ...fileResult, retrieval }, null, 2)
+                : `${formatFileStateDepsAsText(fileResult)}\n\n${formatRetrievalEvidence(retrieval)}`,
+            },
+          ],
+        };
       }
-      const before = observeRetrievalIndex(targetPath);
       const evidence = () => indexedRetrievalEvidence({ workspace: targetPath, scope: targetPath, policy: 'state-trace-v1', before,
         query: { identifier, role, depth, direction: shouldMultiHop ? args.direction || 'both' : 'consumers' },
         selectionReason: 'State consumers/dependencies selected by identifier, role and bounded traversal.' });
@@ -162,6 +185,9 @@ const traceStateToolDefinition: McpToolDefinition = {
 
 export const traceStateTool: McpToolDefinition = withRetrievalEvidence(traceStateToolDefinition, {
   formatText: (data) => {
+    if (Array.isArray(data.dependencies) && typeof data.filePath === 'string') {
+      return formatFileStateDepsAsText(data as any);
+    }
     if (Array.isArray(data.dependencies)) {
       return formatStateChainAsText(data as any);
     }

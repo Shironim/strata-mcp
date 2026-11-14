@@ -1,6 +1,7 @@
-import { TOOL_CATALOG } from './catalog';
+import { toolMetadata } from './catalog';
 import { withRetrievalEvidence } from './retrieval-response';
-import { observeRetrievalIndex, indexedRetrievalEvidence } from '../engine/index-retrieval-evidence';
+import { indexedRetrievalEvidence } from '../engine/index-retrieval-evidence';
+import { prepareIndexedAnalysis } from '../engine/prepare-index';
 import { formatRetrievalEvidence } from '../engine/retrieval-evidence';
 import fs from 'node:fs';
 import { resolve } from 'node:path';
@@ -16,7 +17,7 @@ import type { ComponentTreeNode, ComponentTreeOptions } from '../types';
 import type { McpToolDefinition } from './types';
 
 const componentTreeToolDefinition: McpToolDefinition = {
-  ...TOOL_CATALOG[2],
+  ...toolMetadata('get_component_tree'),
   handler: async (args: Record<string, any>) => {
     const routePath = (args.route || args.route_path) ? String(args.route || args.route_path) : undefined;
 
@@ -110,11 +111,10 @@ const componentTreeToolDefinition: McpToolDefinition = {
       }
 
       // Freshness preflight: ensure cached SQLite graph matches current disk state
-      const { syncWorkspace } = await import('../engine/storage/delta-sync');
-      await syncWorkspace(targetPath);
-      const before = observeRetrievalIndex(targetPath);
+      const before = await prepareIndexedAnalysis(targetPath);
 
       const tree = await getComponentTree({
+        skipSync: true,
         entryPath,
         routePath,
         targetPath,

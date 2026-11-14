@@ -1,16 +1,17 @@
-import { TOOL_CATALOG } from './catalog';
+import { toolMetadata } from './catalog';
 import { withRetrievalEvidence } from './retrieval-response';
-import { generatePatchPlan } from '../engine/patch-plan';
+import { generatePatchPlan, normalizePatchOperations } from '../engine/patch-plan';
 import { checkPatchPreconditions } from '../engine/patch-preconditions';
-import { observeRetrievalIndex, indexedRetrievalEvidence } from '../engine/index-retrieval-evidence';
+import { indexedRetrievalEvidence } from '../engine/index-retrieval-evidence';
+import { prepareIndexedAnalysis } from '../engine/prepare-index';
 import { formatRetrievalEvidence } from '../engine/retrieval-evidence';
-import { resolve } from 'node:path';
+import { relative, resolve } from 'node:path';
 import { resolveWorkspacePath, findProjectRoot } from '../engine/path-resolver';
 import type { McpToolDefinition } from './types';
 import type { PatchRefactorType, PatchOperation, PatchPlanResult, RetrievalEvidence } from '../types';
 
 const patchPlanToolDefinition: McpToolDefinition = {
-  ...TOOL_CATALOG[5],
+  ...toolMetadata('generate_patch_plan'),
   handler: async (args: Record<string, any>) => {
     const rawPath =
       args.component_path ??
@@ -51,8 +52,9 @@ const patchPlanToolDefinition: McpToolDefinition = {
     const newName = rawNewName ? String(rawNewName) : undefined;
 
     try {
+      normalizePatchOperations({ componentPath, refactorType, oldName, newName, operations });
       const workspace = targetPath ?? findProjectRoot(componentPath);
-      const before = observeRetrievalIndex(workspace);
+      const before = await prepareIndexedAnalysis(workspace, true);
       const plan = await generatePatchPlan({
         componentPath,
         refactorType: refactorType || operations?.[0]?.refactorType,
@@ -60,10 +62,12 @@ const patchPlanToolDefinition: McpToolDefinition = {
         newName: newName ?? operations?.[0]?.newName,
         targetPath,
         operations,
+        skipSync: true,
       });
 
       const preconditionCheck = await checkPatchPreconditions(plan.patches);
       plan.preconditionsValidated = preconditionCheck.valid;
+      plan.patchValidation = preconditionCheck;
       if (!preconditionCheck.valid) {
         for (const err of preconditionCheck.errors) {
           plan.coverage.diagnostics.push({ file: componentPath, code: 'PRECONDITION_FAILED', message: err });
@@ -112,6 +116,20 @@ const patchPlanToolDefinition: McpToolDefinition = {
 export function formatPatchPlanAsText(plan: PatchPlanResult, retrieval?: RetrievalEvidence): string {
   const isBatch = Boolean(plan.operations && plan.operations.length > 1);
   const title = isBatch && plan.operations ? `BATCH (${plan.operations.length} operations)` : plan.refactorType.toUpperCase();
+  const displayRoot = findProjectRoot(plan.component);
+  const shortFile = (filePath: string) => {
+    const rel = relative(displayRoot, filePath);
+    return rel && !rel.startsWith('..') ? rel : filePath;
+  };
+  const maxDepthItems = plan.coverage.diagnostics.filter((d) => d.code === 'MAX_DEPTH_REACHED');
+  const otherDiagnostics = plan.coverage.diagnostics.filter((d) => d.code !== 'MAX_DEPTH_REACHED');
+  const maxDepthLines = maxDepthItems.length > 0
+    ? (() => {
+        const shown = maxDepthItems.slice(0, 5).map((d) => shortFile(d.file)).join(', ');
+        const extra = maxDepthItems.length > 5 ? `, and ${maxDepthItems.length - 5} more` : '';
+        return [`- **MAX_DEPTH_REACHED:** ${maxDepthItems.length} node(s) not expanded (${shown}${extra})`];
+      })()
+    : [];
   const lines: string[] = [
     `# Prescriptive Patch Plan: ${title}`,
     `- **Target Component:** \`${plan.component}\``,
@@ -125,11 +143,12 @@ export function formatPatchPlanAsText(plan: PatchPlanResult, retrieval?: Retriev
     `- **Candidate Consumers:** ${plan.coverage.candidateCount}`,
     `- **Failed / Unsupported:** ${plan.coverage.failedCount} / ${plan.coverage.unsupportedCount}`,
     `- **Patches Found:** ${plan.totalPatches}`,
-    `- **Preconditions Validated:** ${plan.preconditionsValidated ? 'PASS (all patches verified against current disk snapshots)' : 'FAIL'}`,
+    `- **Patch Preconditions:** ${plan.preconditionsValidated ? 'valid for the proposed patches' : 'invalid'}; consumer discovery coverage is evaluated separately.`,
     '- **Coverage:** bounded by graph discovery and supported static usages; forwarding and dynamic usages may be omitted.',
-    ...plan.coverage.diagnostics.map(d => `- **${d.code}:** ${d.file}: ${d.message}`),
+    ...maxDepthLines,
+    ...otherDiagnostics.map(d => `- **${d.code}:** ${shortFile(d.file)}: ${d.message}`),
     '- **Operation scope:** supported static consumer usages; target declarations, forwarding, and dynamic components are not rewritten.',
-    ...plan.coverage.omissions.map(d => `- **Omission ${d.code} (${d.resolution}):** ${d.file}: ${d.message}${d.sourceRef ? ` [SHA-256 ${d.sourceRef.sha256}, UTF-16 ${d.sourceRef.startOffset}:${d.sourceRef.endOffset}]` : ''}`),
+    ...plan.coverage.omissions.map(d => `- **Omission ${d.code} (${d.resolution}):** ${shortFile(d.file)}: ${d.message}${d.sourceRef ? ` [SHA-256 ${d.sourceRef.sha256.slice(0, 12)}, UTF-16 ${d.sourceRef.startOffset}:${d.sourceRef.endOffset}]` : ''}`),
     '',
   ];
 
@@ -139,7 +158,7 @@ export function formatPatchPlanAsText(plan: PatchPlanResult, retrieval?: Retriev
     lines.push('### Proposed Code Replacements:');
     for (const patch of plan.patches) {
       lines.push(
-        `- **[\`${patch.file}#L${patch.line}:${patch.column}\`](file://${patch.file}#L${patch.line})**`
+        `- **[\`${shortFile(patch.file)}#L${patch.line}:${patch.column}\`](file://${patch.file}#L${patch.line})**`
       );
       lines.push(`  - *Context:* Tag \`<${patch.targetTag}>\``);
       lines.push(`  - *Action:* ${patch.description}`);

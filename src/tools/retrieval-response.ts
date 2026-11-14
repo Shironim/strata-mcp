@@ -1,4 +1,3 @@
-import { withDecisionResponse } from './decision-response';
 import { describeResultSelection } from './result-selection';
 import { summarizeToolResponse } from './summary-response';
 import type { RetrievalEvidence } from '../types';
@@ -6,6 +5,9 @@ import { formatRetrievalEvidence, hashRetrievalIdentity } from '../engine/retrie
 import { FULL_ENGINE_REVISION } from '../version';
 import { applyResponseBudget, DEFAULT_RESPONSE_BUDGET_BYTES, MINIMUM_RESPONSE_BUDGET_BYTES, type PaginatedPageContext } from '../engine/context-budget';
 import type { McpToolDefinition, ToolCallResponse } from './types';
+import { normalizeToolRequest, isExactSourceRequest } from './request';
+import { withAnalysisContext } from '../engine/analysis-context';
+import { createResponseRenderer } from './render-response';
 
 /** Fallback metadata never upgrades an uninstrumented result to current/complete. */
 export interface RetrievalRequestContext {
@@ -34,9 +36,9 @@ export function withRetrievalEvidence(
       return { isError: true, content: [{ type: 'text', text: "INVALID_RESPONSE_DETAIL: response_detail must be 'summary' or 'full'." }] };
     if (args.response_detail === 'summary' && (args.continuation_token || args.continuationToken))
       return { isError: true, content: [{ type: 'text', text: 'SUMMARY_CONTINUATION_UNSUPPORTED: use response_detail full when continuing a page.' }] };
-    if (args.response_detail === 'summary' && tool.name === 'inspect_component' && (args.view === 'source' || args.source_range || args.sfc_sections))
+    if (args.response_detail === 'summary' && isExactSourceRequest(tool.name, args))
       return { isError: true, content: [{ type: 'text', text: 'EXACT_SOURCE_REQUIRES_FULL: use response_detail full for exact source retrieval.' }] };
-    const maxBytes = args.max_bytes ?? args.maxBytes;
+    const maxBytes = args.max_bytes !== undefined ? args.max_bytes : args.maxBytes;
     if (maxBytes !== undefined && !Number.isSafeInteger(maxBytes)) {
       return { isError: true, content: [{ type: 'text', text: 'INVALID_RESPONSE_BUDGET: max_bytes must be a finite safe integer >= 512' }] };
     }
@@ -67,7 +69,7 @@ export function withRetrievalEvidence(
     // Status may be returned in a successful MCP envelope (e.g. NOT_INDEXED).
     let payload: unknown;
     try {
-      if (!(tool.name === 'inspect_component' && (args.view === 'source' || args.source_range || args.sfc_sections)))
+      if (!isExactSourceRequest(tool.name, args))
         payload = JSON.parse(result.content[0]?.text ?? '');
     } catch { /* Text remains intact. */ }
     const notIndexed = (payload !== null && typeof payload === 'object' && 'status' in payload && payload.status === 'NOT_INDEXED')
@@ -85,7 +87,7 @@ export function withRetrievalEvidence(
     if (!result.isError) {
       try { request = describe?.(args); } catch { /* Invalid context never upgrades evidence. */ }
     }
-    const { continuation_token, continuationToken, offset, max_bytes: mb1, maxBytes: mb2, ...cleanArgs } = args;
+    const { continuation_token, continuationToken, offset, max_bytes: mb1, maxBytes: mb2, _omitStructuredForText: _omit, ...cleanArgs } = args;
     const queryId = hashRetrievalIdentity(request ? { tool: tool.name, ...request } : { tool: tool.name, arguments: cleanArgs });
     const retrieval: RetrievalEvidence = {
       version: 1, workspace: request?.workspace ?? null, scope: request?.scope ?? null, queryId,
@@ -119,118 +121,16 @@ export function withRetrievalEvidence(
 
     return result;
   } };
-  return { ...wrapped, handler: async args => {
+  return { ...wrapped, handler: input => withAnalysisContext(async () => {
+    const args = normalizeToolRequest(tool.name, input);
     const raw = summarizeToolResponse(await wrapped.handler(args), tool.name, args);
-    const render = (candidate: ToolCallResponse): ToolCallResponse => {
-      const result = withDecisionResponse(candidate, tool.name, args);
-      // JSON object responses carry one text mirror for MCP clients without structuredContent.
-      // Exact source, arrays and human-readable primary output keep their original first block.
-      let objectPrimary = false;
-      try {
-        const primary = JSON.parse(result.content[0]?.text ?? '');
-        objectPrimary = primary !== null && typeof primary === 'object' && !Array.isArray(primary);
-      } catch { /* Exact source and plain text are never reformatted. */ }
-      if (objectPrimary && !(tool.name === 'inspect_component' && (args.view === 'source' || args.source_range || args.sfc_sections))) {
-        const extras = candidate.content.slice(1).filter(block => {
-          if (block.text.startsWith('Retrieval:')) return false;
-          try {
-            const data = JSON.parse(block.text);
-            return !(data && Object.keys(data).length === 1 && (data.retrieval || data.budget || data.decision));
-          } catch { return true; }
-        });
-        const { decision, ...payload } = result.structuredContent as Record<string, any>;
-        // Clients receive detailed capability declarations in structuredContent; the text
-        // mirror needs only the result decision and actionable recovery, not that catalog.
-        const textDecision = { status: decision.status, emptyOutcome: decision.emptyOutcome,
-          selection: decision.selection, next: decision.next,
-          capability: { operation: decision.capability.operation, status: decision.capability.status, validation: decision.capability.validation,
-            limitations: Array.from(new Set([...decision.capability.features.filter((item: any) => item.status !== 'supported').map((item: any) => item.reason), ...decision.capability.limitations])) } };
-
-        // For JSON text mirror sent to LLM prompt, compact bulky audit provenance unless explicitly requested.
-        // Machine evaluators (Toolbench) and programmatic clients still receive full evidence in structuredContent.
-        const fullProvenance = args.include_provenance === true || args.provenance === true || args.metadata_detail === 'full';
-        const isJsonMode = args.format === 'json' || args.output_format === 'json';
-        const textRetrieval = (payload.retrieval && isJsonMode && !fullProvenance)
-          ? {
-              freshness: payload.retrieval.freshness,
-              completeness: payload.retrieval.completeness,
-              policy: payload.retrieval.policy,
-              engineRevision: payload.retrieval.engineRevision,
-              index: payload.retrieval.index !== undefined ? payload.retrieval.index : null,
-              ...(payload.retrieval.config ? { config: payload.retrieval.config } : {}),
-              ...(payload.retrieval.dependencies?.status
-                ? { dependencies: { status: payload.retrieval.dependencies.status, count: payload.retrieval.dependencies.count } }
-                : {}),
-              ...(payload.retrieval.omissions && payload.retrieval.omissions.length > 0
-                ? { omissions: payload.retrieval.omissions }
-                : {}),
-            }
-          : payload.retrieval;
-
-        const textPayload = {
-          ...payload,
-          ...(textRetrieval ? { retrieval: textRetrieval } : {}),
-          decision: textDecision,
-        };
-        result.content = [{ type: 'text', text: JSON.stringify(textPayload) }, ...extras];
-      } else {
-        const decision = result.structuredContent.decision;
-        const { status, emptyOutcome, selection, next } = decision;
-        const isJsonMode = args.format === 'json' || args.output_format === 'json';
-        const fullProvenance = args.include_provenance === true || args.provenance === true || args.metadata_detail === 'full';
-        const dataObj = result.structuredContent as Record<string, any>;
-        const isBudgetTruncated = Boolean(
-          dataObj?.budget?.isTruncated ||
-          dataObj?.retrieval?.budget?.isTruncated ||
-          dataObj?.continuationToken
-        );
-        const compactOk =
-          !isJsonMode &&
-          !fullProvenance &&
-          status === 'ok' &&
-          !result.isError &&
-          !dataObj?.resultSummary &&
-          !isBudgetTruncated;
-
-        if (compactOk) {
-          const isExactSource = tool.name === 'inspect_component' && (args.view === 'source' || args.source_range !== undefined);
-          // Collapse duplicate trailing Retrieval lines/blocks into one compact status footer.
-          const cleanedContent = result.content
-            .filter((block, idx) => !(idx > 0 && block.text.startsWith('Retrieval: status=')))
-            .map((block, idx) => {
-              if (idx === 0 && !isExactSource) {
-                return { ...block, text: block.text.replace(/\n{1,2}Retrieval: status=[^\n]+$/, '') };
-              }
-              return block;
-            });
-          const retrievalObj = dataObj?.retrieval as RetrievalEvidence | undefined;
-          const shaPrefix = retrievalObj?.source?.sha256 ? `sha256:${retrievalObj.source.sha256.slice(0, 12)}` : undefined;
-          const rangeLabel = dataObj?.startLine !== undefined && dataObj?.endLine !== undefined
-            ? `L${dataObj.startLine}-${dataObj.endLine}${dataObj.clamped && dataObj.requestedEndLine ? ` (clamped to EOF from L${dataObj.requestedEndLine})` : ''}`
-            : dataObj?.source_ref?.startOffset !== undefined && dataObj?.source_ref?.endOffset !== undefined
-              ? `offsets:${dataObj.source_ref.startOffset}-${dataObj.source_ref.endOffset}`
-              : selection?.count !== null && selection?.count !== undefined
-                ? `${selection.subject}=${selection.count}`
-                : undefined;
-          const parts = ['strata: ok', decision.capability.operation, shaPrefix, rangeLabel].filter(Boolean);
-          result.content = [...cleanedContent, { type: 'text', text: `[${parts.join(' | ')}]` }];
-        } else {
-          const clampedLine = dataObj?.clamped && dataObj?.requestedEndLine
-            ? `\nNote: end_line ${dataObj.requestedEndLine} clamped to EOF (L${dataObj.endLine}).`
-            : '';
-          const metadata = isJsonMode
-            ? JSON.stringify({ decision })
-            : `Decision: ${status}; empty=${emptyOutcome}\nSelection: ${selection.subject}; count=${selection.count ?? 'unknown'}. ${selection.boundary}\nCapability: ${decision.capability.syntax}/${decision.capability.operation}=${decision.capability.status}; framework version unknown\n${Array.from(new Set([...decision.capability.features.filter(item => item.status !== 'supported').map(item => item.reason), ...decision.capability.limitations])).map(reason => `Capability limit: ${reason}`).join('\n')}\n${next.map(item => `Next: ${item.action}: ${item.reason}`).join('\n')}${clampedLine}`;
-          result.content = [...result.content, { type: 'text', text: metadata }];
-        }
-      }
-      return result;
-    };
+    const render = createResponseRenderer(tool.name, args, raw);
     const retrieval = raw.structuredContent?.retrieval as RetrievalEvidence | undefined;
     return applyResponseBudget(raw, {
       tool: tool.name, maxBytes: args.max_bytes ?? args.maxBytes ?? DEFAULT_RESPONSE_BUDGET_BYTES,
       continuationToken: args.continuation_token ?? args.continuationToken,
       format: args.format === 'json' || args.output_format === 'json' ? 'json' : 'text',
+      omitStructuredForText: Boolean(args._omitStructuredForText),
       collectionPaths: describeResultSelection(tool.name, args, raw.structuredContent ?? {}).collections,
       formatText: options.formatText
         ? (data, page) => options.formatText!(data, page, args)
@@ -240,5 +140,5 @@ export function withRetrievalEvidence(
         indexGeneration: retrieval?.index?.generation ?? null, configFingerprint: retrieval?.config?.fingerprint ?? null,
         engineRevision: retrieval?.engineRevision ?? FULL_ENGINE_REVISION },
     });
-  } };
+  }) };
 }

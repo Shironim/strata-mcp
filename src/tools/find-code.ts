@@ -1,4 +1,4 @@
-import { TOOL_CATALOG } from './catalog';
+import { toolMetadata } from './catalog';
 import { withRetrievalEvidence } from './retrieval-response';
 import { hashRetrievalIdentity } from '../engine/retrieval-evidence';
 import { findProjectRoot } from '../engine/path-resolver';
@@ -22,7 +22,7 @@ import {
 import type { McpToolDefinition } from './types';
 
 const findCodeToolDefinition: McpToolDefinition = {
-  ...TOOL_CATALOG[0],
+  ...toolMetadata('find_code'),
   handler: async (args: Record<string, any>) => {
     const isJson = args.format === 'json' || args.output_format === 'json';
     const codeSnippet = (args.code || args.code_snippet) ? String(args.code || args.code_snippet) : undefined;
@@ -138,7 +138,7 @@ const findCodeToolDefinition: McpToolDefinition = {
       const targetPath = rawTargetPath ? resolveWorkspacePath(rawTargetPath) : resolveProjectRoot();
 
       const excludeDirs = parseStringList(args.exclude_dirs ?? args.excludeDirs);
-      const maxResults = parseSafePositiveInt(args.max_results ?? args.maxResults);
+      const maxResults = parseSafePositiveInt(args.max_results ?? args.maxResults, 200);
 
       // Mode C: Component usage search
       const componentName = args.component || args.component_name || args.componentName;
@@ -157,7 +157,7 @@ const findCodeToolDefinition: McpToolDefinition = {
           content: [
             {
               type: 'text',
-              text: isJson ? JSON.stringify(matches, null, 2) : formatMatchesAsText(matches) + (isTruncated ? `\n\n[Notice: Results truncated at max_results=${maxResults}. Use a more specific path/scope parameter or adjust max_results to view other matches.]` : ''),
+              text: isJson ? JSON.stringify(matches, null, 2) : formatMatchesAsText(matches, targetPath) + (isTruncated ? `\n\n[Notice: Results truncated at max_results=${maxResults}. Use a more specific path/scope parameter or adjust max_results to view other matches.]` : ''),
             },
           ],
         };
@@ -178,7 +178,7 @@ const findCodeToolDefinition: McpToolDefinition = {
           content: [
             {
               type: 'text',
-              text: isJson ? JSON.stringify(matches, null, 2) : formatMatchesAsText(matches) + (isTruncated ? `\n\n[Notice: Results truncated at max_results=${maxResults}. Use a more specific path/scope parameter or adjust max_results to view other matches.]` : ''),
+              text: isJson ? JSON.stringify(matches, null, 2) : formatMatchesAsText(matches, targetPath) + (isTruncated ? `\n\n[Notice: Results truncated at max_results=${maxResults}. Use a more specific path/scope parameter or adjust max_results to view other matches.]` : ''),
             },
           ],
         };
@@ -204,12 +204,17 @@ const findCodeToolDefinition: McpToolDefinition = {
         }
         const isTruncated = Boolean(maxResults && matches.length >= maxResults);
         const coverage = maxResults ? { truncated: isTruncated, limit: maxResults, returned: matches.length } : undefined;
+        const noMatchHint = !isJson && matches.length === 0
+          ? (modeUsed !== 'literal'
+            ? `\nHint: AST pattern "${pattern}" (language=${language || 'auto'}) matched 0 results. Try mode="literal" for exact text or specify language.`
+            : `\nHint: Literal search "${pattern}" matched 0 results.`)
+          : '';
         return {
           structuredContent: { ...metadata(), matches, matchCount: matches.length, ...(coverage ? { coverage, truncated: isTruncated } : {}) },
           content: [
             {
               type: 'text',
-              text: isJson ? JSON.stringify(matches, null, 2) : notice() + formatMatchesAsText(matches) + (isTruncated ? `\n\n[Notice: Results truncated at max_results=${maxResults}. Use a more specific path/scope parameter or adjust max_results to view other matches.]` : ''),
+              text: isJson ? JSON.stringify(matches, null, 2) : notice() + formatMatchesAsText(matches, targetPath) + noMatchHint + (isTruncated ? `\n\n[Notice: Results truncated at max_results=${maxResults}. Use a more specific path/scope parameter or adjust max_results to view other matches.]` : ''),
             },
           ],
         };
@@ -252,7 +257,7 @@ export const findCodeTool: McpToolDefinition = withRetrievalEvidence(findCodeToo
         propPresence: propName !== undefined || propPresence !== undefined ? String(propPresence ?? 'present') : null,
         rule: args.rule_yaml ? String(args.rule_yaml) : null, language: args.language ?? (snippet ? 'ts' : null),
         mode: pattern ? args.mode ?? 'ast' : null, componentScope: component && propName === undefined ? args.scope ?? 'both' : null,
-        limit: action === 'map' ? Math.min(500, parseSafePositiveInt(args.limit ?? args.max_results ?? args.maxResults, 100)!) : parseSafePositiveInt(args.max_results ?? args.maxResults, snippet ? 200 : undefined) ?? null,
+        limit: action === 'map' ? Math.min(500, parseSafePositiveInt(args.limit ?? args.max_results ?? args.maxResults, 100)!) : parseSafePositiveInt(args.max_results ?? args.maxResults, 200) ?? null,
         offset: action === 'map' && Number.isSafeInteger(args.offset) && args.offset >= 0 ? args.offset : 0,
         excludeDirs: parseStringList(args.exclude_dirs ?? args.excludeDirs) },
     };

@@ -1,7 +1,26 @@
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 
+export type ToolName = 'find_code' | 'inspect_component' | 'get_component_tree' | 'trace_state' | 'audit_frontend' | 'generate_patch_plan';
+
+export const TOOL_ACTION_KEYS: Record<ToolName, string> = {
+  find_code: 'action',
+  inspect_component: 'view',
+  get_component_tree: 'direction',
+  trace_state: 'direction',
+  audit_frontend: 'target',
+  generate_patch_plan: 'refactor_type',
+};
+
+export function toolActionKey(name: string): string {
+  return (TOOL_ACTION_KEYS as Record<string, string>)[name] ?? 'action';
+}
+
+export function toolMetadata(name: ToolName) {
+  return TOOL_CATALOG.find(tool => tool.name === name)!;
+}
+
 // Metadata only: importing the MCP catalog must not load analysis engines.
-export const TOOL_CATALOG: Array<Tool & { description: string }> = [
+export const TOOL_CATALOG: Array<Tool & { name: ToolName; description: string }> = [
 {
 name: 'find_code',
 description:
