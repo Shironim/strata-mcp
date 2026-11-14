@@ -81,7 +81,7 @@ inputSchema: {
       format: {
         type: 'string',
         enum: ['text', 'json'],
-        description: 'Output format (default: "text" for token efficiency, alias: output_format)',
+        description: 'Output format: human-readable text (default) or JSON (alias: output_format)',
       },
       include_structured: {
         type: 'boolean',

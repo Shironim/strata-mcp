@@ -101,7 +101,7 @@ export async function getUpwardComponentTree(
   }
   const diagnostics: NonNullable<ComponentTreeResult['diagnostics']> = [];
 
-  // Fast Indexed Lookup via SQLite Graph DB (Reverse Dependency Indexing with cycle & limit detection)
+  // Indexed reverse lookup via SQLite graph DB (Reverse Dependency Indexing with cycle & limit detection)
   if (isWorkspaceIndexed(projectRoot)) {
     try {
       const db = getWorkspaceDatabase(projectRoot);

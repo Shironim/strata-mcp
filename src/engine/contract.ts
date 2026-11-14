@@ -25,7 +25,7 @@ export { extractComponentVariants } from './contracts/variants';
 export { extractBoundaryContracts } from './contracts/boundaries';
 export { extractFormContracts } from './contracts/boundaries';
 
-// Re-export submodules for 100% backward compatibility
+// Re-export submodules through the existing public facade
 export * from './parsers/contract-vue';
 export * from './parsers/contract-react';
 export * from './parsers/contract-astro';

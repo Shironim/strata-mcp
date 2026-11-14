@@ -1,7 +1,7 @@
 import type { StateChainResult, StateImpactResult, UnusedStateResult } from '../../types';
 
 /**
- * Formats a StateImpactResult into a token-efficient human-readable summary.
+ * Formats a StateImpactResult into a human-readable summary.
  */
 export function formatStateImpactAsText(result: StateImpactResult): string {
   const freshness = result._meta?.syncGeneration
@@ -68,7 +68,7 @@ export function formatStateImpactAsText(result: StateImpactResult): string {
 }
 
 /**
- * Formats an UnusedStateResult into a token-efficient, human-readable summary.
+ * Formats an UnusedStateResult into a human-readable summary.
  */
 export function formatUnusedStateAsText(result: UnusedStateResult): string {
   const metaBadge = result._meta

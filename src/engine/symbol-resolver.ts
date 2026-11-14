@@ -134,7 +134,7 @@ export function resolveModuleFilePath(
 }
 
 /**
- * Fast AST line locator for a target symbol in an external file.
+ * AST line locator for a target symbol in an external file.
  * Traverses barrel re-exports (export { x } from ... and export * from ...) up to 3 hops.
  */
 export async function locateTargetSymbolLines(

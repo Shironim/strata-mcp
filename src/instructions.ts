@@ -1,18 +1,18 @@
 export const STRATA_INSTRUCTIONS = `# Strata MCP — Precision Frontend Intelligence & Selective Context Engine
-Specialized AST analysis for Vue/Nuxt, React/Next, Svelte, and Astro. Designed to eliminate context bloat and minimize token consumption by providing selective, high-density context instead of dumping raw source files.
+Specialized AST analysis for Vue/Nuxt, React/Next, Svelte, and Astro. Returns selected component contracts, source regions, dependency relationships and static diagnostics with scope and evidence metadata.
 
-## Context Economy & Selective Inspection (Map first, read selectively)
-Strata provides AST-level lenses so you never have to waste context reading entire files line-by-line. Think selectively about the level of detail your current task actually requires:
+## Selective Inspection (Map first, read selectively)
+Choose an operation based on the information the task requires: inventory, contract, relationship, symbol or exact source.
 
 - **Understand Structure Before Code:** When exploring an unfamiliar component or workspace, start with structural boundaries rather than code bodies. Use \`find_code\` with \`action: map\` to inventory files without source bodies, or call \`inspect_component(path, view: "map")\` / \`inspect_component(path, outline: true)\` or \`response_detail: "summary"\` to inspect SFC block boundaries and function coordinates without pulling in full source text.
 - **Inspect Public Contracts & Relations:** To understand how a component interfaces with the rest of the application, inspect its public contract via \`inspect_component(path)\` (props, emits, slots, models, external state, and outbound APIs with 1-hop composable resolution). Use \`get_component_tree\` to evaluate hierarchy, props drilling, and consumer blast radius.
 - **Slice Targeted Symbols for Editing:** When you know the specific function or logic to modify, retrieve only that targeted slice via \`inspect_component(path, symbol: "functionName")\` or exact verified lines via \`inspect_component(path, source_range: { start_line, end_line })\` or pass a returned \`source_ref\` to \`view: source\`. Do not invent line numbers or offsets. Reserve full-file reading solely for cases where a broad multi-region rewrite genuinely requires the entire file text.
 
 ## Responsible Budget & Truncation Handling
-All tools enforce strict token and size budgets. Never guess truncated code or hallucinate line numbers:
+Tool responses have serialized byte budgets and operation-specific selection limits. Never guess truncated code or hallucinate line numbers:
 - When a symbol slice exceeds 50 lines, it is automatically truncated with a context guard notice and an explicit continuation hint: \`inspect_component(path, source_range: { start_line, end_line })\`. Follow this exact hint to inspect sub-ranges.
 - When search or inventory results reach limits (\`max_results\`, \`limit\`), use the returned deterministic \`continuation_token\` or adjust \`offset\` / narrow \`path\`.
-- Prefer \`format: "text"\` for maximal token efficiency during interactive investigation; request \`format: "json"\` for programmatic processing.
+- Prefer \`format: "text"\` for human-readable analysis; request \`format: "json"\` for programmatic processing.
 
 ## The Six Public Tools Overview
 - **find_code:** Workspace file inventory (action: map), AST patterns (ast-grep), relational YAML rules, component usages, cross-framework prop supply/omission searches (component + prop_name + prop_presence), and snippet tests. Default mode is ast; literal is exact case-sensitive line search, auto falls back only on AST pattern parse errors. Map inventory uses bounded paging and collector ignore rules.

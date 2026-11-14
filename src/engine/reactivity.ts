@@ -440,7 +440,7 @@ export async function auditEventHandlers(
 }
 
 /**
- * Formats EventHandlerAuditResult as clean, token-efficient markdown.
+ * Formats EventHandlerAuditResult as Markdown diagnostics.
  */
 export function formatEventHandlerAuditAsText(result: EventHandlerAuditResult): string {
   const lines: string[] = [];

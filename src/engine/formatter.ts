@@ -2,7 +2,7 @@ import { relative } from 'node:path';
 import type { ComponentContract, ResolvedMatch } from '../types';
 
 /**
- * Formats match results as token-efficient human-readable text.
+ * Formats match results as human-readable text.
  */
 export function formatMatchesAsText(matches: ResolvedMatch[], rootDir?: string): string {
   if (matches.length === 0) {
@@ -245,7 +245,7 @@ function appendLayoutStructure(contract: ComponentContract, lines: string[]): vo
 }
 
 /**
- * Formats a ComponentContract into a token-efficient, human-readable text summary.
+ * Formats a ComponentContract into a human-readable text summary.
  */
 export function formatContractAsText(contract: ComponentContract): string {
   const lines: string[] = [];

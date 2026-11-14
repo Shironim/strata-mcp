@@ -2,7 +2,7 @@ import { join } from 'node:path';
 import type { RouteManifestResult } from '../../types';
 
 /**
- * Formats a RouteManifestResult into a token-efficient, human-readable summary.
+ * Formats a RouteManifestResult into a human-readable summary.
  */
 export function formatRoutesAsText(result: RouteManifestResult): string {
   const metaBadge = result._meta

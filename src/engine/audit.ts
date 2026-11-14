@@ -247,7 +247,7 @@ export async function findUnusedComponents(
 }
 
 /**
- * Formats UnusedComponentsResult into token-efficient, human-readable text.
+ * Formats UnusedComponentsResult into human-readable text.
  */
 export function formatUnusedAsText(result: UnusedComponentsResult): string {
   const metaBadge = result._meta

@@ -148,7 +148,7 @@ function sanitizeTemplateContent(raw: string): string {
 
 /**
  * Traverses Vue/Nuxt SFC template AST, TSX JSX elements, and Astro component templates
- * to extract all rendered child custom component tags with 100% precision.
+ * to extract supported rendered child component tags as static candidates.
  * Also resolves dynamic components rendered via Vue/Nuxt `<component :is="...">` and dictionary maps
  * using official AST traversals (@vue/compiler-dom and TypeScript Compiler API).
  */

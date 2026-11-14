@@ -6,7 +6,7 @@
 export const STRATA_FRONTEND_RULE = `# RULE: Strata-MCP Frontend Structural Intelligence Engine
 
 ## 1. Directive & Core Mission
-Frontend templates interlace visual markup, design tokens, and domain logic. Reading whole UI files floods context memory, causing attention dilution (*Lost in the Middle*) and hallucinated refactoring. Prioritize using \`strata-mcp\` MCP tools over performing raw text searches (\`grep_search\`, \`find_by_name\`, or reading full files via \`view_file\`) when analyzing frontend architecture, UI components, and reactivity flows:
+Frontend templates interlace visual markup, design tokens, and domain logic. Use structural inspection to select interfaces, relationships or source regions relevant to the task. Prioritize using \`strata-mcp\` MCP tools over performing raw text searches (\`grep_search\`, \`find_by_name\`, or reading full files via \`view_file\`) when analyzing frontend architecture, UI components, and reactivity flows:
 - **Vue Single File Components (\`.vue\`)**
 - **React / Next.js (\`.tsx\`, \`.jsx\`, \`.ts\`, \`.js\`)**
 - **Svelte 4 & Svelte 5 Runes (\`.svelte\`)**
@@ -18,7 +18,7 @@ Frontend templates interlace visual markup, design tokens, and domain logic. Rea
 |---|---|---|
 | Investigating features, domains, or components | \`find_code(action: "map")\`, then \`inspect_component(view: "map")\` | Select files and regions from a bounded inventory without pulling full sources; fetch exact source slices only via hash-bound \`source_ref\`. |
 | Inspecting props, emits, slots, exposed methods, and state | \`inspect_component\` | Returns a structural contract with evidence and limitations; request summary for an overview and full for primary details. |
-| Mapping component tree hierarchy or parent-child relations | \`get_component_tree\` | Instantly displays component topology (\`downward\`/\`down\` or \`upward\`/\`up\`), props drilling, and import dependencies. |
+| Mapping component tree hierarchy or parent-child relations | \`get_component_tree\` | Reports bounded component topology (\`downward\`/\`down\` or \`upward\`/\`up\`), props drilling, and import dependencies. |
 | Searching template structures, variable bindings, or expressions | \`find_code\` | AST structural pattern matching that is resilient against whitespace differences, line formatting, and local naming. |
 | Tracing global/local reactive state flow (Pinia, Context, Zustand) | \`trace_state\` | Finds static read/write candidates within the selected scope and capability (\`consumers\`, \`dependencies\`, \`both\`); review unresolved and excluded references. |
 | Extracting URL routes, route parameters, and layout hierarchies | \`audit_frontend(target: "routes")\` | Maps page sitemaps across Next.js, Nuxt, Astro, SvelteKit, and Inertia without reading dozens of page files. |
@@ -35,7 +35,7 @@ Frontend templates interlace visual markup, design tokens, and domain logic. Rea
 - **Pre-Refactor Verification:** Always verify upstream consumers with \`get_component_tree(direction: "upward")\` or \`generate_patch_plan\` before modifying component props, emits, v-models, or slots. When \`generate_patch_plan\` flags \`DYNAMIC_PROP_SPREAD\`, verify the affected consumer manually.
 - **Responsible Budget & Truncation:** When a symbol slice exceeds 50 lines or results hit \`max_results\`, respect the context guard notice and use the exact suggested continuation hint (e.g. \`source_range\`) rather than dumping unbounded text.
 - **Layered Output:** Request \`response_detail: "summary"\` for counts and risk metadata, then repeat the request with \`response_detail: "full"\` for primary analysis. Exact source requires full; summary is not a continuation page.
-- **Format Discipline (Text vs JSON):** Prefer default \`format: "text"\` for interactive reasoning, interface inspection, tree mapping, and reactive tracing to maximize token efficiency (~150-300 tokens) and eliminate cryptographic audit noise. Reserve \`format: "json"\` for automated mechanical refactoring pipelines (such as patch plans). Strata automatically streamlines prompt text in JSON mode while retaining complete cryptographic provenance in \`structuredContent\`.
+- **Format Discipline (Text vs JSON):** Prefer default \`format: "text"\` for human-readable analysis; use JSON when the caller needs structured fields. Text MCP transport omits full structured content unless requested with \`include_structured: true\`. JSON requests retain structured content; review retrieval evidence and coverage separately.
 - **Fullstack Handoff to Septum:** When \`inspect_component\` or \`audit_frontend(target: "api-contracts")\` reports an outbound HTTP API with \`backendTargetHint\` (e.g. \`POST /api/v1/cadets -> [Backend: CadetController@store]\`), hand off the hint directly to Septum (\`septum_slice\` or \`septum_symbol\`) rather than grep-searching backend controllers.
 `;
 
@@ -55,11 +55,11 @@ Strata provides Abstract Syntax Tree (AST) inspection, reactive state tracking, 
 
 ### Component Interface Isolation vs. Template Ingestion
 Frontend Single File Components (SFCs) and JSX files combine presentational markup (HTML/JSX), styles (CSS), reactive state, and business logic into single files.
-- **Working Memory Overhead:** Reading lines of template markup via \`read_file\` to locate a single method or prop definition consumes excessive context and causes attention dilution on core logic.
+- **Source Selection:** Reading template markup via \`read_file\` to locate a single method or prop definition includes source beyond the selected interface or method.
 - **Interface Separation:** AST extraction isolates public component interfaces (props, emits/events, slots, two-way bindings) and discrete method implementations without ingesting template bodies.
 
 ### Static AST Analysis Boundaries vs. Dynamic Execution
-- **Static Contract Guarantees:** AST analysis cleanly resolves static import graphs, declared props, and explicit component references.
+- **Static Contract Scope:** AST analysis extracts supported import, prop and component-reference syntax; dynamic or unsupported inputs can remain unresolved.
 - **Dynamic Prop Spreading:** Dynamic prop spreads (\`{...props}\`, \`v-bind="$attrs"\`), dynamic component tags (\`<component :is="...">\`), and ambient event buses escape static dependency graphs. When flagged as \`DYNAMIC_PROP_SPREAD\`, verify the affected consumer manually rather than assuming exhaustive static coverage.
 - **Coordinate Determinism:** Anchor all claims and code edits to verified AST line coordinates (\`file:line\`) or hash-verified \`source_ref\` tokens. Never estimate line numbers from raw text.
 
@@ -130,11 +130,11 @@ Follow this sequence during frontend development tasks:
    - Props passed via object spread (\`{...props}\` or \`v-bind="$attrs"\`) cannot be fully verified via static AST. Manually inspect flagged consumers to ensure prop contract compliance.
 3. **Template Event Verification:**
    - After modifying template event bindings, run \`inspect_component(path: "...", audit_events: true)\` to verify that handler references remain valid.
-4. **Format & Token Discipline (Text First vs JSON):**
-   - Use default \`format: "text"\` for 90% of interactive queries (component contracts, outlines, trees, state tracing). It emits dense, high-signal markdown without cryptographic audit bloat.
-   - Use \`format: "json"\` primarily for automated patch planning (\`generate_patch_plan\`). Strata provides a lean prompt text mirror by default while preserving complete machine provenance in \`structuredContent\`.
+4. **Response Format (Text vs JSON):**
+   - Use default \`format: "text"\` for human-readable queries (component contracts, outlines, trees, state tracing). Text responses present the selected analysis; JSON exposes structured fields.
+   - Use \`format: "json"\` primarily for automated patch planning (\`generate_patch_plan\`). JSON responses include \`structuredContent\`.
 5. **Fullstack Bridge (Strata &rarr; Septum):**
-   - When outbound APIs disclose \`backendTargetHint\`, hand off the hint directly to Septum (\`septum_slice\` or \`septum_symbol\`) to achieve end-to-end fullstack changes in under 2,500 tokens.
+   - When outbound APIs disclose \`backendTargetHint\`, hand off the hint directly to Septum (\`septum_slice\` or \`septum_symbol\`) as candidate symbols for independent backend inspection; verify actual routes and declarations.
 `;
 
 export const STRATA_INSPECT_SKILL = USE_STRATA_SKILL_TEMPLATE;
@@ -246,11 +246,11 @@ export const STRATA_TS_RULE = `# RULE: Strata-MCP TypeScript / JavaScript Struct
 ## Directive & Tool Routing (Map First, Read Selectively)
 Prioritize \`strata-mcp\` tools (\`find_code\`, \`inspect_component\`) over reading whole TypeScript/JavaScript files sequentially:
 - **Survey Workspace Inventory:** Call \`find_code(action: "map", path: "...")\` to map files and review any excluded directories before broad scans.
-- **Structural & Literal Search:** Call \`find_code(pattern: "...", mode: "ast" | "literal" | "auto", path: "...")\` for AST-aware or fast exact literal search.
+- **Structural & Literal Search:** Call \`find_code(pattern: "...", mode: "ast" | "literal" | "auto", path: "...")\` for AST patterns or exact case-sensitive literal line search.
 - **Module Outlines & 1-Hop Callees:** Call \`inspect_component(path, outline: true)\` to list functions, classes, methods, interfaces, types, enums, and exported constants with exact line ranges and cross-file callee coordinates.
 - **Map & Hash-Verified Slicing:** Call \`inspect_component(path, view: "map")\` to get UTF-16 offsets and SHA-256, then pass \`source_ref\` to \`inspect_component(path, view: "source", source_ref: ...)\` — or request \`inspect_component(path, symbol: "...")\` / \`source_range: { start_line, end_line }\`.
 - **Outbound HTTP Calls:** When auditing HTTP client calls, use \`audit_frontend(target: "api-contracts", path: "...")\`.
-- **Token & Evidence Discipline:** Prefer default \`format: "text"\`. Never guess truncated slices or ignore \`Decision: partial\` / excluded-directory notes.
+- **Response & Evidence Discipline:** Prefer default \`format: "text"\`. Never guess truncated slices or ignore \`Decision: partial\` / excluded-directory notes.
 `;
 
 export const USE_STRATA_TS_SKILL_TEMPLATE = `---
