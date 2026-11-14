@@ -33,10 +33,10 @@ This documentation details business requirements, deep technical mechanisms (*de
 ### 2. Foundational Architecture & Supporting Systems
 
 * **[`storage-and-delta-sync.md`](./storage-and-delta-sync.md)** — **`graph.db` Database & Incremental Delta Sync Engine**  
-  Embedded SQLite storage architecture (WAL mode), 6-table relational schema, dual-pass change detection algorithm (mtime + streaming SHA-256), `ON DELETE CASCADE`, and transitive reverse dependency invalidation.
+  Embedded SQLite with 7 core tables, staged hashing/parsing, effective-scope fallback, shared publication, stable snapshot generations and transitive reverse dependency invalidation.
 
 * **[`lifecycle-hooks.md`](./lifecycle-hooks.md)** — **Agent Lifecycle Hooks & Closed-Loop Refactoring**  
-  Automated hook system (`strata-post-write.sh` & `septum-pre-write.sh`) triggered whenever agents edit code, keeping `graph.db` continuously fresh (<20ms) across multi-agent harnesses (Google Antigravity, Claude Code, OpenAI Codex, OpenCode/Roo Code, Cursor, Windsurf).
+  Generated post-write synchronization hooks, client-integration boundaries, and the in-process analysis queue/cancellation contract. Septum guards have a separate installation/policy owner.
 
 * **[`retrieval-evidence-contract.md`](./retrieval-evidence-contract.md)** — **Cryptographic Evidence, Budgeting, & Token Pagination**  
   Strict payload budget contract (`max_bytes`), deterministic pagination tokens (`continuation_token`), and explicit omission reporting (*explicit omissions*).
@@ -50,7 +50,7 @@ This documentation details business requirements, deep technical mechanisms (*de
 
 | Engineering Scenario | Recommended Tool | Advantage vs `read_file` / `grep` |
 |---|---|---|
-| **Exploring a new module or folder** | `find_code(action: "map")` | Retrieves file catalog and architectural domains without ingesting file bodies (~95% token savings). |
+| **Exploring a new module or folder** | `find_code(action: "map")` | Retrieves a bounded file catalog without source bodies; savings depend on the selected workspace and output. |
 | **Understanding component interfaces or methods** | `inspect_component(path)` | Extracts props, emits, slots, stores, and APIs without reading 1,000-line template files. |
 | **Checking which child components a layout renders** | `get_component_tree(path, direction: "downward")` | Instantly maps child components, passed props, and detects props drilling. |
 | **Checking where a component is used across pages** | `get_component_tree(path, direction: "upward")` | Measures blast radius across all application views in milliseconds. |

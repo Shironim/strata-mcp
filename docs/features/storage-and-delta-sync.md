@@ -2,7 +2,7 @@
 
 **Status:** Single Source of Truth (SSOT)  
 **Feature Owner:** Storage & Synchronization Engine (`src/engine/storage/`)  
-**Last Updated:** 2026-11-13
+**Last Updated:** 2026-11-14
 
 ---
 
@@ -14,7 +14,7 @@ Medium to large frontend applications can easily span hundreds or thousands of c
   * Retaining complete source text in memory wastes RAM.
   * Naive caching serves stale data whenever a shared type file (`types.ts`) or barrel re-export (`index.ts`) changes.
 * **The Storage & Delta Sync Solution:**
-  Provides a high-speed embedded relational database **SQLite (`.strata/graph.db`)** operating in **WAL (Write-Ahead Logging)** mode, coupled with a two-tier **Incremental Delta-Sync** algorithm (mtime + streaming SHA-256) and *transitive reverse invalidation*.
+  Uses embedded SQLite (`.strata/graph.db`) with WAL, streaming source hashes, staged parsing, and transitive reverse dependency invalidation. Incremental means parsing an affected set; filesystem scanning and hashing still have a workspace cost.
 
 ---
 
@@ -33,7 +33,7 @@ The database is initialized automatically during `strata init`:
   PRAGMA temp_store = FILE;
   PRAGMA user_version = 2;
   ```
-  * **Warm Connection Fast-Path (`SCHEMA_USER_VERSION = 2`):** On subsequent connection opens, `initSchema` checks `PRAGMA user_version` and verifies the 7 core tables in `sqlite_master`. When already initialized, it skips redundant `CREATE TABLE`, `CREATE INDEX`, and `ALTER TABLE` statements, eliminating DDL overhead across isolated worker calls.
+  * **Warm Connection Fast-Path (`SCHEMA_USER_VERSION = 2`):** On subsequent opens, `initSchema` checks `PRAGMA user_version` and the 7 core tables before skipping redundant schema setup. MCP analyses execute in the server process and close their registered connections after execution.
   * **Supported Indexed Extensions:** `.vue`, `.astro`, `.svelte`, `.tsx`, `.jsx`, `.ts`, `.js`.
 
 ---
@@ -60,13 +60,13 @@ The database is initialized automatically during `strata init`:
 | **`state_deps`** | `id`, `file_id`, `kind`, `identifier`, `access_mode`, `line_number`, `usage_snippet`, `accessed_properties` | Reactivity tracking (Pinia/Zustand/Composable), access mode (read/write/watch). |
 | **`routes`** | `id`, `url_path`, `file_id`, `type`, `params_json`, `layout_chain_json` | Route URL mapping, dynamic parameters, and wrapping nested layout chains. |
 | **`file_dependencies`** | `file_id`, `dependency_path`, `content_hash`, `is_external` | Shared types / barrel file dependencies for cross-file change invalidation. |
-| **`meta`** | `key`, `value` | Internal metadata: `cache_version`, `config_fingerprint`, `sync_generation`. |
+| **`meta`** | `key`, `value` | Internal metadata: `cache_version`, `config_fingerprint`, `routes_fingerprint`, `sync_generation`, `index_invalid`. |
 
 ---
 
 ## 4. Incremental Delta-Sync Algorithm
 
-Whenever a Strata tool is called, `syncWorkspace()` runs automatically (*Just-In-Time Preflight*):
+Indexed tree/state operations and initialized patch planning run a freshness preflight. Source search/inspection and filesystem audits read source directly. Library operations preserve source fallback on uninitialized workspaces where supported.
 
 ```
 [Agent Invokes a Strata Tool]
@@ -74,12 +74,11 @@ Whenever a Strata tool is called, `syncWorkspace()` runs automatically (*Just-In
                ▼
     [JIT Preflight Check] ──► syncWorkspace()
                │
-               ├── 1. Fast Fingerprint (Check filesystem mtime & size)
-               │      └── If modified: Compute streaming SHA-256 hash
+               ├── 1. Hash source/config inputs into temporary tables
                │
                ├── 2. Change Classification (Compare against graph.db)
-               │      ├── UNCHANGED  ──► Skip (0 ms)
-               │      ├── ADDED      ──► Parse AST of new file only
+               │      ├── UNCHANGED  ──► Skip parsing unless dependencies require it
+               │      ├── ADDED      ──► Parse new file and affected consumers
                │      ├── MODIFIED   ──► Re-parse affected file & downstream dependents
                │      └── DELETED    ──► Remove via ON DELETE CASCADE
                │
@@ -87,27 +86,44 @@ Whenever a Strata tool is called, `syncWorkspace()` runs automatically (*Just-In
                       └── If types.ts / index.ts changed, re-parse dependent consumers
                │
                ▼
-[Execute Tool Query with 100% Fresh Data (< 50ms)]
+[Publish transaction, then execute the requested query]
 ```
 
-### A. Two-Tier Verification (*Stat + Streaming Hash*)
-1. **Tier 1 (In-Memory Fast Check):** Compares `mtimeMs` and `size`. If identical to cached values, the file is skipped immediately (*zero overhead*).
-2. **Tier 2 (Cryptographic Hash):** If `mtime` changed, Strata reads a 64 KB streaming buffer to calculate the SHA-256 hash. If identical (e.g., re-saved without text edits), AST parsing is bypassed.
+### A. Scan and publication verification
+The initial scan hashes each supported source/config file in 64 KiB chunks. The
+second scan may reuse that same attempt's hashes when mtime and size are unchanged;
+otherwise it hashes again. Parsing candidates and recorded dependencies are checked
+against their staged hashes before publication. No fixed latency or atomic snapshot
+of every filesystem/configuration read is guaranteed.
 
-### B. Clean Deletion via `ON DELETE CASCADE`
+### B. Effective scope and revision
+The effective scope is decided before building the mutation/deletion/impact sets.
+If an invalidated index or changed scoped inputs require workspace fallback, all
+changes in that effective workspace are classified again, including independent
+edits, additions and deletions outside the requested scope. Reverse dependencies
+are then traversed from that complete mutation set.
+
+Full rebuild and incremental publication use the same contract/state/dependency/edge
+writer. `sync_generation` advances only for changed published inputs/rebuilds or
+route manifests; an unchanged preflight retains it. `routes_fingerprint` records the
+staged route identity, while `config_fingerprint` includes the engine revision and
+captured configuration hashes. Local parser changes without a policy/version bump
+still require `strata init` to rebuild.
+
+### C. Clean Deletion via `ON DELETE CASCADE`
 All child tables (`components`, `edges`, `state_deps`, `routes`, `file_dependencies`) specify foreign key constraints:
 ```sql
 REFERENCES files(id) ON DELETE CASCADE
 ```
 When a file is removed from the workspace, deleting 1 row from `files` **automatically cascades and purges all associated edges, state dependencies, and tree hierarchies** without leaving orphan records.
 
-### C. Transitive Invalidation (Types & Barrel Files)
+### D. Transitive Invalidation (Types & Barrel Files)
 If a developer alters `types.ts` (imported by `UserProfile.vue`):
 1. The hash of `types.ts` is tracked in `file_dependencies`.
 2. When `types.ts` changes, Strata flags a hash mismatch on `UserProfile.vue`'s dependencies.
 3. `UserProfile.vue` is automatically marked **`stale`** and re-parsed so its prop contracts remain current.
 
-### D. Global Configuration Tracking (`config_fingerprint`)
+### E. Global Configuration Tracking (`config_fingerprint`)
 If `tsconfig.json`, `jsconfig.json`, or path aliases change:
 * Strata detects a differing `config_fingerprint` hash.
 * Triggers an automatic, clean full rebuild to guarantee consistent alias resolution across the entire graph.
@@ -117,7 +133,7 @@ If `tsconfig.json`, `jsconfig.json`, or path aliases change:
 ## 5. Data Security & Crash Resilience
 
 1. **Staged Sync via Temp Tables:**
-   Synchronization mutations stage into SQLite `TEMP TABLE` structures (`temp.sync_files`, `temp.sync_verify`). If a process terminates abruptly, the main database remains uncorrupted (*anti-corruption*).
+   Parsing and verification stage into SQLite temporary tables before one publication transaction. Cancellation before publication preserves the previous graph. Parse/read failures invalidate derived data and are reported to callers. This design does not replace SQLite durability guarantees or prove resilience to arbitrary disk/host failures.
 2. **WAL Concurrency & Busy Timeout:**
    * Reader queries do not block writer synchronizations.
    * A 15-second busy timeout (`busy_timeout = 15000`) with auto-retry handles transient lock contention cleanly.
@@ -130,3 +146,8 @@ If `tsconfig.json`, `jsconfig.json`, or path aliases change:
 * **Delta Sync Engine:** [`src/engine/storage/delta-sync.ts`](../../src/engine/storage/delta-sync.ts)
 * **Staged Sync Algorithm:** [`src/engine/storage/staged-sync.ts`](../../src/engine/storage/staged-sync.ts)
 * **State Storage Queries:** [`src/engine/storage/state-storage.ts`](../../src/engine/storage/state-storage.ts)
+
+Regression coverage: `tests/core/analysis-consistency.test.ts` and
+`tests/core/retrieval-baseline.test.ts` compare scope fallback and incremental edits
+with manual oracles/cold rebuilds. `tests/memory/lifecycle.test.ts` covers failed
+refresh and concurrent-generation rejection.

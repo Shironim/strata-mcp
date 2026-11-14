@@ -7,7 +7,7 @@ integration: `src/mcp.ts`; regressions: `tests/telemetry.test.ts`.
 
 | Data | Decision and Purpose |
 | --- | --- |
-| UTC Timestamp, tool, status, duration | Recorded for every invocation reaching the dispatcher, including handler errors, worker exceptions, and unknown tools. Duration measures internal execution prior to logging, not network/client transport latency. |
+| UTC Timestamp, tool, status, duration | Recorded for every invocation reaching the dispatcher, including handler errors, analysis exceptions, and unknown tools. Duration measures internal execution prior to logging, not network/client transport latency. |
 | Action/view/target/direction/refactor_type | Normalized to `action` only if the value belongs to the tool schema's enum. Unspecified modes without schema defaults may be absent. |
 | Trace/session ID | Preserves caller-supplied IDs up to 64 characters. Never invents synthetic session IDs or guesses user identities. |
 | Input | Maximum 16 parameter names; strings logged as `{bytes: N}`, other values as `{type: ...}`. Source code, search patterns, paths, and raw values are never copied raw. |
@@ -23,7 +23,7 @@ integration: `src/mcp.ts`; regressions: `tests/telemetry.test.ts`.
 
 ## Sink and Lifecycle
 
-- One JSON Lines event per tool call written to `<workspace>/.strata/strata.log`; only when `.strata/` already exists. Root resolution prefers worker result, explicit root, session root hint, with cwd as final fallback.
+- One JSON Lines event per tool call written to `<workspace>/.strata/strata.log`; only when `.strata/` already exists. Root resolution prefers analysis result, explicit root, session root hint, with cwd as final fallback.
 - No additional logging metadata injected into MCP responses or stdout. Stderr emits single warnings prioritizing error, bloat, then slow execution (`duration_ms >= 250`). All metrics remain available in the event.
 - New log files are created with `0600` permissions (subject to OS capabilities). Existing files retain their permissions.
 - Rotation executes before an append would push file size past 2 MiB; a single backup file `.strata/strata.log.1` replaces any previous backup. If rotation fails, the append is skipped to prevent unbounded file growth.
@@ -49,7 +49,7 @@ New builds require restarting active client/server sessions running legacy artif
 
 Regressions verify JSONL/UTF-8 compliance, complete response metrics, exact 16 KiB bloat threshold,
 output digests and opt-in toggles, rotation replacing old backups, sink failure isolation, and dispatcher
-routing across all six tools including handler errors, unknown tools, and worker rejections.
+routing across all six tools including handler errors, unknown tools, and supervisor rejections.
 Compatibility tests enforce input masking and ensure `.strata/` is never auto-created on unindexed workspaces.
 Local test, build, and stdio results do not prove active MCP clients have loaded this version.
 

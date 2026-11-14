@@ -1,97 +1,63 @@
-# lifecycle-hooks — SSOT Agent Lifecycle Hooks & Closed-Loop Refactoring
+# Lifecycle hooks and analysis execution
 
-**Status:** Single Source of Truth (SSOT)  
-**Feature Owner:** Lifecycle Hooks System (`.agents/hooks/`, `.agents/hooks.json`)  
-**Last Updated:** 2026-11-11  
+**Status:** Implementation contract
+**Last updated:** 2026-11-14
 
----
+## Generated post-write hook
 
-## 1. Purpose & Business Requirements
+`src/cli/templates.ts` owns `STRATA_POST_WRITE_HOOK`.
+`src/cli/mcp-configs.ts` generates harness-specific configuration; the init command
+installs the selected artifacts. The script extracts a changed file path from the
+harness payload, environment or arguments, checks frontend extensions and invokes
+`strata sync` in the resolved workspace through an available executable.
 
-When AI agents modify code across large-scale repositories:
-* **Stale Cache Dilemma:** Architectural index databases (such as `graph.db` in Strata or `septum.db` in Septum) fall out-of-sync immediately after an agent modifies a file. If the agent does not re-index, subsequent turns operate on stale data and hallucinate invalid references.
-* **Architectural Boundary Violations:** Agents frequently introduce forbidden dependencies or circular import chains when adding new import statements.
-* **The Lifecycle Hooks Solution:**
-  Provides automated pre-tool validation (*pre-tool guard*) and post-tool synchronization (*post-tool sync*) triggered silently in the background whenever an agent invokes file-editing tools (`write_file`, `edit_file`, etc.), establishing a **Closed-Loop Self-Healing Workflow**.
+Hook invocation depends on the installed client, its configuration and the edit
+mechanism. Generated artifacts and tests do not prove that every client invokes
+them for every edit. Sync failures are deliberately non-blocking in the generated
+post-write script. There is no fixed latency or continuous-freshness guarantee.
 
----
+Septum pre-write boundary guards are a separate installation and policy owner.
+Strata does not establish their presence or enforcement by generating its own
+post-write hook. Validate those integration boundaries in the actual client.
 
-## 2. Architecture & Hook Flow
+## Analysis preflight
 
-Hooks are declared in `.agents/hooks.json` and mirrored into respective agent configuration directories:
+Indexed tree/state operations and patch planning refresh initialized indices before
+querying them. Failed refresh is an analysis error, rather than a successful empty
+result. Source-only inspection/search and filesystem audits do not require index
+initialization. Library upward traversal and patch planning retain source fallback
+on uninitialized workspaces without creating `.strata`.
 
-```
-[Agent Intends to Modify a File]
-           │
-           ▼
-┌─────────────────────────────────────────────────────────────┐
-│ 1. PRE-TOOL-USE HOOK (septum-pre-write.sh)                 │
-│    - Intercepts payload before file is written to disk      │
-│    - Validates module boundaries & circular import rules    │
-│    - If violated: Aborts operation with clear feedback      │
-└──────────────────────────┬──────────────────────────────────┘
-                           │ (Validation Passes)
-                           ▼
-┌─────────────────────────────────────────────────────────────┐
-│ 2. FILE WRITTEN TO DISK (write_file / edit_file)            │
-└──────────────────────────┬──────────────────────────────────┘
-                           │
-                           ▼
-┌─────────────────────────────────────────────────────────────┐
-│ 3. POST-TOOL-USE HOOK (strata-post-write.sh)                │
-│    - Intercepts path of modified file                       │
-│    - Checks for frontend extensions (.vue, .tsx, .svelte)   │
-│    - Runs background "strata sync <workspace>" (<20ms)      │
-│    - graph.db is instantly FRESH for next agent turn        │
-└─────────────────────────────────────────────────────────────┘
-```
+Internal prepared callers may use `skipSync` only when they own the preflight.
+A successful sync does not establish atomic freshness of every later filesystem
+read; retrieval evidence describes this boundary separately.
 
----
+## MCP execution lifecycle
 
-## 3. Hook Script Details
+`AnalysisSupervisor` runs one analysis at a time in the server process and admits
+up to four waiting requests by default. Requests are limited to 2 MiB and the
+default response deadline is 120 seconds. These limits are configurable through
+`SupervisorOptions.limits`.
 
-### A. `strata-post-write.sh` (Frontend Auto Delta-Sync)
-* **Location:** `.agents/hooks/strata-post-write.sh` (mirrored to `.gemini/hooks/`, `.claude/hooks/`, `.codex/hooks/`).
-* **Input Extraction Mechanism:**
-  Extracts the modified file path from environment variables (`CLAUDE_FILE_PATH`), CLI argument `$1`, or JSON stdin stream from the agent harness using available runtimes (`node`, `bun`, `python3`, or fallback `sed`).
-* **Execution:**
-  If the file matches `.vue`, `.astro`, `.svelte`, `.tsx`, `.jsx`, `.ts`, or `.js`:
-  ```bash
-  strata sync "$WORKSPACE_ROOT" --json
-  ```
-  Runs an incremental delta sync in $<20$ milliseconds, keeping `graph.db` 100% current.
+Timeout/cancellation rejects the client response and aborts the request signal.
+The execution slot is retained until the handler and database cleanup settle.
+Queued cancellation removes that request. Shutdown rejects queued work, aborts
+active work and waits for its cleanup. Parallel audit/pool work also settles all
+started siblings before returning a failure.
 
-### B. `septum-pre-write.sh` & `septum-post-write.sh` (Backend Boundary Guards)
-* **Pre-Write:** Validates proposed imports against architectural rules in `septum.db`. Prevents circular imports before changes hit disk.
-* **Post-Write:** Updates backend symbol tables in `septum.db`.
+Source reads, sync checkpoints and ast-grep search/CST subprocesses cooperate with
+cancellation. It cannot preempt synchronous JavaScript or guarantee a hard process
+memory limit. No separate analysis worker is launched; `workerPath` is retained as
+a deprecated compatibility option with no effect.
 
----
+The per-request syntax cache retains at most 32 ASTs and at most 2 MiB of source
+text (UTF-16 accounting), keyed by filename, script kind and exact source hash.
+AST overhead is additional; this is not a heap/RSS limit. Source and dependency
+freshness checks still read disk. The cache is discarded with the request.
 
-## 4. AI Agent & Harness Support
+## Verification
 
-Strata-MCP's hook integration is client-agnostic and supports major AI coding environments:
-
-| AI Agent | Configuration Path | Hook Capabilities |
-|---|---|---|
-| **Google Antigravity** | `.gemini/` | Native MCP stdio transport + Pre/PostToolUse lifecycle hooks |
-| **Claude Code & Desktop** | `.claude/` | Event-driven lifecycle hooks (`PostToolUse`) |
-| **OpenAI Codex Agent** | `.codex/` | Hooks shell execution engine |
-| **Roo Code / Cline / OpenCode** | `.agents/` / `opencode/` | Standard matcher config via `.agents/hooks.json` |
-| **Cursor & Windsurf** | Workspace config | MCP stdio integration + prompt guidance rules |
-
----
-
-## 5. Benefits for AI Agents
-
-1. **Closed-Loop Self-Healing:**
-   Agents can formulate a refactoring plan (`generate_patch_plan`), apply file edits (`edit_file`), and immediately inspect updated contracts (`inspect_component`) without ever operating on stale cache data.
-2. **Zero Manual Overhead:** Human developers and AI agents never need to remember to run `strata sync` in the terminal manually.
-3. **Automated Regression Prevention:** Pre-write hooks intercept violations before code that breaks architectural rules is written to disk.
-
----
-
-## 6. Code Implementation References
-
-* **Hook Manifest:** [`.agents/hooks.json`](../../.agents/hooks.json)
-* **Strata Post-Write Script:** [`.agents/hooks/strata-post-write.sh`](../../.agents/hooks/strata-post-write.sh)
-* **Sync Engine:** [`src/engine/storage/delta-sync.ts`](../../src/engine/storage/delta-sync.ts)
+- `tests/memory/supervisor.test.ts`: timeout/abort serialization, queued rejection and shutdown cleanup.
+- `tests/core/analysis-execution.test.ts`: real subprocess termination, temporary-input cleanup, bounded search/pool work and syntax-cache isolation.
+- `tests/core/analysis-consistency.test.ts`: failed preflight and cancellation publication boundaries.
+- `tests/cli/init-harness.test.ts`, `tests/cli/init-audit-fixes.test.ts`: generated harness artifacts; active client execution is outside their scope.

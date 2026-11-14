@@ -1,98 +1,77 @@
-# retrieval-evidence-contract — SSOT Cryptographic Evidence, Budgeting, & Token Pagination
+# Retrieval evidence, response budgets and continuation
 
-**Status:** Single Source of Truth (SSOT)  
-**Feature Owner:** Context Budget & Evidence Engine (`src/engine/context-budget.ts`, `src/engine/retrieval-evidence.ts`)  
-**Last Updated:** 2026-11-11  
+**Status:** Implementation contract
+**Last updated:** 2026-11-14
 
----
+## Evidence ownership
 
-## 1. Purpose & Business Requirements
+`src/types.ts` defines `RetrievalEvidence`; `source-file.ts`,
+`retrieval-evidence.ts` and `index-retrieval-evidence.ts` capture its evidence.
+The response wrapper adds conservative fallback metadata to uninstrumented branches.
+A hash identifies captured inputs; it does not establish semantic correctness or
+complete workspace coverage.
 
-Common failure modes of first-generation AI coding tools include:
-* **Context Flooding:** Tools return hundreds of kilobytes of unconstrained payloads, flooding LLM context windows, exhausting token budgets, and causing attention dilution (*Lost in the Middle*).
-* **Silent Truncation:** Payloads are chopped arbitrarily mid-line or mid-JSON without notifying the agent that results are incomplete.
-* **Illusion of Completeness:** Tools report that a search completed cleanly even when directories were omitted or partial parse failures occurred.
-* **The Retrieval Contract Solution:**
-  Strata-MCP enforces strict byte budgets (`max_bytes`), deterministic pagination tokens (`continuation_token`), cryptographic provenance tracking (*provenance tracking*), and explicit omission reporting (*explicit omissions*).
+The principal fields are:
 
----
+| Field | Contract |
+|---|---|
+| `basis` | `source` or `derived`; indexed analysis is represented through `index`, not a third basis value. |
+| `freshness` | `current`, `stale`, or `unavailable`, relative to `freshnessBoundary`. |
+| `completeness` | `complete` or `partial`, relative to the selected policy and scope. |
+| `source` | Optional primary source snapshot: file, SHA-256, UTF-8 encoding, UTF-16 offset unit and line count. |
+| `index` | Optional generation, configuration fingerprint, cache version, manifest hash and observed consistency. |
+| `dependencies` | Separately reports whether dependency freshness was verified. |
+| `omissions`, `limitations` | Preserve unsupported syntax, failed reads and selection boundaries. |
+| `queryId`, `retrievalId`, `engineRevision` | Query/retrieval identity and package/compiler policy identity; not a signed attestation or a hash of every engine source file. |
 
-## 2. Budget & Pagination Parameter Specifications
+Source references bind `[startOffset, endOffset)` to a source SHA-256.
+Inclusive `source_range` selections can also supply `expected_hash`.
+Changed source invalidates the reference; map or retrieve it again.
 
-All Strata-MCP tools expose standardized parameters to regulate response volume:
+Indexed observations are checked before and after analysis. A stable observation
+is not an atomic filesystem snapshot, so indexed results retain partial coverage
+and explicit disk/dependency freshness limitations. Filesystem audits likewise
+report partial evidence rather than claiming one atomic input snapshot.
 
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `max_bytes` | `integer` | `16384` (16 KiB) | Hard budget ceiling on UTF-8 JSON response payload size (minimum 512 bytes). If output exceeds this threshold, Strata applies graceful pagination or returns an actionable budget error. |
-| `continuation_token` | `string` | `undefined` | Deterministic cryptographic token returned when results are truncated, used to fetch the subsequent page. |
-| `include_structured` | `boolean` | `false` | In `format: "text"` mode, set to `true` to include full JSON `structuredContent`. Defaults to `false` to preserve transport bandwidth. |
+## Response pipeline
 
----
+Requests are normalized at the boundary. Analysis produces structured data and a
+primary representation. Evidence attachment precedes summary projection, decision
+metadata, pagination and rendering. JSON text mirrors are rendered from structured
+data; legacy arrays and exact source preserve their primary representation.
+The MCP dispatcher also enforces the final serialized response limit.
 
-## 3. Retrieval Evidence Object Structure
+| Parameter | Contract |
+|---|---|
+| `max_bytes` | Safe integer at least 512; MCP defaults to 16384 bytes. Applies to the serialized tool result, including text and structured metadata, excluding JSON-RPC framing. |
+| `response_detail` | `full` or `summary`; summaries are projections with explicit omitted-detail diagnostics. Exact source requires full detail. |
+| `include_structured` | In text MCP transport, retain full structured content when requested; otherwise the dispatcher replaces it with an omission notice. |
+| `continuation_token` | Repeat the same analysis with the returned token to select the next page. Summary requests do not accept continuation. |
 
-Every Strata MCP response includes retrieval metadata within `structuredContent.retrieval`:
+A 512-byte minimum does not promise every metadata block or item fits. Budget
+errors distinguish metadata, item and final response size failures. Source text
+is not cut into arbitrary fragments to satisfy a budget.
 
-```json
-{
-  "retrieval": {
-    "policy": "component-tree-v1",
-    "workspace": "/path/to/project",
-    "scope": "/path/to/project/src",
-    "basis": "indexed",
-    "status": "complete",
-    "selectionReason": "Bounded component traversal selected by entrypoint, direction, depth and scope.",
-    "snapshot": {
-      "hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-      "timestamp": 1700000000000
-    },
-    "budget": {
-      "maxBytes": 16384,
-      "bytesOut": 4096,
-      "truncated": false
-    },
-    "omissions": []
-  }
-}
-```
+## Continuation identity
 
-### Key Elements:
-1. **`basis` (`'source' | 'derived' | 'indexed'`):**
-   * `'source'`: Evidence read directly from raw source code lines.
-   * `'derived'`: Inferred from framework conventions (e.g., guessing controller names from route patterns).
-   * `'indexed'`: Retrieved from the indexed graph database (`graph.db`).
-2. **`status` (`'complete' | 'partial' | 'stale'`):**
-   * `'complete'`: The requested scope was completely analyzed without parser errors.
-   * `'partial'`: Files encountered parser errors or were bounded by `limit`/`max_depth`.
-   * `'stale'`: Disk contents changed since the last index; prompts re-synchronization.
-3. **`omissions` (Explicit Omission List):**
-   When files are skipped due to parse errors or dynamic constructs, they are transparently recorded with diagnostic codes and reasons (e.g., `DYNAMIC_PROP_SPREAD`, `VUE_PARSE_FAILED`).
+When one pageable collection exceeds the budget, the result includes
+`continuationToken`, `offset`, `nextOffset`, `totalAvailable` and `hasMore`.
+`retrieval.budget` contains `maxBytes`, `estimatedBytes`, `isTruncated` and
+`consistency: selection-bound`. Supply `continuation_token` on the next request.
+Multiple independent collections may require a narrower target or larger budget.
 
----
+Tokens are unsigned base64url JSON. Validation checks the tool, query identity,
+engine revision, applicable source hash/index generation/configuration fingerprint,
+and the hash of the ordered selection. This detects input or selection changes;
+it does not authenticate the caller or prove a complete dependency snapshot.
 
-## 4. Token Pagination Mechanics (`continuation_token`)
+`sync_generation` identifies published index revisions. Unchanged sync preserves
+it; source/dependency/configuration rebuilds or route-manifest changes advance it.
+Therefore an unchanged preflight does not invalidate the next tree/state page.
 
-When collections (such as file lists in `find_code(action: "map")` or search matches) exceed `max_bytes`:
-1. Strata truncates the collection at a clean item boundary (without corrupting JSON syntax).
-2. Emits metadata indicating continuation availability:
-   ```json
-   {
-     "budget": {
-       "maxBytes": 16384,
-       "truncated": true,
-       "continuationToken": "eyJvZmZzZXQiOjUwLCJzZWVkIjoxMjM0NX0="
-     }
-   }
-   ```
-3. The AI agent repeats the tool call passing:
-   `continuation_token: "eyJvZmZzZXQiOjUwLCJzZWVkIjoxMjM0NX0="`
-   to receive the subsequent page deterministically without duplicate entries.
+## Verification
 
----
-
-## 5. Code Implementation References
-
-* **Context Budget Enforcer:** [`src/engine/context-budget.ts`](../../src/engine/context-budget.ts)
-* **Retrieval Evidence Formatter:** [`src/engine/retrieval-evidence.ts`](../../src/engine/retrieval-evidence.ts)
-* **Index Retrieval Tracker:** [`src/engine/index-retrieval-evidence.ts`](../../src/engine/index-retrieval-evidence.ts)
-* **MCP Response Decorator:** [`src/tools/retrieval-response.ts`](../../src/tools/retrieval-response.ts)
+- `tests/core/continuation-identity.test.ts`: selection/source mutation and query identity.
+- `tests/core/analysis-consistency.test.ts`: unchanged tree continuation and changed-input rejection.
+- `tests/mcp/serialized-budget.test.ts`: serialized size limits and exact-source preservation.
+- `tests/mcp/summary-response.test.ts`: summary boundaries and full-detail recovery.
