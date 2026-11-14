@@ -14,7 +14,8 @@ harness payload, environment or arguments, checks frontend extensions and invoke
 Hook invocation depends on the installed client, its configuration and the edit
 mechanism. Generated artifacts and tests do not prove that every client invokes
 them for every edit. Sync failures are deliberately non-blocking in the generated
-post-write script. There is no fixed latency or continuous-freshness guarantee.
+post-write script. The index reflects completed syncs; hook generation alone does
+not establish continuous freshness.
 
 Septum pre-write boundary guards are a separate installation and policy owner.
 Strata does not establish their presence or enforcement by generating its own

@@ -8,9 +8,9 @@
 [![Database: SQLite WAL](https://img.shields.io/badge/Database-SQLite%20(bun:sqlite)-003B57?logo=sqlite)](https://sqlite.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue)](LICENSE)
 
-Strata provides fast structural code search, component dependency graphs, and route mapping for modern frontend applications: **Vue**, **Nuxt**, **React**, **Next.js**, **Astro**, and **Svelte**.
+Strata provides structural code search, component dependency graphs, and route mapping for frontend applications: **Vue**, **Nuxt**, **React**, **Next.js**, **Astro**, and **Svelte**.
 
-Instead of loading thousands of lines of raw templates and components into AI context windows, Strata extracts compact component contracts, state dependencies, routes, and API endpoints directly into an embedded SQLite cache (`.strata/graph.db`).
+Strata extracts component contracts, state dependencies, routes and API endpoints from source. Tools return the selected analysis or source regions, with scope and coverage metadata. Indexed analyses use an embedded SQLite cache (`.strata/graph.db`).
 
 ---
 

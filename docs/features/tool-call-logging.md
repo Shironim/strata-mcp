@@ -27,7 +27,7 @@ integration: `src/mcp.ts`; regressions: `tests/telemetry.test.ts`.
 - No additional logging metadata injected into MCP responses or stdout. Stderr emits single warnings prioritizing error, bloat, then slow execution (`duration_ms >= 250`). All metrics remain available in the event.
 - New log files are created with `0600` permissions (subject to OS capabilities). Existing files retain their permissions.
 - Rotation executes before an append would push file size past 2 MiB; a single backup file `.strata/strata.log.1` replaces any previous backup. If rotation fails, the append is skipped to prevent unbounded file growth.
-- Logger retains existing synchronous I/O; no shutdown flush required. This contract does not promise zero-latency, fsync durability, or multi-process rotation coordination on the same root.
+- Logger uses synchronous I/O; no shutdown flush is required. Writes do not include an fsync durability guarantee or coordinate rotation across processes on the same root.
 - Serialization errors, synchronous stderr writes, and filesystem issues never fail a tool response. If stderr fails synchronously, the file sink is still attempted. Logging is best-effort: events may drop during I/O failures or process termination.
 - The `strata init` scaffolding writes `.strata/` to `.gitignore` and `*` to `.strata/.gitignore`; no scaffold modifications required.
 - Direct CLI/library function calls and SDK-rejected requests prior to dispatcher entry are not captured. The `strata stats` summary inspects the active log without merging `.1`.

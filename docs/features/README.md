@@ -1,59 +1,58 @@
-# Strata-MCP Features — Single Source of Truth (SSOT)
+# Strata feature contracts
 
-Welcome to the official **Single Source of Truth (SSOT)** documentation directory for **Strata-MCP (Frontend Structural Intelligence Engine)**.
+**Baseline:** local source, package `0.8.2`; reviewed 2026-11-14.
 
-This documentation details business requirements, deep technical mechanisms (*deep AST traversal*), input/output specifications, architectural boundaries, and cross-system integrations (including Septum-MCP and Lifecycle Hooks).
+These documents describe implemented behavior and its static-analysis limits.
+The catalog, request normalization, handlers and engine code own the actual
+contract. A document date or package version does not establish that an installed
+MCP server has loaded that source revision.
 
----
+## Choose an operation
 
-## Feature Navigation Map
-
-### 1. Core MCP Analysis & Inspection Tools
-
-* **[`inspect_component.md`](./inspect_component.md)** — **Component Contract Inspection & AST Slicing**  
-  Extracts public component contracts (props, emits, slots, models, state dependencies, and outbound API calls) without ingesting presentational markup templates, and slices targeted functions (*symbol slicing*) with verified caller boundaries.
-
-* **[`get_component_tree.md`](./get_component_tree.md)** — **Component Hierarchy Topology & Blast Radius Analysis**  
-  Traverses component hierarchies vertically: downwards (*downward*) to map children and detect Props Drilling (>2 levels), and upwards (*upward*) to measure the blast radius of changes across pages/views before refactoring.
-
-* **[`trace_state.md`](./trace_state.md)** — **State Management & Composables Flow Tracer**  
-  Analyzes reactivity flow (Pinia, Zustand, Redux, Context, and Composables): separates consumers into `mutators` (action / setter callers) and `readers` (data displays / watchers), tracks touched properties, and supports multi-hop cascading chains (`depth: 2+`).
-
-* **[`find_code.md`](./find_code.md)** — **AST-Based Structural Search & Frontend Inventory**  
-  Whitespace- and line-format-resilient structural pattern search via `ast-grep`, component adoption analysis (PascalCase vs kebab-case), prop omission detection (`prop_presence: "omitted"`), and bounded file inventory mapping (`action: "map"`).
-
-* **[`audit_frontend.md`](./audit_frontend.md)** — **URL Route Topology, API Contracts, & Fullstack Bridge**  
-  Audits URL route sitemaps and nested layout hierarchies, detects dead code (unused components & state), inventories outbound API calls with **`backendTargetHint`** as a direct handoff bridge to **Septum-MCP** in the backend.
-
-* **[`generate_patch_plan.md`](./generate_patch_plan.md)** — **Deterministic Refactoring Patch Plan**  
-  Calculates multi-file consumer edits with AST precision when renaming or removing props, events, models, or slots, complete with `DYNAMIC_PROP_SPREAD` guardrail warnings.
-
----
-
-### 2. Foundational Architecture & Supporting Systems
-
-* **[`storage-and-delta-sync.md`](./storage-and-delta-sync.md)** — **`graph.db` Database & Incremental Delta Sync Engine**  
-  Embedded SQLite with 7 core tables, staged hashing/parsing, effective-scope fallback, shared publication, stable snapshot generations and transitive reverse dependency invalidation.
-
-* **[`lifecycle-hooks.md`](./lifecycle-hooks.md)** — **Agent Lifecycle Hooks & Closed-Loop Refactoring**  
-  Generated post-write synchronization hooks, client-integration boundaries, and the in-process analysis queue/cancellation contract. Septum guards have a separate installation/policy owner.
-
-* **[`retrieval-evidence-contract.md`](./retrieval-evidence-contract.md)** — **Cryptographic Evidence, Budgeting, & Token Pagination**  
-  Strict payload budget contract (`max_bytes`), deterministic pagination tokens (`continuation_token`), and explicit omission reporting (*explicit omissions*).
-
-* **[`tool-call-logging.md`](./tool-call-logging.md)** — **Audit Logging & Local Telemetry**  
-  Local logging contract recording tool calls to `.strata/strata.log`, response bloat detection (>16 KiB), duration metrics, and automated log rotation.
-
----
-
-## AI Agent Tool Selection Matrix
-
-| Engineering Scenario | Recommended Tool | Advantage vs `read_file` / `grep` |
+| Need | Tool | MCP index requirement |
 |---|---|---|
-| **Exploring a new module or folder** | `find_code(action: "map")` | Retrieves a bounded file catalog without source bodies; savings depend on the selected workspace and output. |
-| **Understanding component interfaces or methods** | `inspect_component(path)` | Extracts props, emits, slots, stores, and APIs without reading 1,000-line template files. |
-| **Checking which child components a layout renders** | `get_component_tree(path, direction: "downward")` | Instantly maps child components, passed props, and detects props drilling. |
-| **Checking where a component is used across pages** | `get_component_tree(path, direction: "upward")` | Measures blast radius across all application views in milliseconds. |
-| **Modifying a shared store / composable** | `trace_state(identifier)` | Accurately distinguishes mutators (writers) from readers. |
-| **Tracing an API from UI form to Backend Controller** | `audit_frontend(target: "api-contracts")` &rarr; `septum_slice` | Fullstack Handoff Pattern: passes `backendTargetHint` directly to Septum without backend grep searching. |
-| **Renaming / removing a prop across multiple files** | `generate_patch_plan(...)` | Computes precise AST line/column coordinates and flags dynamic spread warnings. |
+| Inventory files or search patterns/component usages | [find_code](find_code.md) | None |
+| Inspect a contract, map a file, retrieve source or slice a symbol | [inspect_component](inspect_component.md) | None |
+| Traverse rendered children or upstream consumer candidates | [get_component_tree](get_component_tree.md) | Initialized workspace or indexed ancestor |
+| Query shared state consumers or dependency chains | [trace_state](trace_state.md) | Initialized workspace or indexed ancestor |
+| Inspect routes, outbound calls or unused-component candidates | [audit_frontend](audit_frontend.md): `routes`, `api-contracts`, `dead-components` | None |
+| Inspect unused-state candidates or run all audits | [audit_frontend](audit_frontend.md): `dead-state`, `all` | Initialized workspace or indexed ancestor |
+| Propose edits to static consumer usages | [generate_patch_plan](generate_patch_plan.md) | Optional; source fallback is supported |
+
+`find_code(action: "map")` inventories files; it does not initialize an index.
+Use `strata init` to initialize one. Indexed analyses refresh before querying;
+this includes scanning, hashing and possible reparsing. Library and CLI behavior can differ from
+MCP admission checks; each feature documents the relevant boundary.
+
+## Shared contracts
+
+- [Retrieval evidence and responses](retrieval-evidence-contract.md): `format`,
+  `response_detail`, `include_structured`, `max_bytes`, continuation, decision
+  metadata and the schema/runtime default discrepancy.
+- [Storage and delta sync](storage-and-delta-sync.md): index discovery, schema,
+  publication, invalidation and revision identity.
+- [Lifecycle hooks](lifecycle-hooks.md): generated hooks, execution queue,
+  cancellation and client integration limits.
+- [Tool-call logging](tool-call-logging.md): local telemetry, masking, rotation
+  and failure isolation.
+
+Application source is analyzed statically. Internal indices and telemetry can be
+updated, and AST searches launch a local ast-grep subprocess. Results do not prove
+runtime execution, complete consumer coverage or safe deletion/refactoring.
+Inspect `retrieval`, `decision`, diagnostics and omissions before drawing an
+absence conclusion. Backend hints are candidate names for independent backend
+inspection; Strata does not invoke a backend tool automatically.
+
+## Maintaining these documents
+
+1. Check [catalog](../../src/tools/catalog.ts),
+   [normalization](../../src/tools/request.ts), the handler and its engine path.
+   Record schema/runtime conflicts rather than treating JSON Schema defaults
+   or descriptions as executable behavior.
+2. Document support per operation and framework. Distinguish exact source
+   coordinates from heuristic identity, graph coverage and runtime effects.
+3. Use reproducible fixture requests for examples. Label output excerpts;
+   do not invent fields or completeness claims, or promise token savings,
+   token consumption, response speed or efficiency improvements.
+4. Link owning source and regression tests. Tests establish their executed cases,
+   not universal framework support or installed-server parity.

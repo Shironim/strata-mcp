@@ -9,8 +9,8 @@
 ## 1. Purpose & Business Requirements
 
 Medium to large frontend applications can easily span hundreds or thousands of component files:
-* **Performance Challenges:**
-  * Re-parsing complete file ASTs on every tool invocation takes multiple seconds (severely degrading interactive LLM response times).
+* **Indexing concerns:**
+  * Re-parsing every file on each invocation repeats source reads and AST construction even when files are unchanged.
   * Retaining complete source text in memory wastes RAM.
   * Naive caching serves stale data whenever a shared type file (`types.ts`) or barrel re-export (`index.ts`) changes.
 * **The Storage & Delta Sync Solution:**
@@ -21,9 +21,17 @@ Medium to large frontend applications can easily span hundreds or thousands of c
 ## 2. SQLite Database Architecture (`.strata/graph.db`)
 
 The database is initialized automatically during `strata init`:
+
 * File location: `<workspace_root>/.strata/graph.db`
 * Isolated from Git: The `.strata` directory is automatically scaffolded with a `.gitignore` containing `*`.
-* **High-Performance PRAGMAs & Schema Fast-Path:**
+
+Ordinary index opens walk up to the nearest existing `.strata` directory and can
+reuse an ancestor monorepo index. Explicit creation selects the requested root;
+without an existing index or explicit creation, opening fails with `NOT_INDEXED`.
+Inventory mapping does not create one. Requested scope and the owning index root
+can differ; a scoped query does not imply scoped filesystem work or OS isolation.
+
+* **SQLite PRAGMAs & Schema Checks:**
   ```sql
   PRAGMA journal_mode = WAL;
   PRAGMA synchronous = NORMAL;
@@ -93,8 +101,8 @@ Indexed tree/state operations and initialized patch planning run a freshness pre
 The initial scan hashes each supported source/config file in 64 KiB chunks. The
 second scan may reuse that same attempt's hashes when mtime and size are unchanged;
 otherwise it hashes again. Parsing candidates and recorded dependencies are checked
-against their staged hashes before publication. No fixed latency or atomic snapshot
-of every filesystem/configuration read is guaranteed.
+against their staged hashes before publication. These checks do not establish an
+atomic snapshot of every filesystem/configuration read.
 
 ### B. Effective scope and revision
 The effective scope is decided before building the mutation/deletion/impact sets.
@@ -126,7 +134,7 @@ If a developer alters `types.ts` (imported by `UserProfile.vue`):
 ### E. Global Configuration Tracking (`config_fingerprint`)
 If `tsconfig.json`, `jsconfig.json`, or path aliases change:
 * Strata detects a differing `config_fingerprint` hash.
-* Triggers an automatic, clean full rebuild to guarantee consistent alias resolution across the entire graph.
+* Triggers a full rebuild using the captured configuration. This refreshes supported alias resolution; it does not prove unsupported/dynamic module mappings or one atomic snapshot of all subsequent reads.
 
 ---
 
@@ -135,8 +143,8 @@ If `tsconfig.json`, `jsconfig.json`, or path aliases change:
 1. **Staged Sync via Temp Tables:**
    Parsing and verification stage into SQLite temporary tables before one publication transaction. Cancellation before publication preserves the previous graph. Parse/read failures invalidate derived data and are reported to callers. This design does not replace SQLite durability guarantees or prove resilience to arbitrary disk/host failures.
 2. **WAL Concurrency & Busy Timeout:**
-   * Reader queries do not block writer synchronizations.
-   * A 15-second busy timeout (`busy_timeout = 15000`) with auto-retry handles transient lock contention cleanly.
+   * WAL permits readers alongside a writer; SQLite locks and publication/checkpoint work can still cause contention.
+   * Connections use `busy_timeout = 15000`. Sync retries at most three total attempts for recognized busy/locked or `WORKSPACE_CHANGED` failures, with a short backoff for lock contention. Other failures propagate; retries do not guarantee success or impose a 15-second bound on the entire operation.
 
 ---
 

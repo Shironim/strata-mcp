@@ -7,7 +7,7 @@
 ## Input and operation boundaries
 
 The tool accepts a component `path` (aliases include `component_path`, `file_path`
-and `component`), an operation, `old_name`, and `new_name` for renames. Operations
+and `component`), `refactor_type`, `old_name`, and `new_name` for renames. Operations
 are `rename_prop`, `remove_prop`, `rename_event`, `remove_event`, `rename_model`,
 `remove_model`, `rename_slot` and `remove_slot`. `operations` supplies a batch.
 `target_path` selects the workspace; otherwise the component's project root is used.
@@ -56,6 +56,12 @@ against current disk source immediately before applying edits.
 
 Retrieval evidence and response budgeting follow
 [the retrieval contract](retrieval-evidence-contract.md).
+
+Example request; replace the component path/root with the intended workspace:
+
+```json
+{"path":"src/Card.vue","target_path":".","refactor_type":"rename_prop","old_name":"title","new_name":"heading","format":"json","response_detail":"full"}
+```
 
 ## Implementation and verification
 

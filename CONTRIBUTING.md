@@ -35,5 +35,19 @@ Thank you for your interest in contributing to `strata-mcp`!
 - Ensure the test suite passes with zero failures (`bun test`).
 - Ensure TypeScript typecheck and bundle build succeed (`bun run typecheck` and `bun run build`).
 - **CLI & MCP Parity**: Any new capability, filter (`scope_path`, `exclude_dirs`), or input coercion added to an MCP tool in `src/tools/` must maintain behavioral parity with `src/cli.ts` and shared helpers in `src/engine/path-resolver.ts`.
-- Preserve 100% line and column number accuracy across `.vue`, `.astro`, `.tsx`, and `.jsx` files.
-- Enforce Strict Token Economy: Format default text outputs concisely for LLM context efficiency; never dump raw file contents or unbounded AST trees.
+- Verify line/column mappings and source hashes for supported syntax across `.vue`, `.astro`, `.tsx`, and `.jsx` files; report unsupported or unresolved cases explicitly.
+- Keep default text output focused on the requested analysis. Bound source/AST output and provide explicit source retrieval or continuation where supported.
+
+## Markdown documentation
+
+Apply these rules to Markdown throughout the repository, including README files,
+feature contracts, plans and reports:
+
+- Describe what the implementation does, what it returns and its supported scope.
+- Do not promise token savings, token consumption, response speed, latency,
+  percentage improvements or comparable efficiency outcomes. Avoid promotional
+  labels such as "instant" or "fast" in place of a behavioral description.
+- Configuration values, size/depth limits and telemetry definitions are operational
+  facts; explain what they control rather than presenting them as benefits.
+- Report observed test or benchmark results with their fixture, method and limits.
+  Do not generalize a measurement into a product promise or expected user outcome.

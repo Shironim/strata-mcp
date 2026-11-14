@@ -1,130 +1,113 @@
-# get_component_tree — SSOT Component Hierarchy Topology & Blast Radius Analysis
+# get_component_tree — bounded component relationships
 
-**Status:** Single Source of Truth (SSOT)  
-**Feature Owner:** Tool Call `get_component_tree` (`src/tools/component-tree.ts`)  
-**Last Updated:** 2026-11-13
+**Status:** Implementation contract. **Reviewed:** 2026-11-14, package `0.8.2`.
 
----
+Traverse downstream rendered component candidates or upstream consumers from a
+file or resolved route. Downward analysis also reports supported prop forwarding
+and context relationships. A tree is a bounded static observation, not a complete
+inventory of components rendered at runtime.
 
-## 1. Purpose & Business Requirements
+## Preconditions and entry points
 
-Modern frontend UI architecture is organized into nested component hierarchies:
-* **Developer & AI Agent Problems:**
-  * When modifying a low-level presentational component (e.g., a button or form input), agents have no visibility into which pages or layouts will be impacted (*blast radius*).
-  * When analyzing a large layout, reading hundreds of lines of template markup wastes context tokens just to determine which child components are rendered.
-  * Architectural antipatterns like **Props Drilling** (passing props through 3–4 intermediate component layers) frequently escape agent detection.
-* **The `get_component_tree` Solution:**
-  Provides instant component hierarchy topology in two directions (*downward* and *upward*), automatically detects props drilling, audits context provision (*provide/inject* & *useContext*), and supports direct resolution from URL routes (e.g., `/dashboard`) to page entrypoints and their layout chains.
+The **MCP handler requires an initialized index** in the workspace or an ancestor.
+Otherwise it returns a `NOT_INDEXED` status. Run `strata init`; inventory through
+`find_code(action: "map")` does not create that index. Initialized operations
+refresh before traversal; failed refresh is an analysis error.
 
----
+The library `getComponentTree` differs: downward traversal can read source without
+an index, and upward traversal retains source fallback on uninitialized workspaces.
+Library fallback does not implicitly initialize `.strata`. A successful library
+call therefore does not mean that MCP accepts an unindexed request.
 
-## 2. Input Specifications (Parameters & Aliasing)
+CLI `strata tree` calls the library path and prints analysis data directly;
+it does not have the MCP handler's index-admission or response-envelope contract.
 
-| Parameter | Type | Required? | Description & Aliasing |
-|---|---|---|---|
-| `path` | `string` | Conditional* | Root or entry component file (Aliases: `entry_path`, `entryPath`, `file_path`, `filePath`, `component`). |
-| `route` | `string` | Conditional* | URL route to analyze (e.g., `"/dashboard"`, `"/catalog/[id]"`). Automatically locates page entrypoints (Alias: `route_path`). |
-| `direction` | `'downward' \| 'upward' \| 'down' \| 'up'` | Optional | Traversal direction: `'downward'` (root &rarr; children) or `'upward'` (leaf &rarr; parent consumers / blast radius). Default: `'downward'`. |
-| `max_depth` | `number` | Optional | Traversal depth limit (default: `3`, alias: `depth`). |
-| `include_props`| `boolean` | Optional | Display props and data bindings passed to child components (`childProp <- parentExpr`). Default: `true`. |
-| `target_path` | `string` | Optional | Project root directory (default: `"."`, aliases: `root`, `workspace_root`). |
-| `scope_filter` | `string` | Optional | Domain/module scope filter (e.g., `"apps/web"`, `"features/auth"`, alias: `scope_path`). |
-| `alias_map` | `object` | Optional | Custom path alias map overriding `tsconfig.json` / `jsconfig.json` detection. |
-| `limit` | `number` | Optional | Item limit returned for upward traversal (default: `20`). |
-| `format` | `'text' \| 'json' \| 'mermaid'` | Optional | Output format: `'text'` (indented tree), `'json'`, or `'mermaid'` (visual flowchart diagram). |
+## Parameters
 
-*\*Note: Either `path` or `route` must be provided.*
+| Parameter | Effective behavior |
+|---|---|
+| `path` | Entry component/module when file-like; otherwise can supply the scan root. File aliases include `entry_path`, `entryPath`, `file_path`, `filePath`, `component`, `component_path`. |
+| `route` | Resolve a URL route to an entrypoint; alias `route_path`. Supply a file or route. |
+| `target_path` | Scan/project root, distinct from the entry file; aliases include `root`, `workspace_root`. Otherwise inferred from the entry or current root. |
+| `direction` | `downward`/`down` (default) or `upward`/`up`. |
+| `max_depth` | Traversal bound, default 3; aliases include `depth`, `maxDepth`. |
+| `limit` | Upward consumer cap, default 20; accepted aliases include `max_results`, `maxResults`. |
+| `scope_filter` | String scope filter, aliases `scope_path`, `scopeFilter`, `scopePath`. Traversal can stop at a scope boundary; this is not OS isolation. |
+| `alias_map` | Explicit import aliases overriding detected mappings; aliases `aliasMap`, `alias`. |
+| `include_props` | Default true. False strips returned `passedProps` from nodes; alias `includeProps`. It does not disable underlying analysis. |
 
----
+Formats are `text`, `json`, `mermaid`. Response detail, `include_structured`,
+`max_bytes` and `continuation_token` follow the [shared contract](retrieval-evidence-contract.md).
+Traversal diagnostics and response-budget truncation are separate limits.
 
-## 3. Technical Mechanics & Algorithm
+## Execution and limits
 
-### A. URL Route to Page Entrypoint Resolution (`route: "..."`)
-When provided with a URL route:
-1. Strata runs a route scan (`scanRoutes`) that recognizes standard conventions:
-   * **Next.js App Router:** `app/**/page.tsx`
-   * **Next.js Pages Router:** `pages/**/*.tsx`
-   * **Nuxt 3:** `pages/**/*.vue`
-   * **SvelteKit:** `src/routes/**/+page.svelte`
-   * **Astro:** `src/pages/**/*.astro`
-2. Resolves dynamic route parameters (e.g., `/catalog/123` &rarr; matches pattern `/catalog/[id]`).
-3. Includes the full wrapping **Nested Layout** chain (e.g., `RootLayout` &rarr; `DashboardLayout` &rarr; `SettingsPage`).
+Route resolution uses supported Next.js, Nuxt, SvelteKit, Astro, Inertia and Vue
+Router scanners. Ownership/configuration evidence determines the scanner and
+metadata. Not every runtime registration or expression can be resolved; inspect
+the route manifest/diagnostics when selection fails.
 
-### B. Downward Traversal (`direction: "downward"`)
-1. **Rendered Tags Extraction:** Parses the template AST (Vue template DOM or React JSX) to identify custom tags that are **actually rendered**.
-2. **Dynamic Components & Dictionary Maps:** Resolves `<component :is="...">` by traversing TypeScript AST component dictionaries (e.g., `const tabs = { home: HomeView, profile: ProfileView }`).
-3. **Props Passing Extraction:** Captures data bindings on child tags:
-   * Static: `title="Dashboard"`
-   * Dynamic: `:user="currentUser"`, `v-model="searchQuery"`
-4. **Props Drilling Detection:**
-   Tracks the chain of prop forwarding. If a prop is passed across $\ge 2$ intermediate layers without being utilized locally, Strata issues a **`PropsDrillingAlert`** complete with recommendations to introduce a store or provide/inject.
-5. **Context Integrity & Dangling Context:**
-   Tracks `provide` and `inject` (Vue), `setContext` and `getContext` (Svelte), or `<Context.Provider>` and `useContext` (React). Issues warnings if a child component consumes a context key that no ancestor in the tree provides.
-6. **Cycle Detection (`CYCLE_TRUNCATED`):**
-   Prevents recursive loops (e.g., `TreeMenu.vue` rendering itself). Recursive nodes are flagged with `isCircular: true` and depth recursion halts.
+Downward traversal reads source, extracts supported rendered tags and resolves
+imports, aliases and framework auto-import candidates. Static dictionary/dynamic
+expressions can contribute candidates; unsupported selectors produce diagnostics
+or warning nodes. This does not enumerate all runtime selector values.
+Unresolved imports, failed reads, malformed Vue input, scope and depth boundaries
+are not equivalent to a component with no children.
 
-### C. Upward Traversal (`direction: "upward"` — Blast Radius)
-1. **Sub-10ms SQLite `graph.db` Query:**
-   Reads reverse dependency relations from the `edges` table (`child_file_id = target.id`) in $<10$ milliseconds.
-2. **Component Name Disambiguation:**
-   If a consumer has a generic name like `index.vue`, Strata automatically disambiguates it using its parent directory name (e.g., `Sales/Index.vue` or `Auth/Login.tsx`).
-3. **Consumer Categorization:** Differentiates page-level consumers (*Pages/Views*) from intermediate components (*Intermediary Components*).
+Upward traversal prefers indexed reverse edges, with source fallback at the
+library boundary. It can retain import-only and rendered relationships; inspect
+relation evidence. Circular branches stop instead of expanding forever.
+Depth 3 and the default 20-consumer cap prevent an unqualified workspace-wide
+blast-radius claim. Execution includes index preflight and filesystem reads in
+addition to graph queries.
 
----
+Prop-drilling detection follows supported prop-name/identifier forwarding chains.
+Its computed depth threshold is at least 2. This is a forwarding heuristic; it
+does not prove that intermediate components never use the prop locally.
 
-## 4. Language & Framework Support
+Context extraction recognizes Vue provide/inject, Svelte setContext/getContext,
+and React provider/useContext patterns. React wrappers such as `useTheme()` are
+followed through supported local functions, relative/alias imports and named/default
+re-exports. Derived consumers are attributed to the component's hook call line,
+with method `react-hook-wrapper` and candidate evidence.
 
-* **Vue 3 & Nuxt 3 (`.vue`):** Auto-imported components, SFC template AST (`@vue/compiler-dom`), dynamic component resolution, provide/inject.
-* **React & Next.js (`.tsx`, `.jsx`):** JSX element AST, Context Provider/useContext, Transitive Hydration Boundary (`transitiveBoundary: "client-hydrated (inherited from parent)"`).
-* **Svelte 4 & 5 (`.svelte`):** Svelte templates, Context API (`setContext`/`getContext`), Snippets.
-* **Astro (`.astro`):** Astro islands hydration directives (`client:load`, `client:visible`).
-* **Inertia.js & Vue Router:** Handles `<RouterView>` and Inertia page wrappers.
+Context keys are source syntax, not verified runtime object identity or JSX
+provider lifetime. A matching provider in the analyzed branch establishes only
+`isCoveredInTree` within that static model. Hook module data is request-local
+and reread on a later query. Traversal stops at cycles, 12 resolution steps,
+256 modules or 4096 resolution operations. Unresolved/external package hooks and
+dynamic factories remain outside coverage; an absent relation does not establish
+no context dependency.
 
----
+## Results and requests
 
-## 5. Output Structure & Example Responses
+Full results include `root`, `totalComponents`, `maxDepthReached`, `direction`,
+diagnostics and, where produced, `propsDrilling`, `contextGraph`, `resolvedRoute`.
+Nodes carry file/component identity, depth, children and optional props, boundary,
+dynamic/circular and relation evidence. `contextGraph` contains providers,
+consumers, relations and dangling consumers. Summary responses contain previews
+rather than the full tree; review retrieval/decision metadata alongside them.
 
-### Default Text Format (`format: "text"`):
-```text
-DashboardLayout (src/layouts/DashboardLayout.vue)
-├── AppSidebar (src/components/AppSidebar.vue)
-│   └── NavItem (src/components/NavItem.vue) [props: active <- currentRoute.name, label <- item.title]
-├── AppHeader (src/components/AppHeader.vue)
-│   └── UserDropdown (src/components/UserDropdown.vue) [props: user <- currentUser]
-└── ContentSlot (Dynamic RouterView)
+Example requests; replace the paths or route with the intended project:
 
-[CONTEXT INVENTORY]
-- Provided: "theme" (line 24), "authSession" (line 28)
-- Consumed: none
-
-[ALERT: PROPS DRILLING DETECTED]
-Prop "themeMode" drilled from DashboardLayout -> AppSidebar -> NavItem (Depth: 3).
-Recommendation: Consider Pinia/Zustand or Provide/Inject to eliminate deep 3-level props drilling.
-
-Summary: 5 components explored, 1 layout chain, 1 drilling alert.
+```json
+{"path":"src/App.vue","target_path":".","direction":"downward","max_depth":3,"format":"json","response_detail":"full"}
 ```
 
-### Mermaid Diagram Format (`format: "mermaid"`):
-```mermaid
-graph TD
-  node_0["DashboardLayout\n(src/layouts/DashboardLayout.vue)"]
-  node_1["AppSidebar\n(src/components/AppSidebar.vue)"]
-  node_2["NavItem\n(src/components/NavItem.vue)"]
-  node_3["AppHeader\n(src/components/AppHeader.vue)"]
-
-  node_0 -->|active, label| node_1
-  node_1 --> node_2
-  node_0 --> node_3
+```json
+{"path":"src/components/Card.vue","target_path":".","direction":"upward","limit":50,"format":"json","response_detail":"full"}
 ```
 
----
+```json
+{"route":"/dashboard","target_path":".","direction":"downward","format":"mermaid","response_detail":"full"}
+```
 
-## 6. Code Implementation References
+## Owners and verification
 
-* **Tool Definition Catalog:** [`src/tools/catalog.ts`](../../src/tools/catalog.ts)
-* **Primary Handler:** [`src/tools/component-tree.ts`](../../src/tools/component-tree.ts)
-* **Downward Engine:** [`src/engine/graph/downward-traversal.ts`](../../src/engine/graph/downward-traversal.ts)
-* **Upward Engine:** [`src/engine/graph/upward-traversal.ts`](../../src/engine/graph/upward-traversal.ts)
-* **Props Drilling Detector:** [`src/engine/graph/props-drilling.ts`](../../src/engine/graph/props-drilling.ts)
-* **Context Analyzer:** [`src/engine/graph/context-analyzer.ts`](../../src/engine/graph/context-analyzer.ts)
-* **Route Resolver:** [`src/engine/routes.ts`](../../src/engine/routes.ts)
+- [MCP handler](../../src/tools/component-tree.ts), [library facade](../../src/engine/tree.ts).
+- [Downward](../../src/engine/graph/downward-traversal.ts), [upward](../../src/engine/graph/upward-traversal.ts),
+  [context extraction](../../src/engine/graph/context-analyzer.ts), [hook context](../../src/engine/graph/hook-context.ts).
+- [Unresolved-tree tests](../../tests/core/tree-unresolved.test.ts),
+  [upward evidence](../../tests/core/tree-upward-evidence.test.ts),
+  [hook regressions](../../tests/core/real-world-analysis-regression.test.ts),
+  [MCP root boundaries](../../tests/mcp/root-boundaries.test.ts).

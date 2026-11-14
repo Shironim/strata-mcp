@@ -1,104 +1,99 @@
-# find_code — SSOT AST-Based Structural Search & Frontend Inventory
+# find_code — inventory and static search
 
-**Status:** Single Source of Truth (SSOT)  
-**Feature Owner:** Tool Call `find_code` (`src/tools/find-code.ts`)  
-**Last Updated:** 2026-11-11  
+**Status:** Implementation contract. **Reviewed:** 2026-11-14, package `0.8.2`.
 
----
+Search source with ast-grep patterns, relational YAML, literal lines or component
+usage selectors. Inventory mode lists files without ingesting source bodies.
+No initialized index is required. Traversal obeys collector ignore rules and
+the selected scope; zero matches do not prove runtime absence.
 
-## 1. Purpose & Business Requirements
+## Parameters
 
-Plain-text search tools (`grep`, `ripgrep`, regex) frequently fail on modern frontend codebases:
-* **Limitations of Standard Grep:**
-  * Thrown off by line wraps (*multi-line formatting*), whitespace variations, or quote types (`'` vs `"` vs `` ` ``).
-  * Thrown off by casing conventions between PascalCase (`<UserAvatar>`) and kebab-case (`<user-avatar>`).
-  * **Cannot search for "Absence of Code":** Grep cannot find components where developers *forgot to provide a specific prop*.
-  * Exploring a new directory by reading entire files rapidly exhausts context token budgets.
-* **The `find_code` Solution:**
-  Leverages the **`ast-grep` engine (Rust + Tree-sitter)** for structural syntax pattern matching immune to line breaks, component adoption tracking with prop omission detection (`omission`), and bounded file inventory mapping (`action: "map"`) without reading file bodies.
+| Parameter | Effective behavior |
+|---|---|
+| `path` | Directory or file; falls back to the resolved project root. Aliases include `file_path`, `filePath`, `target_path`. Prop supply search requires a directory. |
+| `action` | Advertised values: `search` (default), `map`. |
+| `pattern` | Structural pattern, or text in literal mode. Aliases: `query`, `search`. |
+| `mode` | `ast` by default; `literal` performs exact case-sensitive substring matching per line; `auto` falls back only on an AST **pattern parse error**, not arbitrary execution/read failures. |
+| `component` | Usage search; aliases `component_name`, `componentName`. Supports name variants and detected import aliases within static discovery limits. |
+| `prop_name` | With `component`, selects prop supply/omission analysis. Aliases: `prop`, `propName`. |
+| `prop_presence` | `present` by default, or `omitted`; alias `propPresence`. |
+| `rule_yaml` | Complete ast-grep YAML rule; the rule specifies its language. |
+| `code` | Inline snippet; alias `code_snippet`. Used for pattern/rule matching or a syntax-tree dump. |
+| `language` | `auto`, `vue`, `astro`, `ts`, `js`, `tsx`, `jsx`, `html`, `css`. Snippets default to `ts`; explicit `auto` uses a tag heuristic. Disk searches infer languages from files/blocks. |
+| `scope` | Component usage only: `template`, `script`, `both` (default). |
+| `max_results` | Match cap, default 200; alias `maxResults`. Also accepted as an inventory limit alias. |
+| `limit` | Inventory page size, default 100, clamped to 1–500. |
+| `offset` | Inventory starting offset, default 0. Distinct from response-budget continuation. |
+| `exclude_dirs` | Collector exclusions; alias `excludeDirs`. |
 
----
+All modes also accept `format`, `include_structured`, `response_detail`,
+`max_bytes` and `continuation_token` under the
+[shared response contract](retrieval-evidence-contract.md).
 
-## 2. Input Specifications (Parameters & Aliasing)
+## Mode selection and conflicts
 
-| Parameter | Type | Required? | Description & Aliasing |
-|---|---|---|---|
-| `path` | `string` | Optional | Search target directory or file (default: root, aliases: `file_path`, `filePath`, `target_path`). |
-| `pattern` | `string` | Conditional | Structural AST pattern (e.g., `"ref($$$)"`, `"computed($$$)"`, `"console.log($$$)"`). Aliases: `query`, `search`. |
-| `action` | `'search' \| 'map'` | Optional | Action: `'search'` (default) or `'map'` (maps file inventory without reading bodies). |
-| `mode` | `'ast' \| 'auto' \| 'literal'` | Optional | Pattern search mode: `'ast'` (default structural), `'literal'` (exact substring per line), or `'auto'` (AST with literal fallback on syntax parse error). |
-| `component` | `string` | Conditional | Component name for adoption search (e.g., `"BaseButton"` or `"base-button"`). Alias: `component_name`. |
-| `prop_name` | `string` | Optional | Prop name to analyze alongside `component` (e.g., `"variant"`). Alias: `prop`. |
-| `prop_presence`| `'present' \| 'omitted'` | Optional | Prop presence filter: `'present'` (default, renders supplying the prop) or `'omitted'` (renders **omitting** the prop). |
-| `rule_yaml` | `string` | Optional | Complete relational YAML ast-grep rule definition. |
-| `code` | `string` | Optional | Code snippet to test against patterns in-memory (without touching disk, alias: `code_snippet`). |
-| `scope` | `'template' \| 'script' \| 'both'` | Optional | Component search scope: `'template'`, `'script'`, or `'both'` (default). |
-| `limit` | `integer` | Optional | Maximum number of file paths returned for `action: "map"` (default: `100`, max: `500`). |
-| `offset` | `integer` | Optional | Starting offset for stable pagination under `action: "map"` (default: `0`). |
-| `exclude_dirs` | `string[]` | Optional | List of directory names to ignore (e.g., `["storage", "legacy"]`). |
-| `format` | `'text' \| 'json'` | Optional | Output format (default: `'text'`, alias: `output_format`). |
+- **Inventory:** `action: "map"` accepts path, limit, offset, exclusions and
+  response controls. Pattern, YAML, code, component selectors and non-AST modes
+  conflict with inventory. Explicit `mode: "ast"` is accepted.
+- **Prop supply:** `component` + `prop_name` (+ `prop_presence`) accepts path and
+  response controls. Pattern/code/YAML, mode, language, scope, limit, offset,
+  max-results and exclusion selectors conflict with this operation.
+- **Inline input:** code plus pattern/YAML matches a snippet. Code alone without
+  a target path dumps its syntax tree. `action: "dump_ast"` remains an implemented
+  compatibility path absent from the advertised action enum; clients enforcing
+  that enum can reject it.
+- **Other searches:** component usage takes precedence over YAML, then pattern
+  search. Prefer one selector to make the operation unambiguous.
 
----
+## Prop supply boundaries
 
-## 3. Three Primary Operating Modes
+The component must have one exact matching basename inside the selected directory.
+Ambiguous names require a narrower scope. Supported targets are Vue and React/JSX;
+Astro/Svelte targets are rejected for this selector, even though other search modes
+can inspect their source. A result distinguishes resolved usages, resolved static
+omissions, candidate usages and indeterminate supply such as forwarding/spreads.
+An omitted render does not establish a missing required prop at runtime.
 
-### A. AST Pattern Search (`ast-grep`)
-* Utilizes metavariables:
-  * `$$$` : Matches zero or more arguments/statements.
-  * `$NAME` : Captures specific identifiers.
-* **Whitespace & Multi-line Immunity:** The pattern `ref($$$)` matches single-line declarations like `ref(0)` as well as multi-line declarations like `ref({\n  id: 1,\n  name: 'John'\n})` across 10 lines.
-* **Relational Rules (YAML):** Supports advanced relational constraints such as `inside`, `has`, `precedes`, or `follows` (e.g., searching for API calls executed strictly inside `onMounted`).
+## Results and examples
 
-### B. Component Adoption Analysis & Prop Omission Detection
-* **Dual-Convention Matching:** Searching for `component: "Alert"` automatically matches `<Alert>`, `<alert>`, and `<CustomAlert>` when imported as an alias (`import { Alert as CustomAlert }`).
-* **Prop Presence (`prop_presence: "present"`):** Finds all renders supplying the prop, whether static (`variant="danger"`) or dynamic (`:variant="type"`).
-* **Prop Omission (`prop_presence: "omitted"`):** Finds all render locations that **OMIT / FORGOT** the prop. Essential for auditing breaking changes when making a prop required across shared components.
+Inventory returns `root`, `scope`, `status`, `coverage`, `domainRoots`,
+`frameworkCandidates` and `files`. File role/domain labels and manifest-derived
+framework candidates are heuristics. Pattern results include matches and can
+include `modeRequested`, `modeUsed` and `fallbackReason`. JSON primary
+representations differ between legacy match arrays and structured operations;
+do not assume one universal result shape.
 
-### C. Bounded File Inventory (`action: "map"`)
-* Returns a scoped frontend file catalog without reading file bodies (saving up to 95% of tokens).
-* Automatically classifies domains, architectural layers (`page`, `component`, `layout`, `store`, `composable`), and detects framework candidates from `package.json`.
+Prop supply returns `matches`, `matchCount`, `query`, `coverage`,
+`impactIdentity` and `inputFreshness`. `coverage.completeness` is `partial`;
+`coverage.propSupply` includes `omittedRenderCount`, `omittedConsumerCount`,
+`indeterminateRenderCount`, `candidateUsageCount` and `boundary`.
+The text formatter explicitly calls this a partial static search.
 
----
+Example requests; replace paths and component names with the intended project:
 
-## 4. Output Structure & Example Responses
-
-### Example A: Prop Omission Search Result
-```text
-Prop query: {"component":"BaseButton","prop":"variant","presence":"omitted"}
-
-Matches (2 omitted renders):
-- src/views/WelcomeView.vue:35
-  Snippet: <BaseButton label="Get Started" @click="start" />
-- src/components/AlertBox.vue:50
-  Snippet: <BaseButton label="Dismiss" />
-
-Prop supply coverage: {"suppliedCount":8,"omittedCount":2,"dynamicForwarded":0}
-[Static search complete: 2 components omit the "variant" prop]
+```json
+{"action":"map","path":"src","limit":100,"format":"json","response_detail":"full"}
 ```
 
-### Example B: Bounded Inventory Result (`action: "map"`)
-```text
-Frontend Map: /src/modules/checkout
-Framework Candidates: Vue 3, Nuxt
-
-Coverage: 5 files discovered | Limit: 100
-Extensions: .vue: 3, .ts: 2
-
-Files Inventory:
-- src/modules/checkout/pages/CheckoutPage.vue [domain: checkout | layer: page]
-- src/modules/checkout/components/PaymentForm.vue [domain: checkout | layer: component]
-- src/modules/checkout/components/OrderSummary.vue [domain: checkout | layer: component]
-- src/modules/checkout/stores/useCheckoutStore.ts [domain: checkout | layer: store]
-- src/modules/checkout/composables/usePayment.ts [domain: checkout | layer: composable]
+```json
+{"path":"src","component":"BaseButton","prop_name":"variant","prop_presence":"omitted","format":"json","response_detail":"full"}
 ```
 
----
+```json
+{"code":"const n = ref(0)","pattern":"ref($$$)","language":"ts","format":"json","response_detail":"full"}
+```
 
-## 5. Code Implementation References
+Errors include invalid selector combinations, ambiguous/missing prop targets,
+unsupported prop-search frameworks and ast-grep failures. Match caps, ignored
+directories and response pagination restrict coverage. Narrow the scope or follow
+continuation metadata before concluding there are no additional results.
 
-* **Tool Definition Catalog:** [`src/tools/catalog.ts`](../../src/tools/catalog.ts)
-* **Primary Handler:** [`src/tools/find-code.ts`](../../src/tools/find-code.ts)
-* **Search Engine:** [`src/engine/search.ts`](../../src/engine/search.ts)
-* **AST Grep Engine:** [`src/engine/astgrep.ts`](../../src/engine/astgrep.ts)
-* **Prop Intent Search:** [`src/engine/search-intent.ts`](../../src/engine/search-intent.ts)
-* **Frontend Map Engine:** [`src/engine/frontend-map.ts`](../../src/engine/frontend-map.ts)
+## Owners and verification
+
+- [Catalog](../../src/tools/catalog.ts), [handler](../../src/tools/find-code.ts).
+- [Search](../../src/engine/search.ts), [prop selector](../../src/engine/search-intent.ts),
+  [prop impact](../../src/engine/prop-impact.ts), [inventory](../../src/engine/frontend-map.ts).
+- [Template tests](../../tests/core/template-expression.test.ts),
+  [MCP regressions](../../tests/mcp/improvements-regression.test.ts),
+  [response budgets](../../tests/mcp/serialized-budget.test.ts).
