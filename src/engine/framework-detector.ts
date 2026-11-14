@@ -271,7 +271,10 @@ function detectFrameworkInProject(filePath: string, explicitContent: string | un
 
     // 2c. Nuxt check
     const hasNuxtImports = imports(/^(?:#app|#imports|#components|nuxt\/.+)$/);
-    const hasNuxtMacros = unboundCall(['definePageMeta', 'useAsyncData', 'useFetch', 'defineNuxtComponent', 'defineNuxtRouteMiddleware']);
+    const hasNuxtMacros = unboundCall([
+      'definePageMeta', 'useAsyncData', 'useFetch', 'defineNuxtComponent', 'defineNuxtRouteMiddleware',
+      'useCookie', 'useRuntimeConfig', 'navigateTo', 'useNuxtApp',
+    ]);
 
     // 2d. React check
     const hasReactImports = imports(/^(?:react|react-dom|react\/.+|@tanstack\/react-query)$/);
