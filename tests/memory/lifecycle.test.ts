@@ -133,7 +133,7 @@ test('concurrent sync publication detects generation mismatch and aborts atomica
   const originalRun = db.run.bind(db);
   let injected = false;
   db.run = (sql: string, ...args: any[]) => {
-    if (sql.includes('temp.sync_preserved_edges') && !injected) {
+    if (sql.includes('CREATE TEMP TABLE sync_files') && !injected) {
       injected = true;
       originalRun("UPDATE meta SET value = '9999' WHERE key = 'sync_generation'");
     }
@@ -142,6 +142,7 @@ test('concurrent sync publication detects generation mismatch and aborts atomica
 
   try {
     await expect(stagedSync(r, undefined, db)).rejects.toThrow(/WORKSPACE_CHANGED:/);
+    expect(injected).toBe(true);
   } finally {
     db.run = originalRun;
   }

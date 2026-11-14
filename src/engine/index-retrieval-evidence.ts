@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import type { RetrievalEvidence } from '../types';
 import { FULL_ENGINE_REVISION } from '../version';
 import { hashRetrievalIdentity } from './retrieval-evidence';
+import { resolveIndexedWorkspaceRoot } from './storage/schema';
 
 export interface IndexObservation {
   generation: string;
@@ -16,7 +17,8 @@ export interface IndexObservation {
 export function observeRetrievalIndex(workspace: string): IndexObservation | null {
   let db: Database | undefined;
   try {
-    db = new Database(join(workspace, '.strata', 'graph.db'), { readonly: true });
+    const indexedRoot = resolveIndexedWorkspaceRoot(workspace) ?? workspace;
+    db = new Database(join(indexedRoot, '.strata', 'graph.db'), { readonly: true });
     const connection = db;
     return connection.transaction(() => {
       const meta = (key: string) => (connection.query('SELECT value FROM meta WHERE key = ?').get(key) as {value: string} | null)?.value ?? '';

@@ -1,10 +1,11 @@
+import { parseTypeScript } from '../source-parser';
 import type {
   DataDependencyInfo,
   StateAccessMode,
   StateDependencyInfo,
   StateDependencyItem,
 } from '../../types';
-import { COMMON_HOOKS_IGNORE } from '../contract';
+import { COMMON_HOOKS_IGNORE } from './hook-names';
 import { escapeRegExp } from '../patterns';
 import ts from 'typescript';
 import type { FrontendFramework } from '../../types';
@@ -47,7 +48,7 @@ export function extractStateDependencies(
   const storeRegex = /^use[A-Za-z0-9_$]*Store$/;
   const reduxRegex = /^(useSelector|useDispatch|useAppSelector|useAppDispatch)$/;
   const hookRegex = /^use[A-Z][A-Za-z0-9_$]*$/;
-  const parsed = blocks.map(b => ({ ...b, sf: ts.createSourceFile('file.tsx', b.code, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX) }));
+  const parsed = blocks.map(b => ({ ...b, sf: parseTypeScript('file.tsx', b.code, ts.ScriptKind.TSX) }));
   function declarations(node: ts.Node): void {
     if ((ts.isFunctionDeclaration(node) || ts.isVariableDeclaration(node) || ts.isClassDeclaration(node)) && node.name && ts.isIdentifier(node.name)) declaredDefinitions.add(node.name.text);
     if (ts.isImportDeclaration(node) && !node.importClause?.isTypeOnly && node.importClause?.namedBindings && ts.isNamedImports(node.importClause.namedBindings)) {
@@ -85,7 +86,10 @@ export function extractStateDependencies(
           const name = aliases.get(local) ?? local;
           const arg = node.arguments[0];
           if (name === 'useStore' && arg && ts.isIdentifier(arg)) stores.add(arg.text);
-          else if (name === 'useState' && arg && (ts.isIdentifier(arg) || ts.isStringLiteralLike(arg))) stores.add(arg.text);
+          else if (name === 'useState' && arg && (ts.isIdentifier(arg) || ts.isStringLiteralLike(arg))) {
+            stores.add(arg.text);
+            if (ts.isStringLiteralLike(arg)) composables.add(local);
+          }
           else if ((name === 'useContext' || name === 'inject' || name === 'getContext' || name === 'setContext') && arg && (ts.isIdentifier(arg) || ts.isStringLiteralLike(arg))) contexts.add(arg.text);
           else if (name === 'use' && arg && (ts.isIdentifier(arg) || ts.isPropertyAccessExpression(arg))) {
             const argText = arg.getText(sf);
@@ -151,7 +155,7 @@ export function extractStateDependencies(
         .filter(Boolean);
       for (const v of vars) {
         const isAction =
-          /^(?:set|update|delete|add|remove|open|close|mutate|trigger|run|toggle|reset|dispatch|handle|submit|confirm|checkout|post|put|patch)/i.test(
+          /^(?:set|update|delete|add|remove|open|close|mutate|trigger|run|toggle|reset|dispatch|handle|submit|confirm|checkout|post|put|patch|init|initialize|load|fetch|refresh|sync|save|create|clear)/i.test(
             v
           ) || v.endsWith('Action');
         if (isAction) {
@@ -189,7 +193,7 @@ export function extractStateDependencies(
       for (const match of executableContent.matchAll(ctxDestructRegex)) {
         const vars = match[1].split(',').map((v) => v.trim().split(':')[0].trim()).filter(Boolean);
         for (const v of vars) {
-          if (/^(?:set|update|dispatch|toggle)/i.test(v)) actionVars.add(v);
+          if (/^(?:set|update|dispatch|toggle|init|initialize|load|fetch|refresh|sync|save|create|clear)/i.test(v)) actionVars.add(v);
           else readVars.add(v);
         }
       }
@@ -274,12 +278,22 @@ export function extractStateDependencies(
       }
 
       if (!matchedMode) {
-        // Invoking destructured action: checkout(), setCount(), dispatch()
+        // Invoking destructured action: checkout(), setCount(), dispatch(), logout(), login()
+        const isPureGetter = /^(?:get|is|has|can|should|will|check|validate|format|parse|compute|map|to|use|t$|_)/;
         for (const act of dep.actionVars) {
           if (new RegExp(`\\b${escapeRegExp(act)}\\s*\\(`).test(line)) {
             matchedMode = 'write';
             snippet = `${act}()`;
             break;
+          }
+        }
+        if (!matchedMode) {
+          for (const rv of dep.readVars) {
+            if (!isPureGetter.test(rv) && new RegExp(`\\b${escapeRegExp(rv)}\\s*\\(`).test(line)) {
+              matchedMode = 'write';
+              snippet = `${rv}()`;
+              break;
+            }
           }
         }
       }
@@ -367,9 +381,16 @@ export function extractDataDependencies(
     names.forEach((n) => serverActions.add(n));
   }
 
-  const actionFunctionCallRegex = /\b([A-Za-z0-9_$]+Action)\s*\(/g;
-  for (const m of content.matchAll(actionFunctionCallRegex)) {
-    serverActions.add(m[1]);
+  const isNextOrServerModule =
+    _framework === 'next' ||
+    content.includes("'use server'") ||
+    content.includes('"use server"');
+
+  if (isNextOrServerModule) {
+    const actionFunctionCallRegex = /\b([a-z][A-Za-z0-9_$]*Action)\s*\(/g;
+    for (const m of content.matchAll(actionFunctionCallRegex)) {
+      serverActions.add(m[1]);
+    }
   }
 
   // 2. TanStack Query / SWR / Vue Query

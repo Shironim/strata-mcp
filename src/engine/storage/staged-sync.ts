@@ -2,23 +2,26 @@ import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { basename, extname, normalize, sep, resolve } from 'node:path';
 import type { Database, Statement } from 'bun:sqlite';
-import { INDEX_CONFIG_FILES, isConfigFile, iterateFiles } from '../collector';
+import { isConfigFile, iterateFiles } from '../collector';
+import { checkAnalysisCancelled, analysisSignal } from '../analysis-context';
 import { loadAliasConfigWithDependencies } from '../resolver';
 import { assertSourceSize } from '../source-file';
 import { canonicalizePath } from '../path-resolver';
 import { scanRoutes } from '../routes';
-import { batchParser } from './delta-sync';
+import { batchParser, type ParsedFilePayload } from './delta-sync';
 import { SUPPORTED_EXTENSIONS, isLayoutFile } from './schema';
 import { isPageFile } from '../tree';
-import { STRATA_VERSION } from '../../version';
-import type { SyncStats } from '../../types';
+import { STRATA_VERSION, FULL_ENGINE_REVISION } from '../../version';
+import type { SyncStats, StateDependencyItem } from '../../types';
 
 async function hashFile(path: string): Promise<{hash: string; mtime: number; size: number}> {
+  checkAnalysisCancelled();
   const file = await fs.open(path, 'r');
   try {
     const before = await file.stat(); assertSourceSize(before.size, path);
     const hash = createHash('sha256'); const buffer = Buffer.allocUnsafe(64 * 1024); let size = 0;
     while (true) {
+      checkAnalysisCancelled();
       const { bytesRead } = await file.read(buffer);
       if (!bytesRead) break;
       size += bytesRead; assertSourceSize(size, path); hash.update(buffer.subarray(0, bytesRead));
@@ -33,7 +36,7 @@ function meta(db: Database, key: string): string {
   return (db.query('SELECT value FROM meta WHERE key = ?').get(key) as {value: string} | null)?.value ?? '';
 }
 
-/** TEMP tables spill to disk and disappear even after a killed worker. */
+/** Stage parsing before publishing a coherent index transaction. */
 export async function stagedSync(root: string, scopePath: string | undefined, db: Database): Promise<SyncStats> {
   const start = performance.now(); const statements: Statement[] = [];
   let parserInvocations = 0;
@@ -44,17 +47,17 @@ export async function stagedSync(root: string, scopePath: string | undefined, db
     db.run(`
       PRAGMA temp_store = FILE;
       DROP TABLE IF EXISTS temp.sync_files; DROP TABLE IF EXISTS temp.sync_verify;
-      DROP TABLE IF EXISTS temp.sync_routes; DROP TABLE IF EXISTS temp.sync_preserved_edges;
+      DROP TABLE IF EXISTS temp.sync_routes;
       CREATE TEMP TABLE sync_files(path TEXT PRIMARY KEY, hash TEXT NOT NULL, mtime REAL, size INTEGER, config INTEGER, payload TEXT);
       CREATE TEMP TABLE sync_verify(path TEXT PRIMARY KEY, hash TEXT NOT NULL, mtime REAL, size INTEGER, config INTEGER);
       CREATE TEMP TABLE sync_routes(url TEXT PRIMARY KEY, path TEXT, type TEXT, params TEXT, handlers TEXT, layouts TEXT);
-      CREATE TEMP TABLE sync_preserved_edges(parent_path TEXT NOT NULL, child_path TEXT NOT NULL, import_type TEXT NOT NULL, is_rendered INTEGER, payload_json TEXT);
     `);
     const insert = prepare('INSERT INTO sync_files(path, hash, mtime, size, config) VALUES (?,?,?,?,?)');
     const verifyInsert = prepare('INSERT INTO sync_verify VALUES (?,?,?,?,?)');
     const firstPassCache = new Map<string, { hash: string; mtime: number; size: number }>();
     async function scan(statement: Statement, isVerify = false): Promise<void> {
       for await (const raw of iterateFiles(root, {ignoreRoot: root, includeConfigFiles: true, failOnReadError: true})) {
+        checkAnalysisCancelled();
         const config = isConfigFile(basename(raw));
         if (!config && !SUPPORTED_EXTENSIONS.has(extname(raw).toLowerCase())) continue;
         const path = normalize(canonicalizePath(raw));
@@ -83,7 +86,7 @@ export async function stagedSync(root: string, scopePath: string | undefined, db
       }
     }
     await scan(insert, false);
-    const configHash = createHash('sha256').update(STRATA_VERSION).update('\0structural-contract-phase2-v1');
+    const configHash = createHash('sha256').update(FULL_ENGINE_REVISION);
     const configRows = prepare('SELECT path, hash FROM sync_files WHERE config = 1 ORDER BY path');
     for (const row of configRows.iterate() as Iterable<{path: string; hash: string}>) {
       configHash.update(row.path).update('\0').update(row.hash);
@@ -158,7 +161,18 @@ export async function stagedSync(root: string, scopePath: string | undefined, db
       }
       return stale;
     };
-    const staleDependents = await checkDependencyChanges();
+    let staleDependents = await checkDependencyChanges();
+    let fallbackReason: NonNullable<SyncStats['scope']>['fallbackReason'] = reset && targetScope !== root ? 'INDEX_INVALIDATED' : null;
+    // Decide scope before deriving mutations, deletions or reverse dependencies.
+    if (!reset && scope !== root && (counts.added || counts.modified || deleted || staleDependents.size)) {
+      scope = root;
+      prefix = scope + sep;
+      bindings = { $scope: scope, $prefix: prefix };
+      counts = countFiles();
+      deleted = countDeleted();
+      staleDependents = await checkDependencyChanges();
+      fallbackReason = 'DEPENDENCY_CLOSURE_UNVERIFIED';
+    }
     const staleCount = staleDependents.size;
 
     // Collect direct mutations (added, modified, deleted, stale secondary dependencies)
@@ -176,7 +190,6 @@ export async function stagedSync(root: string, scopePath: string | undefined, db
 
     // Compute minimal impacted set via transitive reverse dependencies (file_dependencies and edges)
     const impactedSet = new Set<string>(directMutations);
-    let hasOutsideDependents = false;
     if (!reset && directMutations.size > 0) {
       const queue = Array.from(directMutations);
 
@@ -211,15 +224,12 @@ export async function stagedSync(root: string, scopePath: string | undefined, db
         WHERE c.path = ?
       `);
 
-      while (queue.length > 0) {
-        const curr = queue.shift()!;
+      for (let cursor = 0; cursor < queue.length; cursor++) {
+        checkAnalysisCancelled();
+        const curr = queue[cursor];
         try {
           for (const row of findReverseFileDeps.all(curr) as Array<{ dependent_path: string }>) {
             const depPath = row.dependent_path;
-            const inCurrentScope = depPath === scope || depPath.startsWith(prefix);
-            if (!inCurrentScope) {
-              hasOutsideDependents = true;
-            }
             if (!impactedSet.has(depPath)) {
               impactedSet.add(depPath);
               queue.push(depPath);
@@ -230,10 +240,6 @@ export async function stagedSync(root: string, scopePath: string | undefined, db
         try {
           for (const row of findReverseEdgeParents.all(curr) as Array<{ parent_path: string }>) {
             const parentPath = row.parent_path;
-            const inCurrentScope = parentPath === scope || parentPath.startsWith(prefix);
-            if (!inCurrentScope) {
-              hasOutsideDependents = true;
-            }
             if (!impactedSet.has(parentPath)) {
               impactedSet.add(parentPath);
               queue.push(parentPath);
@@ -241,18 +247,6 @@ export async function stagedSync(root: string, scopePath: string | undefined, db
           }
         } catch {}
       }
-    }
-
-    let fallbackReason: 'INDEX_INVALIDATED' | 'DEPENDENCY_CLOSURE_UNVERIFIED' | null = reset && targetScope !== root ? 'INDEX_INVALIDATED' : null;
-    if (!reset && scope !== root && (hasOutsideDependents || directMutations.size > 0)) {
-      // If scoped sync has outside reverse dependents or mutations that could reach outside,
-      // fallback conservatively to root to guarantee complete reverse graph correctness
-      scope = root;
-      prefix = scope + sep;
-      bindings = { $scope: scope, $prefix: prefix };
-      counts = countFiles();
-      deleted = countDeleted();
-      fallbackReason = 'DEPENDENCY_CLOSURE_UNVERIFIED';
     }
 
     const changed = reset || directMutations.size > 0;
@@ -278,6 +272,7 @@ export async function stagedSync(root: string, scopePath: string | undefined, db
 
       const update = prepare('UPDATE sync_files SET payload = ? WHERE path = ?');
       for (const row of candidatesIterable) {
+        checkAnalysisCancelled();
         try {
           parserInvocations++;
           const parsed = await batchParser([row.path], root, new Map(), false);
@@ -300,7 +295,7 @@ export async function stagedSync(root: string, scopePath: string | undefined, db
           update.run(JSON.stringify(payload), row.path);
           parsed.files.clear();
         } catch (err) {
-          if (!(err instanceof Error && err.message.startsWith('WORKSPACE_CHANGED'))) {
+          if (!analysisSignal()?.aborted && !(err instanceof Error && err.message.startsWith('WORKSPACE_CHANGED'))) {
             db.run('DELETE FROM files WHERE path = ?', [row.path]);
             db.run("INSERT OR REPLACE INTO meta VALUES ('index_invalid', '1')");
           }
@@ -313,6 +308,11 @@ export async function stagedSync(root: string, scopePath: string | undefined, db
     const routeInsert = prepare('INSERT OR REPLACE INTO sync_routes VALUES (?,?,?,?,?,?)');
     for (const route of manifest.routes) routeInsert.run(route.path, normalize(canonicalizePath(route.filePath)), route.type, JSON.stringify(route.params), JSON.stringify(route.handlers ?? null), JSON.stringify(route.layouts ?? null));
     manifest.routes.length = 0;
+    const routeHash = createHash('sha256');
+    for (const row of db.query('SELECT * FROM sync_routes ORDER BY url').iterate()) routeHash.update(JSON.stringify(row));
+    const routesFingerprint = routeHash.digest('hex');
+    const snapshotChanged = changed || meta(db, 'routes_fingerprint') !== routesFingerprint;
+    const nextGeneration = Number(generation || 0) + (snapshotChanged ? 1 : 0);
     await scan(verifyInsert, true);
     const mismatch = db.query(`
       WITH in_files_only AS (
@@ -328,124 +328,76 @@ export async function stagedSync(root: string, scopePath: string | undefined, db
       ) LIMIT 1
     `).get();
     if (mismatch || meta(db, 'sync_generation') !== generation) throw new Error('WORKSPACE_CHANGED: workspace or index changed before commit');
+    checkAnalysisCancelled();
     const commit = db.transaction(() => {
       if (meta(db, 'sync_generation') !== generation) throw new Error('WORKSPACE_CHANGED: concurrent index publication');
       if (changed) {
-        db.run('DELETE FROM temp.sync_preserved_edges');
-        if (reset) {
-          // Full scope reset publication
-          prepare(`INSERT INTO temp.sync_preserved_edges(parent_path, child_path, import_type, is_rendered, payload_json)
-            SELECT p.path, c.path, e.import_type, e.is_rendered, e.payload_json
-            FROM edges e
-            JOIN files c ON c.id = e.child_file_id
-            JOIN files p ON p.id = e.parent_file_id
-            WHERE (c.path = $scope OR substr(c.path, 1, length($prefix)) = $prefix)
-              AND NOT (p.path = $scope OR substr(p.path, 1, length($prefix)) = $prefix)`).run(bindings);
-          prepare(`DELETE FROM files AS s WHERE ${scopeSql}`).run(bindings);
-          const rows = prepare('SELECT path, hash, mtime, size, payload FROM sync_files WHERE payload IS NOT NULL ORDER BY path');
-          const insertFile = prepare('INSERT INTO files(path,framework,mtime,size,content_hash,is_page,is_layout,render_boundary,boundary_directive) VALUES (?,?,?,?,?,?,?,?,?)');
-          const insertComponent = prepare('INSERT INTO components(file_id,name,contract_json) SELECT id,?,? FROM files WHERE path=?');
-          const insertState = prepare('INSERT INTO state_deps(file_id,kind,identifier,access_mode,line_number,usage_snippet,accessed_properties) SELECT id,?,?,?,?,?,? FROM files WHERE path=?');
-          const insertDep = prepare('INSERT OR REPLACE INTO file_dependencies(file_id,dependency_path,content_hash,is_external) SELECT id,?,?,? FROM files WHERE path=?');
-          for (const row of rows.iterate() as Iterable<{path: string; hash: string; mtime: number; size: number; payload: string}>) {
-            const p = JSON.parse(row.payload);
-            insertFile.run(row.path, p.framework, row.mtime, row.size, row.hash, isPageFile(row.path) ? 1 : 0, isLayoutFile(row.path) ? 1 : 0, p.boundary.boundary, p.boundary.directive ?? null);
-            insertComponent.run(p.compName, JSON.stringify(p.contract), row.path);
-            const deps = p.stateDeps.items?.length ? p.stateDeps.items : [
-              ...p.stateDeps.stores.map((identifier: string) => ({kind: 'store', identifier})),
-              ...p.stateDeps.contexts.map((identifier: string) => ({kind: 'context', identifier})),
-              ...p.stateDeps.composables.map((identifier: string) => ({kind: 'composable', identifier})),
-            ];
-            for (const dep of deps) insertState.run(dep.kind, dep.identifier, dep.accessMode ?? 'read', dep.lineNumber ?? 0, dep.usageSnippet ?? null, dep.accessedProperties ? JSON.stringify(dep.accessedProperties) : null, row.path);
-            const inputDeps = p.dependencies ?? p.contract?.dependencies;
-            if (Array.isArray(inputDeps)) {
-              for (const dep of inputDeps) {
-                insertDep.run(dep.path, dep.hash, dep.isExternal ? 1 : 0, row.path);
-              }
-            }
-          }
-          // Join target paths on disk after all rows exist; no global file-id map in RAM.
-          db.run(`INSERT OR IGNORE INTO edges(parent_file_id,child_file_id,import_type,is_rendered,payload_json)
-            SELECT parent.id,child.id,CASE WHEN json_extract(edge.value,'$.isDynamic') THEN 'dynamic' ELSE 'static' END,
-              CASE WHEN json_extract(edge.value,'$.isRendered') = 1 OR json_extract(edge.value,'$.isRendered') = true THEN 1 ELSE 0 END,
-              json_extract(edge.value,'$.payload')
-            FROM sync_files staged JOIN files parent ON parent.path=staged.path,
-            json_each(staged.payload,'$.edges') edge JOIN files child ON child.path=json_extract(edge.value,'$.targetPath')
-            WHERE staged.payload IS NOT NULL`);
-          // Re-link preserved incoming edges from outside callers to refreshed scope files
-          db.run(`INSERT OR IGNORE INTO edges(parent_file_id,child_file_id,import_type,is_rendered,payload_json)
-            SELECT p.id, c.id, pie.import_type, pie.is_rendered, pie.payload_json
-            FROM temp.sync_preserved_edges pie
-            JOIN files p ON p.path = pie.parent_path
-            JOIN files c ON c.path = pie.child_path`);
-          db.run('DELETE FROM temp.sync_preserved_edges');
-        } else {
-          // Minimal Incremental Impact Set publication
-          // 1. Remove deleted files
-          const deleteFile = prepare('DELETE FROM files WHERE path = ?');
-          for (const d of deletedFilesList) {
-            deleteFile.run(d.path);
-          }
-
-          // 2. For re-parsed files with payload:
-          const checkFileExists = prepare('SELECT id FROM files WHERE path = ?');
-          const updateFile = prepare('UPDATE files SET framework = ?, mtime = ?, size = ?, content_hash = ?, is_page = ?, is_layout = ?, render_boundary = ?, boundary_directive = ? WHERE path = ?');
-          const insertFile = prepare('INSERT INTO files(path,framework,mtime,size,content_hash,is_page,is_layout,render_boundary,boundary_directive) VALUES (?,?,?,?,?,?,?,?,?)');
-
-          const clearComponents = prepare('DELETE FROM components WHERE file_id = ?');
-          const clearState = prepare('DELETE FROM state_deps WHERE file_id = ?');
-          const clearFileDeps = prepare('DELETE FROM file_dependencies WHERE file_id = ?');
-          const clearOutgoingEdges = prepare('DELETE FROM edges WHERE parent_file_id = ?');
-
-          const insertComponent = prepare('INSERT INTO components(file_id,name,contract_json) SELECT id,?,? FROM files WHERE path=?');
-          const insertState = prepare('INSERT INTO state_deps(file_id,kind,identifier,access_mode,line_number,usage_snippet,accessed_properties) SELECT id,?,?,?,?,?,? FROM files WHERE path=?');
-          const insertDep = prepare('INSERT OR REPLACE INTO file_dependencies(file_id,dependency_path,content_hash,is_external) SELECT id,?,?,? FROM files WHERE path=?');
-
-          const reparseRows = prepare('SELECT path, hash, mtime, size, payload FROM sync_files WHERE payload IS NOT NULL ORDER BY path');
-          for (const row of reparseRows.iterate() as Iterable<{path: string; hash: string; mtime: number; size: number; payload: string}>) {
-            const p = JSON.parse(row.payload);
-            const existing = checkFileExists.get(row.path) as { id: number } | null;
-            if (existing) {
-              updateFile.run(p.framework, row.mtime, row.size, row.hash, isPageFile(row.path) ? 1 : 0, isLayoutFile(row.path) ? 1 : 0, p.boundary.boundary, p.boundary.directive ?? null, row.path);
-              clearComponents.run(existing.id);
-              clearState.run(existing.id);
-              clearFileDeps.run(existing.id);
-              clearOutgoingEdges.run(existing.id);
-            } else {
-              insertFile.run(row.path, p.framework, row.mtime, row.size, row.hash, isPageFile(row.path) ? 1 : 0, isLayoutFile(row.path) ? 1 : 0, p.boundary.boundary, p.boundary.directive ?? null);
-            }
-
-            insertComponent.run(p.compName, JSON.stringify(p.contract), row.path);
-            const deps = p.stateDeps.items?.length ? p.stateDeps.items : [
-              ...p.stateDeps.stores.map((identifier: string) => ({kind: 'store', identifier})),
-              ...p.stateDeps.contexts.map((identifier: string) => ({kind: 'context', identifier})),
-              ...p.stateDeps.composables.map((identifier: string) => ({kind: 'composable', identifier})),
-            ];
-            for (const dep of deps) insertState.run(dep.kind, dep.identifier, dep.accessMode ?? 'read', dep.lineNumber ?? 0, dep.usageSnippet ?? null, dep.accessedProperties ? JSON.stringify(dep.accessedProperties) : null, row.path);
-            const inputDeps = p.dependencies ?? p.contract?.dependencies;
-            if (Array.isArray(inputDeps)) {
-              for (const dep of inputDeps) {
-                insertDep.run(dep.path, dep.hash, dep.isExternal ? 1 : 0, row.path);
-              }
-            }
-          }
-
-          // 3. Re-link outgoing edges from re-parsed files
-          db.run(`INSERT OR IGNORE INTO edges(parent_file_id,child_file_id,import_type,is_rendered,payload_json)
-            SELECT parent.id,child.id,CASE WHEN json_extract(edge.value,'$.isDynamic') THEN 'dynamic' ELSE 'static' END,
-              CASE WHEN json_extract(edge.value,'$.isRendered') = 1 OR json_extract(edge.value,'$.isRendered') = true THEN 1 ELSE 0 END,
-              json_extract(edge.value,'$.payload')
-            FROM sync_files staged JOIN files parent ON parent.path=staged.path,
-            json_each(staged.payload,'$.edges') edge JOIN files child ON child.path=json_extract(edge.value,'$.targetPath')
-            WHERE staged.payload IS NOT NULL`);
+        if (reset) db.run('DELETE FROM files');
+        // 1. Remove deleted files
+        const deleteFile = prepare('DELETE FROM files WHERE path = ?');
+        for (const d of deletedFilesList) {
+          deleteFile.run(d.path);
         }
+
+        // 2. For re-parsed files with payload:
+        const checkFileExists = prepare('SELECT id FROM files WHERE path = ?');
+        const updateFile = prepare('UPDATE files SET framework = ?, mtime = ?, size = ?, content_hash = ?, is_page = ?, is_layout = ?, render_boundary = ?, boundary_directive = ? WHERE path = ?');
+        const insertFile = prepare('INSERT INTO files(path,framework,mtime,size,content_hash,is_page,is_layout,render_boundary,boundary_directive) VALUES (?,?,?,?,?,?,?,?,?)');
+
+        const clearComponents = prepare('DELETE FROM components WHERE file_id = ?');
+        const clearState = prepare('DELETE FROM state_deps WHERE file_id = ?');
+        const clearFileDeps = prepare('DELETE FROM file_dependencies WHERE file_id = ?');
+        const clearOutgoingEdges = prepare('DELETE FROM edges WHERE parent_file_id = ?');
+
+        const insertComponent = prepare('INSERT INTO components(file_id,name,contract_json) SELECT id,?,? FROM files WHERE path=?');
+        const insertState = prepare('INSERT INTO state_deps(file_id,kind,identifier,access_mode,line_number,usage_snippet,accessed_properties) SELECT id,?,?,?,?,?,? FROM files WHERE path=?');
+        const insertDep = prepare('INSERT OR REPLACE INTO file_dependencies(file_id,dependency_path,content_hash,is_external) SELECT id,?,?,? FROM files WHERE path=?');
+
+        const reparseRows = prepare('SELECT path, hash, mtime, size, payload FROM sync_files WHERE payload IS NOT NULL ORDER BY path');
+        for (const row of reparseRows.iterate() as Iterable<{path: string; hash: string; mtime: number; size: number; payload: string}>) {
+          const p = JSON.parse(row.payload) as ParsedFilePayload;
+          const existing = checkFileExists.get(row.path) as { id: number } | null;
+          if (existing) {
+            updateFile.run(p.framework, row.mtime, row.size, row.hash, isPageFile(row.path) ? 1 : 0, isLayoutFile(row.path) ? 1 : 0, p.boundary.boundary, p.boundary.directive ?? null, row.path);
+            clearComponents.run(existing.id);
+            clearState.run(existing.id);
+            clearFileDeps.run(existing.id);
+            clearOutgoingEdges.run(existing.id);
+          } else {
+            insertFile.run(row.path, p.framework, row.mtime, row.size, row.hash, isPageFile(row.path) ? 1 : 0, isLayoutFile(row.path) ? 1 : 0, p.boundary.boundary, p.boundary.directive ?? null);
+          }
+
+          insertComponent.run(p.compName, JSON.stringify(p.contract), row.path);
+          const deps: StateDependencyItem[] = p.stateDeps.items?.length ? p.stateDeps.items : [
+            ...p.stateDeps.stores.map<StateDependencyItem>(identifier => ({kind: 'store', identifier, accessMode: 'read'})),
+            ...p.stateDeps.contexts.map<StateDependencyItem>(identifier => ({kind: 'context', identifier, accessMode: 'read'})),
+            ...p.stateDeps.composables.map<StateDependencyItem>(identifier => ({kind: 'composable', identifier, accessMode: 'read'})),
+          ];
+          for (const dep of deps) insertState.run(dep.kind, dep.identifier, dep.accessMode ?? 'read', dep.lineNumber ?? 0, dep.usageSnippet ?? null, dep.accessedProperties ? JSON.stringify(dep.accessedProperties) : null, row.path);
+          const inputDeps = p.dependencies ?? p.contract?.dependencies;
+          if (Array.isArray(inputDeps)) {
+            for (const dep of inputDeps) {
+              insertDep.run(dep.path, dep.hash, dep.isExternal ? 1 : 0, row.path);
+            }
+          }
+        }
+
+        // 3. Re-link outgoing edges from re-parsed files
+        db.run(`INSERT OR IGNORE INTO edges(parent_file_id,child_file_id,import_type,is_rendered,payload_json)
+          SELECT parent.id,child.id,CASE WHEN json_extract(edge.value,'$.isDynamic') THEN 'dynamic' ELSE 'static' END,
+            CASE WHEN json_extract(edge.value,'$.isRendered') = 1 OR json_extract(edge.value,'$.isRendered') = true THEN 1 ELSE 0 END,
+            json_extract(edge.value,'$.payload')
+          FROM sync_files staged JOIN files parent ON parent.path=staged.path,
+          json_each(staged.payload,'$.edges') edge JOIN files child ON child.path=json_extract(edge.value,'$.targetPath')
+          WHERE staged.payload IS NOT NULL`);
       }
       db.run('DELETE FROM routes');
       db.run(`INSERT INTO routes(url_path,file_id,type,params_json,handlers_json,layout_chain_json)
         SELECT r.url,f.id,r.type,r.params,r.handlers,r.layouts FROM sync_routes r JOIN files f ON f.path=r.path`);
       const setMeta = prepare('INSERT OR REPLACE INTO meta(key,value) VALUES (?,?)');
       setMeta.run('cache_version', STRATA_VERSION); setMeta.run('config_fingerprint', fingerprint);
-      setMeta.run('sync_generation', String(Number(generation || 0) + 1));
+      setMeta.run('sync_generation', String(nextGeneration));
+      setMeta.run('routes_fingerprint', routesFingerprint);
       setMeta.run('index_invalid', '');
     });
     commit();
@@ -457,12 +409,13 @@ export async function stagedSync(root: string, scopePath: string | undefined, db
       parserInvocations,
       total: counts.total,
       durationMs: Math.round(performance.now() - start),
-      syncGeneration: Number(generation || 0) + 1,
+      syncGeneration: nextGeneration,
       configFingerprint: fingerprint,
-      cacheHit: !changed,
+      cacheHit: !snapshotChanged,
       scope: { requested: targetScope, effective: scope, fallbackReason },
     };
   } catch (err) {
+    if (analysisSignal()?.aborted) throw err;
     // Derived data cannot be trusted after an unreadable file or an unsuccessful refresh.
     const isBusy =
       (err as { code?: string })?.code === 'SQLITE_BUSY' ||

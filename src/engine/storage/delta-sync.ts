@@ -20,7 +20,7 @@ import { loadAliasConfig } from '../resolver';
 import { canonicalizePath } from '../path-resolver';
 import { getCandidateNames } from '../template';
 import { scanRoutes } from '../routes';
-import { getWorkspaceDatabase } from './schema';
+import { getWorkspaceDatabase, resolveIndexedWorkspaceRoot } from './schema';
 import type {
   ComponentContract,
   FrontendFramework,
@@ -171,7 +171,9 @@ export async function syncWorkspace(
   database?: Database,
   options?: { rebuild?: boolean }
 ): Promise<SyncStats> {
-  const absRoot = canonicalizePath(workspaceRoot);
+  const absRoot = database
+    ? canonicalizePath(workspaceRoot)
+    : (resolveIndexedWorkspaceRoot(workspaceRoot) ?? canonicalizePath(workspaceRoot));
   const db = database ?? getWorkspaceDatabase(absRoot);
   const previous = syncQueues.get(db) ?? Promise.resolve();
   const operation = previous.catch(() => {}).then(async () => {

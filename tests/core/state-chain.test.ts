@@ -67,12 +67,12 @@ describe('State Dependency Chain Tracing Engine', () => {
 
     const warmResult = await traceStateChain(tempDir, { identifier: 'useCartStore' });
     expect(warmResult._meta?.cached).toBe(true);
-    expect(warmResult._meta?.syncGeneration).toBe(2);
+    expect(warmResult._meta?.syncGeneration).toBe(result._meta?.syncGeneration);
 
     await fs.writeFile(join(tempDir, 'composables', 'useExtra.ts'), 'export function useExtra() { return {}; }', 'utf8');
     const changedResult = await traceStateChain(tempDir, { identifier: 'useCartStore' });
     expect(changedResult._meta?.cached).toBe(false);
-    expect(changedResult._meta?.syncGeneration).toBe(3);
+    expect(changedResult._meta?.syncGeneration).toBe((warmResult._meta?.syncGeneration ?? 0) + 1);
 
     // Formatting check
     const formatted = formatStateChainAsText(result);
@@ -80,6 +80,16 @@ describe('State Dependency Chain Tracing Engine', () => {
     expect(formatted).toContain('Graph generation 1 | refreshed');
     expect(formatted).toContain('CartPage.vue');
     expect(formatted).toContain('useNotification');
+
+    const { traceStateTool } = await import('../../src/tools');
+    const fileRes = await traceStateTool.handler({
+      path: join(tempDir, 'pages/CartPage.vue'),
+      root: tempDir,
+    });
+    expect(fileRes.isError).not.toBe(true);
+    const fileText = fileRes.content[0].text;
+    expect(fileText).toContain('File State Dependencies for: pages/CartPage.vue');
+    expect(fileText).toContain('useCartStore');
 
     // Clean up with Windows file lock safety
     try {

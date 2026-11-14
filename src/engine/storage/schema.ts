@@ -1,6 +1,6 @@
 import { Database } from 'bun:sqlite';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { basename, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { canonicalizePath } from '../path-resolver';
 
 export const SUPPORTED_EXTENSIONS = new Set(['.vue', '.astro', '.svelte', '.tsx', '.jsx', '.ts', '.js']);
@@ -29,12 +29,25 @@ export interface WorkspaceDatabaseOptions {
 export const dbRegistry = new Map<string, Database>();
 
 /**
- * Checks whether the workspace has an existing, initialized .strata database directory.
+ * Walks up parent directories from workspaceRoot to find an initialized .strata directory.
+ */
+export function resolveIndexedWorkspaceRoot(workspaceRoot: string): string | null {
+  let current = canonicalizePath(workspaceRoot);
+  while (true) {
+    if (existsSync(join(current, '.strata'))) {
+      return current;
+    }
+    const parent = dirname(current);
+    if (parent === current) return null;
+    current = parent;
+  }
+}
+
+/**
+ * Checks whether the workspace (or an ancestor monorepo root) has an initialized .strata database directory.
  */
 export function isWorkspaceIndexed(workspaceRoot: string): boolean {
-  const absRoot = canonicalizePath(workspaceRoot);
-  const dbDir = join(absRoot, '.strata');
-  return existsSync(dbDir);
+  return resolveIndexedWorkspaceRoot(workspaceRoot) !== null;
 }
 
 /**
@@ -48,7 +61,10 @@ export function getWorkspaceDatabase(
   workspaceRoot: string,
   options: WorkspaceDatabaseOptions = {}
 ): Database {
-  const absRoot = canonicalizePath(workspaceRoot);
+  const requestedRoot = canonicalizePath(workspaceRoot);
+  const absRoot = options.create
+    ? requestedRoot
+    : (resolveIndexedWorkspaceRoot(requestedRoot) ?? requestedRoot);
   const existing = dbRegistry.get(absRoot);
   if (existing) {
     return existing;
