@@ -211,6 +211,82 @@ export interface TsConfigHierarchyResult {
   configFiles: string[];
 }
 
+interface ParsedTsConfigNode {
+  childConfigs: string[];
+  localPaths: Record<string, { targets: string[]; baseDir: string }>;
+}
+
+function parseTsConfigNode(canonical: string, raw: string): ParsedTsConfigNode | null {
+  let parsed: any;
+  try {
+    parsed = JSON.parse(stripJsonComments(raw));
+  } catch {
+    return null;
+  }
+
+  if (!parsed || typeof parsed !== 'object') return null;
+
+  const childConfigs: string[] = [];
+  // 1. Process "extends" first (base configs load before child configs)
+  if (parsed.extends) {
+    const extendsList = Array.isArray(parsed.extends)
+      ? parsed.extends
+      : typeof parsed.extends === 'string'
+      ? [parsed.extends]
+      : [];
+
+    for (const extTarget of extendsList) {
+      if (typeof extTarget === 'string' && extTarget.trim()) {
+        const resolved = resolveExtendsTarget(canonical, extTarget.trim());
+        if (resolved) childConfigs.push(resolved);
+      }
+    }
+  }
+
+  // 2. Process "references" if present and local paths are not defined
+  if (Array.isArray(parsed.references)) {
+    for (const ref of parsed.references) {
+      if (ref && typeof ref.path === 'string' && ref.path.trim()) {
+        const resolved = resolveExtendsTarget(canonical, ref.path.trim());
+        if (resolved) childConfigs.push(resolved);
+      }
+    }
+  }
+
+  // 3. Extract this config's compilerOptions.paths (applied after base configs)
+  const currentDir = dirname(canonical);
+  const baseUrl = parsed.compilerOptions?.baseUrl;
+  const effectiveBaseDir = baseUrl ? resolve(currentDir, baseUrl) : currentDir;
+  const rawPaths = parsed.compilerOptions?.paths;
+  const localPaths: Record<string, { targets: string[]; baseDir: string }> = {};
+
+  if (rawPaths && typeof rawPaths === 'object') {
+    for (const [alias, targets] of Object.entries(rawPaths)) {
+      if (Array.isArray(targets) && targets.length > 0) {
+        localPaths[alias] = {
+          targets: targets.map(String),
+          baseDir: effectiveBaseDir,
+        };
+      }
+    }
+  }
+
+  return { childConfigs, localPaths };
+}
+
+function finalizeTsConfigHierarchy(
+  configFiles: string[],
+  mergedPaths: Record<string, { targets: string[]; baseDir: string }>
+): TsConfigHierarchyResult {
+  const paths: Record<string, string[]> = {};
+  const baseDirForPath: Record<string, string> = {};
+  for (const [alias, info] of Object.entries(mergedPaths)) {
+    paths[alias] = info.targets;
+    baseDirForPath[alias] = info.baseDir;
+  }
+  return { paths, baseDirForPath, configFiles };
+}
+
 export async function loadTsConfigHierarchy(configFile: string): Promise<TsConfigHierarchyResult> {
   const visited = new Set<string>();
   const configFiles: string[] = [];
@@ -229,73 +305,14 @@ export async function loadTsConfigHierarchy(configFile: string): Promise<TsConfi
       return;
     }
 
-    let parsed: any;
-    try {
-      parsed = JSON.parse(stripJsonComments(raw));
-    } catch {
-      return;
-    }
-
-    if (!parsed || typeof parsed !== 'object') return;
-
-    // 1. Process "extends" first (base configs load before child configs)
-    if (parsed.extends) {
-      const extendsList = Array.isArray(parsed.extends)
-        ? parsed.extends
-        : typeof parsed.extends === 'string'
-        ? [parsed.extends]
-        : [];
-
-      for (const extTarget of extendsList) {
-        if (typeof extTarget === 'string' && extTarget.trim()) {
-          const resolved = resolveExtendsTarget(canonical, extTarget.trim());
-          if (resolved) {
-            await loadRecursive(resolved);
-          }
-        }
-      }
-    }
-
-    // 2. Process "references" if present and local paths are not defined
-    if (Array.isArray(parsed.references)) {
-      for (const ref of parsed.references) {
-        if (ref && typeof ref.path === 'string' && ref.path.trim()) {
-          const resolved = resolveExtendsTarget(canonical, ref.path.trim());
-          if (resolved) {
-            await loadRecursive(resolved);
-          }
-        }
-      }
-    }
-
-    // 3. Apply this config's compilerOptions.paths (overriding base)
-    const currentDir = dirname(canonical);
-    const baseUrl = parsed.compilerOptions?.baseUrl;
-    const effectiveBaseDir = baseUrl ? resolve(currentDir, baseUrl) : currentDir;
-    const localPaths = parsed.compilerOptions?.paths;
-
-    if (localPaths && typeof localPaths === 'object') {
-      for (const [alias, targets] of Object.entries(localPaths)) {
-        if (Array.isArray(targets) && targets.length > 0) {
-          mergedPaths[alias] = {
-            targets: targets.map(String),
-            baseDir: effectiveBaseDir,
-          };
-        }
-      }
-    }
+    const node = parseTsConfigNode(canonical, raw);
+    if (!node) return;
+    for (const child of node.childConfigs) await loadRecursive(child);
+    Object.assign(mergedPaths, node.localPaths);
   }
 
   await loadRecursive(configFile);
-
-  const paths: Record<string, string[]> = {};
-  const baseDirForPath: Record<string, string> = {};
-  for (const [alias, info] of Object.entries(mergedPaths)) {
-    paths[alias] = info.targets;
-    baseDirForPath[alias] = info.baseDir;
-  }
-
-  return { paths, baseDirForPath, configFiles };
+  return finalizeTsConfigHierarchy(configFiles, mergedPaths);
 }
 
 export function loadTsConfigHierarchySync(configFile: string): TsConfigHierarchyResult {
@@ -316,70 +333,14 @@ export function loadTsConfigHierarchySync(configFile: string): TsConfigHierarchy
       return;
     }
 
-    let parsed: any;
-    try {
-      parsed = JSON.parse(stripJsonComments(raw));
-    } catch {
-      return;
-    }
-
-    if (!parsed || typeof parsed !== 'object') return;
-
-    if (parsed.extends) {
-      const extendsList = Array.isArray(parsed.extends)
-        ? parsed.extends
-        : typeof parsed.extends === 'string'
-        ? [parsed.extends]
-        : [];
-
-      for (const extTarget of extendsList) {
-        if (typeof extTarget === 'string' && extTarget.trim()) {
-          const resolved = resolveExtendsTarget(canonical, extTarget.trim());
-          if (resolved) {
-            loadRecursive(resolved);
-          }
-        }
-      }
-    }
-
-    if (Array.isArray(parsed.references)) {
-      for (const ref of parsed.references) {
-        if (ref && typeof ref.path === 'string' && ref.path.trim()) {
-          const resolved = resolveExtendsTarget(canonical, ref.path.trim());
-          if (resolved) {
-            loadRecursive(resolved);
-          }
-        }
-      }
-    }
-
-    const currentDir = dirname(canonical);
-    const baseUrl = parsed.compilerOptions?.baseUrl;
-    const effectiveBaseDir = baseUrl ? resolve(currentDir, baseUrl) : currentDir;
-    const localPaths = parsed.compilerOptions?.paths;
-
-    if (localPaths && typeof localPaths === 'object') {
-      for (const [alias, targets] of Object.entries(localPaths)) {
-        if (Array.isArray(targets) && targets.length > 0) {
-          mergedPaths[alias] = {
-            targets: targets.map(String),
-            baseDir: effectiveBaseDir,
-          };
-        }
-      }
-    }
+    const node = parseTsConfigNode(canonical, raw);
+    if (!node) return;
+    for (const child of node.childConfigs) loadRecursive(child);
+    Object.assign(mergedPaths, node.localPaths);
   }
 
   loadRecursive(configFile);
-
-  const paths: Record<string, string[]> = {};
-  const baseDirForPath: Record<string, string> = {};
-  for (const [alias, info] of Object.entries(mergedPaths)) {
-    paths[alias] = info.targets;
-    baseDirForPath[alias] = info.baseDir;
-  }
-
-  return { paths, baseDirForPath, configFiles };
+  return finalizeTsConfigHierarchy(configFiles, mergedPaths);
 }
 
 interface PathEntryWithBaseDir {

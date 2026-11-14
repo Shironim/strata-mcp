@@ -1,3 +1,4 @@
+import { parseTypeScript } from '../source-parser';
 import { parse as parseDom, NodeTypes } from "@vue/compiler-dom";
 import ts from "typescript";
 import { isComponentNameMatch } from "../template";
@@ -16,6 +17,20 @@ export interface PropTracker {
   drilledThrough: string[];
 }
 
+const IGNORED_PROP_NAMES = new Set([
+  'class',
+  'className',
+  'style',
+  'id',
+  'ref',
+  'key',
+  'v-for',
+  'v-if',
+  'v-else-if',
+  'v-else',
+  'v-show',
+]);
+
 /**
  * Extracts props and dynamic bindings passed to child components in a template or JSX.
  */
@@ -27,7 +42,7 @@ function extractVueElementProp(prop: any, seenProps: Set<string>, passedProps: P
       propName.startsWith(':') ||
       propName.startsWith('v-') ||
       propName.startsWith('@') ||
-      ['class', 'style', 'id', 'ref', 'key'].includes(propName)
+      IGNORED_PROP_NAMES.has(propName)
     ) {
       return;
     }
@@ -44,6 +59,7 @@ function extractVueElementProp(prop: any, seenProps: Set<string>, passedProps: P
     if (prop.name === 'bind') {
       if (prop.arg && 'content' in prop.arg) {
         const propName = prop.arg.content;
+        if (IGNORED_PROP_NAMES.has(propName)) return;
         const expression = prop.exp && 'content' in prop.exp ? prop.exp.content.trim() : '';
         if (!seenProps.has(propName)) {
           seenProps.add(propName);
@@ -101,7 +117,14 @@ function extractJsxAttributeProp(
 ): void {
   if (ts.isJsxAttribute(attr)) {
     const propName = ts.isIdentifier(attr.name) ? attr.name.text : attr.name.getText(sourceFile);
-    if (['class', 'className', 'style', 'id', 'ref', 'key'].includes(propName)) {
+    if (
+      !propName ||
+      /\s/.test(propName) ||
+      propName.startsWith(':') ||
+      propName.startsWith('v-') ||
+      propName.startsWith('@') ||
+      IGNORED_PROP_NAMES.has(propName)
+    ) {
       return;
     }
     let expression = '"true"';
@@ -137,7 +160,7 @@ function extractJsxPassedProps(
   passedProps: PassedPropInfo[]
 ): void {
   try {
-    const sourceFile = ts.createSourceFile('component.tsx', parentContent, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+    const sourceFile = parseTypeScript('component.tsx', parentContent, ts.ScriptKind.TSX);
     function visit(node: ts.Node) {
       if (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) {
         let tagName = '';
@@ -178,6 +201,7 @@ function extractRegexFallbackPassedProps(
     const dynamicBindingRegex = /(?::|v-bind:)([A-Za-z0-9_-]+)=["']([^"']+)["']/g;
     for (const b of attributesBlock.matchAll(dynamicBindingRegex)) {
       const propName = b[1];
+      if (IGNORED_PROP_NAMES.has(propName)) continue;
       const expression = b[2].trim();
       if (!seenProps.has(propName)) {
         seenProps.add(propName);
@@ -204,7 +228,7 @@ function extractRegexFallbackPassedProps(
         propName.startsWith(':') ||
         propName.startsWith('v-') ||
         propName.startsWith('@') ||
-        ['class', 'style', 'id', 'ref', 'key'].includes(propName)
+        IGNORED_PROP_NAMES.has(propName)
       ) {
         continue;
       }
@@ -225,7 +249,9 @@ export function extractPassedProps(parentContent: string, componentNames: string
   const seenProps = new Set<string>();
 
   extractVueTemplatePassedProps(parentContent, componentNames, seenProps, passedProps);
-  extractJsxPassedProps(parentContent, componentNames, seenProps, passedProps);
+  if (!extractVueTemplate(parentContent)) {
+    extractJsxPassedProps(parentContent, componentNames, seenProps, passedProps);
+  }
 
   if (passedProps.length === 0) {
     extractRegexFallbackPassedProps(parentContent, componentNames, seenProps, passedProps);

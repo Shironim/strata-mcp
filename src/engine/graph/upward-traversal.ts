@@ -29,6 +29,7 @@ import type {
 import {
   findProjectRoot,
   isPageFile,
+  isSameMonorepoBoundary,
   resolveImportPath,
   resolveBarrelExport,
 } from "./path-helpers";
@@ -46,30 +47,37 @@ import {
 export function getDisambiguatedComponentName(filePath: string, isPage: boolean): string {
   const norm = filePath.replace(/\\/g, '/');
   const base = basename(filePath);
+  const appPrefixMatch = norm.match(/(?:^|\/)(apps\/[^/]+)\//);
+  const appPrefix = appPrefixMatch ? `${appPrefixMatch[1]}/` : '';
 
   if (isPage) {
     const pageMatch = norm.match(/(?:^|\/)(?:pages|Pages|views|Views|routes)\/(.+)$/);
     if (pageMatch && pageMatch[1]) {
-      return pageMatch[1];
+      return `${appPrefix}${pageMatch[1]}`;
     }
     const appMatch = norm.match(/(?:^|\/)app\/(.+)$/);
     if (appMatch && appMatch[1]) {
-      return appMatch[1];
+      return `${appPrefix}${appMatch[1]}`;
     }
     const dir = basename(dirname(filePath));
     if (dir && dir !== '.' && dir !== '/' && dir !== '\\') {
-      return `${dir}/${base}`;
+      return `${appPrefix}${dir}/${base}`;
     }
   }
 
   if (/^index\.[a-z0-9]+$/i.test(base)) {
     const dir = basename(dirname(filePath));
     if (dir && dir !== '.' && dir !== '/' && dir !== '\\') {
-      return `${dir}/${base}`;
+      return `${appPrefix}${dir}/${base}`;
     }
   }
 
-  return base;
+  const appRelMatch = norm.match(/(?:^|\/)(apps\/[^/]+\/.+)$/);
+  if (appRelMatch && appRelMatch[1]) {
+    return appRelMatch[1];
+  }
+
+  return `${appPrefix}${base}`;
 }
 
 /**
@@ -87,6 +95,10 @@ export async function getUpwardComponentTree(
   const maxDepth = options.maxDepth !== undefined ? options.maxDepth : 3;
   const limit = options.limit !== undefined ? options.limit : 20;
   const projectRoot = options.targetPath ? normalize(resolve(options.targetPath)) : findProjectRoot(entryPath);
+  if (!options.skipSync) {
+    const { prepareIndexedAnalysis } = await import('../prepare-index');
+    await prepareIndexedAnalysis(projectRoot, true);
+  }
   const diagnostics: NonNullable<ComponentTreeResult['diagnostics']> = [];
 
   // Fast Indexed Lookup via SQLite Graph DB (Reverse Dependency Indexing with cycle & limit detection)
@@ -108,7 +120,7 @@ export async function getUpwardComponentTree(
             JOIN files p ON e.parent_file_id = p.id
             LEFT JOIN files f ON f.path = p.path
             WHERE e.child_file_id = ?
-            ORDER BY p.path ASC
+            ORDER BY p.path ASC, e.is_rendered DESC
           `);
 
           const buildDbSubTree = (
@@ -152,12 +164,15 @@ export async function getUpwardComponentTree(
             }
 
             const parents = getParentEdges.all(fileId) as Array<{ path: string; is_page: number; import_type: string; is_rendered: number; content_hash: string | null }>;
+            const seenParentPaths = new Set<string>();
             for (const parent of parents) {
+              const parentPath = normalize(parent.path);
+              if (seenParentPaths.has(parentPath)) continue;
+              seenParentPaths.add(parentPath);
               if (allConsumers.size >= limit + 1) {
                 hasMore = true;
                 break;
               }
-              const parentPath = normalize(parent.path);
               const parentIsPage = parent.is_page === 1;
               const isRendered = parent.is_rendered === 1;
               const relationKind = parent.import_type === 'dynamic' ? 'dynamic-import' : isRendered ? 'render' : 'import';
@@ -322,15 +337,20 @@ export async function getUpwardComponentTree(
 
     // Check 2: Template / JSX auto-import or direct tag references
     // Only valid if:
-    // 1. The tag is NOT explicitly imported from another file
-    // 2. The component name uniquely resolves to targetPath in the project without collision
+    // 1. Both files belong to the same monorepo app boundary (when inside apps/* or packages/*)
+    // 2. The tag is NOT explicitly imported from another file
+    // 3. The component name uniquely resolves to targetPath in the project without collision
+    if (!isSameMonorepoBoundary(sourceFile, targetPath)) {
+      return null;
+    }
     const targetBase = basename(targetPath, extname(targetPath));
     const candidateNames = getCandidateNames(targetBase);
     for (const cand of candidateNames) {
       if (explicitlyBoundNames.has(cand.toLowerCase())) {
         continue;
       }
-      const matchingFiles = candidateToFileMap.get(cand.toLowerCase()) || [];
+      const matchingFiles = (candidateToFileMap.get(cand.toLowerCase()) || [])
+        .filter((f) => isSameMonorepoBoundary(sourceFile, f));
       if (matchingFiles.length > 1) {
         // Collision: multiple components have this candidate name, requires explicit import
         continue;

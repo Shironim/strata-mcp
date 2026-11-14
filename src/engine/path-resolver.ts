@@ -246,8 +246,12 @@ export function resolveWorkspacePath(rawPath: string, rootHint?: string): string
  * If targetPath is not provided or is ".", automatically falls back to lastKnownProjectRoot or auto-detected root of cwd.
  */
 export function resolveProjectRoot(targetPath?: string): string {
-  if (targetPath && targetPath !== '.') {
-    const resolved = resolveWorkspacePath(targetPath);
+  if (targetPath && targetPath.trim()) {
+    const trimmed = targetPath.trim();
+    const resolved =
+      trimmed === '.' || trimmed === './'
+        ? canonicalizePath(process.cwd())
+        : resolveWorkspacePath(targetPath);
     if (existsSync(resolved)) {
       const stat = statSync(resolved);
       const dir = canonicalizePath(stat.isDirectory() ? resolved : dirname(resolved));

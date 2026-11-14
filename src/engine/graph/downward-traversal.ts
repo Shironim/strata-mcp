@@ -1,12 +1,13 @@
+import { parseTypeScript } from '../source-parser';
 import { readSourceSnapshot } from '../source-file';
 import { moduleDirective } from '../parsers/ts-syntax';
 import { collectVueDynamicTreeInputs, inspectVueTreeInput } from './vue-tree-input';
 import { existsSync, promises as fs, statSync, readFileSync } from "node:fs";
-import { basename, dirname, extname, join, normalize, resolve } from "node:path";
+import { basename, dirname, extname, join, normalize, relative, resolve } from "node:path";
 import { parse as parseDom, NodeTypes } from "@vue/compiler-dom";
 import ts from "typescript";
 import { collectFiles } from "../collector";
-import { getCandidateNames, isComponentNameMatch } from "../template";
+import { getCandidateNames, isComponentNameMatch, toKebabCase } from "../template";
 import { escapeRegExp } from "../patterns";
 import {
   createAliasConfig,
@@ -30,6 +31,7 @@ import { walkVueDom, extractVueTemplate } from "./ast-helpers";
 import {
   findProjectRoot,
   isPageFile,
+  isSameMonorepoBoundary,
   resolveImportPath,
   resolveBarrelExport,
 } from "./path-helpers";
@@ -167,7 +169,7 @@ export function extractRenderedCustomTags(content: string): string[] {
           scriptCode = scriptMatches.map((m) => m[1]).join('\n');
         }
       }
-      sourceFile = ts.createSourceFile('component.tsx', scriptCode, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+      sourceFile = parseTypeScript('component.tsx', scriptCode, ts.ScriptKind.TSX);
     }
     return sourceFile;
   };
@@ -322,6 +324,18 @@ export function isCandidateRendered(content: string, candidate: string): boolean
     'i'
   );
   return fastTagPattern.test(sanitized);
+}
+
+/** Normalize once per file for workspace audits; namespaced renders also expose their final name. */
+export function renderedComponentKeys(content: string): Set<string> {
+  const tags = extractRenderedCustomTags(content);
+  if (extractVueTemplate(content) === null) {
+    for (const match of sanitizeTemplateContent(content).matchAll(/<([A-Za-z0-9_$.]+)(?=[\s/>])/g)) tags.push(match[1]);
+  }
+  return new Set(tags.flatMap(tag => {
+    const last = tag.split('.').pop()!;
+    return [`case:${tag.toLowerCase()}`, `kebab:${toKebabCase(tag)}`, `case:${last.toLowerCase()}`, `kebab:${toKebabCase(last)}`];
+  }));
 }
 
 /**
@@ -563,7 +577,12 @@ export async function getDownwardComponentTree(
       if (allImports.some(i => isComponentNameMatch(tag, i.alias || i.name))) continue;
       const lower = tag.toLowerCase();
       const catalogTarget = catalog.get(lower);
-      if (catalogTarget && catalogTarget !== normPath && !resolvedChildren.has(catalogTarget)) {
+      if (
+        catalogTarget &&
+        catalogTarget !== normPath &&
+        isSameMonorepoBoundary(normPath, catalogTarget) &&
+        !resolvedChildren.has(catalogTarget)
+      ) {
         resolvedChildren.add(catalogTarget);
         if (!visitedInBranch.has(catalogTarget)) {
           const childNode = await buildSubTree(
@@ -606,21 +625,36 @@ export async function getDownwardComponentTree(
       }
     }
 
-    // 3. Dynamic component fallback tags (e.g. from dynamic map evaluation)
-    for (const tag of customTags) {
-      const isRegistered =
-        allImports.some((i) => isComponentNameMatch(tag, i.alias || i.name)) || catalog.has(tag.toLowerCase());
-      if (isRegistered || tag.startsWith('app-') || tag.startsWith('base-')) {
-        continue;
-      }
-      node.children.push({
-        component: tag,
-        filePath: 'dynamic-unresolved',
-        warning: 'Dynamic component rendered via variable/computed (definition unresolved)',
-        depth: depth + 1,
-        children: [],
-      });
-    }
+const VUE_NUXT_BUILTIN_TAGS = new Set([
+  'teleport',
+  'suspense',
+  'keep-alive',
+  'keepalive',
+  'transition',
+  'transition-group',
+  'transitiongroup',
+  'nuxt-link',
+  'nuxtlink',
+  'client-only',
+  'clientonly',
+  'dev-only',
+  'devonly',
+  'nuxt-page',
+  'nuxtpage',
+  'nuxt-layout',
+  'nuxtlayout',
+  'nuxt-loading-indicator',
+  'nuxtloadingindicator',
+  'nuxt-error-boundary',
+  'nuxterrorboundary',
+  'nuxt-img',
+  'nuxtimg',
+  'nuxt-picture',
+  'nuxtpicture',
+]);
+
+    // 3. Static external/unresolved tags are not dynamic components; actual dynamic
+    // components (<component :is="..."> or local variable/computed tags) are handled in step 4.
 
     // 4. Dynamic and polymorphic component warning nodes
     const dynamicWarnings = extractDynamicWarnings(content, new Set(customTags));
@@ -726,9 +760,25 @@ export function formatTreeAsText(result: ComponentTreeResult): string {
   let output = header + treeText + summary;
 
   if (result.diagnostics?.length) {
+    const rootDir = dirname(result.root.filePath);
+    const shortPath = (filePath: string) => {
+      const rel = relative(rootDir, filePath);
+      return rel && !rel.startsWith('..') ? rel : filePath;
+    };
     output += '\n\nTraversal diagnostics (partial resolution):';
+    const maxDepthItems = result.diagnostics.filter((d) => d.code === 'MAX_DEPTH_REACHED');
     for (const diagnostic of result.diagnostics) {
-      output += `\n  ${diagnostic.code}: ${diagnostic.reason} (${diagnostic.filePath}; source SHA-256: ${diagnostic.sourceHash ?? 'not-captured'})`;
+      if (diagnostic.code === 'MAX_DEPTH_REACHED') continue;
+      output += `\n  ${diagnostic.code}: ${diagnostic.reason} (${shortPath(diagnostic.filePath)}; source SHA-256: ${diagnostic.sourceHash ?? 'not-captured'})`;
+    }
+    if (maxDepthItems.length === 1) {
+      const d = maxDepthItems[0];
+      output += `\n  ${d.code}: ${d.reason} (${shortPath(d.filePath)}; source SHA-256: ${d.sourceHash ?? 'not-captured'})`;
+    } else if (maxDepthItems.length > 1) {
+      const uniqueNames = [...new Set(maxDepthItems.map((d) => basename(d.filePath)))];
+      const shown = uniqueNames.slice(0, 5).join(', ');
+      const extra = uniqueNames.length > 5 ? `, +${uniqueNames.length - 5} more` : '';
+      output += `\n  MAX_DEPTH_REACHED: ${maxDepthItems.length} node(s) at depth ${result.maxDepthReached} not expanded (${shown}${extra})`;
     }
   }
 

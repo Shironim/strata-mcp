@@ -1,3 +1,4 @@
+import { parseTypeScript } from '../source-parser';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { basename, dirname, extname, resolve } from 'node:path';
 import { escapeRegExp } from '../patterns';
@@ -19,11 +20,27 @@ export const DYNAMIC_IMPORT_PATTERN =
 export const INLINE_ASYNC_COMPONENT_PATTERN =
   /([A-Za-z0-9_$]+)\s*:\s*(?:defineAsyncComponent|lazy|dynamic)\s*\(\s*(?:\(\)\s*=>\s*)?import\s*\(\s*['"]([^'"]+)['"]\s*\)\s*\)/g;
 
+export function getMonorepoAppBoundary(filePath: string): string | null {
+  const norm = filePath.replace(/\\/g, '/');
+  const match = norm.match(/^(.*\/(?:apps|packages)\/[^/]+)\//) ?? norm.match(/^((?:apps|packages)\/[^/]+)\//);
+  return match ? match[1] : null;
+}
+
+export function isSameMonorepoBoundary(fileA: string, fileB: string): boolean {
+  const a = getMonorepoAppBoundary(fileA);
+  const b = getMonorepoAppBoundary(fileB);
+  if (!a || !b) return true;
+  return a === b;
+}
+
 /**
  * Checks if a file path is a page or route file based on common framework conventions.
  */
 export function isPageFile(filePath: string): boolean {
   const norm = filePath.replace(/\\/g, '/');
+  if (/\/(?:Pages|pages|Views|views)\/(?:.*\/)?(?:Partials|partials|Components|components)\//.test(norm)) {
+    return false;
+  }
   return (
     norm.includes('/pages/') ||
     norm.includes('/Pages/') ||
@@ -127,7 +144,7 @@ export function extractImports(
   const imports: ExtractedImport[] = [];
   const inferredPath = filePath ?? (/^\s*---/.test(content) ? 'file.astro' : /^\s*<(?:script|template)\b/.test(content) ? 'file.vue' : 'file.tsx');
   const code = createDocumentAdapter(inferredPath, content).getScriptBlocks().map(b => b.content).join('\n');
-  const sf = ts.createSourceFile('file.tsx', code, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const sf = parseTypeScript('file.tsx', code, ts.ScriptKind.TSX);
   const namespaces = new Map<string, string>();
   const add = (name: string, source: string, isDynamic: boolean, alias?: string) => {
     if (!imports.some(i => i.name === name && i.alias === alias && i.source === source)) {
