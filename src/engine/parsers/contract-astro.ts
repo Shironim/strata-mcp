@@ -1,3 +1,4 @@
+import { parseTypeScript } from '../source-parser';
 import { basename, extname } from 'node:path';
 import ts from 'typescript';
 import { unwrapExpression, staticPropertyName } from './ts-syntax';
@@ -33,7 +34,7 @@ export async function extractAstroContract(filePath: string, content: string): P
   // 1. Parse frontmatter TypeScript AST
   if (descriptor.frontmatter) {
     const fmContent = descriptor.frontmatter.content;
-    const sf = ts.createSourceFile('frontmatter.ts', fmContent, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+    const sf = parseTypeScript('frontmatter.ts', fmContent, ts.ScriptKind.TS);
 
     const declaredTypes = new Map<string, ts.InterfaceDeclaration | ts.TypeAliasDeclaration>();
     for (const statement of sf.statements) {

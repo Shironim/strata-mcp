@@ -1,3 +1,5 @@
+import { checkAnalysisCancelled } from './analysis-context';
+
 export const DEFAULT_CONCURRENCY = 1;
 
 /**
@@ -15,17 +17,35 @@ export async function runConcurrent<T, R>(
 
   const results: R[] = new Array(items.length);
   let nextIndex = 0;
+  let hasFailed = false;
 
   async function poolWorker(): Promise<void> {
-    while (nextIndex < items.length) {
+    while (nextIndex < items.length && !hasFailed) {
+      checkAnalysisCancelled();
       const idx = nextIndex++;
-      results[idx] = await worker(items[idx], idx);
+      try { results[idx] = await worker(items[idx], idx); }
+      catch (error) { hasFailed = true; throw error; }
     }
   }
 
-  const poolSize = Math.min(concurrency, items.length);
+  const poolSize = Math.min(Math.max(1, Math.floor(concurrency) || DEFAULT_CONCURRENCY), items.length);
   const workers = Array.from({ length: poolSize }, () => poolWorker());
 
-  await Promise.all(workers);
+  const settled = await Promise.allSettled(workers);
+  const failed = settled.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+  if (failed) throw failed.reason;
   return results;
+}
+
+/** Batches preserve file order and stop admitting work once enough matches are available. */
+export async function collectConcurrentMatches<T, R>(
+  items: T[], worker: (item: T) => Promise<R[]>, limit: number, concurrency = DEFAULT_CONCURRENCY
+): Promise<R[]> {
+  const width = Number.isFinite(concurrency) ? Math.max(1, Math.floor(concurrency)) : DEFAULT_CONCURRENCY;
+  const matches: R[] = [];
+  for (let offset = 0; offset < items.length && matches.length < limit; offset += width) {
+    const batch = await runConcurrent(items.slice(offset, offset + width), worker, width);
+    for (const result of batch) matches.push(...result.slice(0, limit - matches.length));
+  }
+  return matches;
 }

@@ -2,6 +2,7 @@ import { findTool } from './tools';
 import { closeAllDatabases } from './engine/storage/schema';
 import { getLastKnownProjectRoot, setLastKnownProjectRoot } from './engine/path-resolver';
 import type { ToolCallResponse } from './tools/types';
+import { withAnalysisContext } from './engine/analysis-context';
 
 export interface AnalysisResponse extends ToolCallResponse {
   projectRoot?: string;
@@ -9,13 +10,8 @@ export interface AnalysisResponse extends ToolCallResponse {
 
 export const ANALYSIS_LIMITS = {
   requestBytes: 2 * 1024 * 1024,
-  responseBytes: 8 * 1024 * 1024,
-  stderrBytes: 64 * 1024,
   queued: 4,
   timeoutMs: 120000,
-  sampleMs: 50,
-  combinedBytes: 448 * 1024 * 1024,
-  analysisBytes: 384 * 1024 * 1024,
 };
 
 interface Job {
@@ -29,6 +25,7 @@ interface Job {
 }
 
 export interface SupervisorOptions {
+  /** @deprecated Analysis runs in-process; this option has no effect. */
   workerPath?: string;
   limits?: Partial<typeof ANALYSIS_LIMITS>;
 }
@@ -39,6 +36,7 @@ export class AnalysisSupervisor {
   private closed = false;
   private idleWaiters: Array<() => void> = [];
   private readonly limits: typeof ANALYSIS_LIMITS;
+  private activeController?: AbortController;
 
   constructor(options: SupervisorOptions = {}) {
     this.limits = { ...ANALYSIS_LIMITS, ...options.limits };
@@ -55,10 +53,10 @@ export class AnalysisSupervisor {
 
     const input = JSON.stringify({ name, args, rootHint });
     if (Buffer.byteLength(input) > this.limits.requestBytes) {
-      return Promise.reject(new Error('REQUEST_TOO_LARGE: maximum request is 2 MiB'));
+      return Promise.reject(new Error(`REQUEST_TOO_LARGE: maximum request is ${this.limits.requestBytes} bytes`));
     }
     if (this.active && this.queue.length >= this.limits.queued) {
-      return Promise.reject(new Error('SERVER_BUSY: four analysis requests are already waiting'));
+      return Promise.reject(new Error(`SERVER_BUSY: ${this.limits.queued} analysis requests are already waiting`));
     }
 
     return new Promise((resolve, reject) => {
@@ -80,6 +78,7 @@ export class AnalysisSupervisor {
 
   async close(): Promise<void> {
     this.closed = true;
+    this.activeController?.abort(new Error('SERVER_CLOSED: analysis cancelled'));
     for (const job of this.queue.splice(0)) {
       job.removeAbort?.();
       job.reject(new Error('SERVER_CLOSED: analysis cancelled'));
@@ -96,7 +95,7 @@ export class AnalysisSupervisor {
     this.active = job;
 
     void this.execute(job)
-      .then(job.resolve, job.reject)
+      .catch(job.reject)
       .finally(() => {
         job.removeAbort?.();
         this.active = undefined;
@@ -105,58 +104,53 @@ export class AnalysisSupervisor {
       });
   }
 
-  private async execute(job: Job): Promise<AnalysisResponse> {
+  private async execute(job: Job): Promise<void> {
     if (job.signal?.aborted || this.closed) {
       throw new Error('REQUEST_CANCELLED: analysis cancelled');
     }
 
-    let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
-    let abortListener: (() => void) | undefined;
-
-    const timeoutPromise = new Promise<never>((_, reject) => {
-      timeoutTimer = setTimeout(() => {
-        reject(new Error('ANALYSIS_TIMEOUT: maximum analysis duration is 120 seconds'));
-      }, this.limits.timeoutMs);
-    });
-
-    const abortPromise = new Promise<never>((_, reject) => {
-      if (job.signal?.aborted) {
-        reject(new Error('REQUEST_CANCELLED: analysis cancelled'));
-        return;
-      }
-      abortListener = () => reject(new Error('REQUEST_CANCELLED: analysis cancelled'));
-      job.signal?.addEventListener('abort', abortListener, { once: true });
-    });
-
-    const executionPromise = (async (): Promise<AnalysisResponse> => {
-      if (job.rootHint) setLastKnownProjectRoot(job.rootHint);
-      const tool = findTool(job.name);
-      if (!tool) throw new Error(`UNKNOWN_TOOL: ${job.name}`);
-
-      let response: ToolCallResponse;
-      let detectedRoot: string | undefined;
-      try {
-        response = await tool.handler(job.args);
-        if (!response.isError) {
-          detectedRoot = getLastKnownProjectRoot();
-        }
-      } finally {
-        closeAllDatabases();
-      }
-
-      return {
-        ...response,
-        ...(detectedRoot ? { projectRoot: detectedRoot } : {}),
-      };
-    })();
+    const controller = new AbortController();
+    this.activeController = controller;
+    const cancel = () => {
+      const reason = controller.signal.reason;
+      job.reject(reason instanceof Error ? reason : new Error('REQUEST_CANCELLED: analysis cancelled'));
+    };
+    const abort = () => controller.abort(new Error('REQUEST_CANCELLED: analysis cancelled'));
+    controller.signal.addEventListener('abort', cancel, { once: true });
+    job.signal?.addEventListener('abort', abort, { once: true });
+    const timer = setTimeout(() => controller.abort(
+      new Error(`ANALYSIS_TIMEOUT: maximum analysis duration is ${this.limits.timeoutMs / 1000} seconds`)
+    ), this.limits.timeoutMs);
 
     try {
-      return await Promise.race([executionPromise, timeoutPromise, abortPromise]);
+      const response = await withAnalysisContext(async (): Promise<AnalysisResponse> => {
+        if (job.rootHint) setLastKnownProjectRoot(job.rootHint);
+        const tool = findTool(job.name);
+        if (!tool) throw new Error(`UNKNOWN_TOOL: ${job.name}`);
+
+        let response: ToolCallResponse;
+        let detectedRoot: string | undefined;
+        try {
+          response = await tool.handler(job.args);
+          if (!response.isError) {
+            detectedRoot = getLastKnownProjectRoot();
+          }
+        } finally {
+          closeAllDatabases();
+        }
+
+        return {
+          ...response,
+          ...(detectedRoot ? { projectRoot: detectedRoot } : {}),
+        };
+      }, controller.signal);
+      if (!controller.signal.aborted) job.resolve(response);
     } finally {
-      if (timeoutTimer) clearTimeout(timeoutTimer);
-      if (abortListener && job.signal) {
-        job.signal.removeEventListener('abort', abortListener);
-      }
+      // The queue slot belongs to execution, even after its client response timed out.
+      clearTimeout(timer);
+      job.signal?.removeEventListener('abort', abort);
+      controller.signal.removeEventListener('abort', cancel);
+      this.activeController = undefined;
     }
   }
 }

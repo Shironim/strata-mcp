@@ -1,3 +1,4 @@
+import { parseTypeScript } from '../source-parser';
 import { basename, dirname, extname } from 'node:path';
 import ts from 'typescript';
 import { unwrapExpression, staticPropertyName } from './ts-syntax';
@@ -172,7 +173,7 @@ export async function extractReactContract(filePath: string, content: string, wo
   let dependencies: InputDependency[] = [];
 
   try {
-    const sf = ts.createSourceFile(filePath, content, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+    const sf = parseTypeScript(filePath, content, ts.ScriptKind.TSX);
     const declaredTypes = new Map<string, ts.InterfaceDeclaration | ts.TypeAliasDeclaration>();
     const declaredFunctions = new Map<string, ts.FunctionDeclaration | ts.ArrowFunction | ts.FunctionExpression>();
     const declaredVariables = new Map<string, ts.VariableDeclaration>();

@@ -1,3 +1,4 @@
+import { parseTypeScript } from '../source-parser';
 import ts from 'typescript';
 
 /** Remove syntax-only wrappers without evaluating expressions or resolving identifiers. */
@@ -17,7 +18,7 @@ export function findDirective(statements: ts.NodeArray<ts.Statement>, value: str
 }
 
 export function moduleDirective(content: string, value: string): ts.StringLiteral | undefined {
-  const source = ts.createSourceFile('module.tsx', content, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const source = parseTypeScript('module.tsx', content, ts.ScriptKind.TSX);
   return findDirective(source.statements, value);
 }
 

@@ -1,3 +1,4 @@
+import { parseTypeScript } from '../source-parser';
 import { readSourceFile } from '../source-file';
 import { createHash } from 'node:crypto';
 import { existsSync, promises as fs } from 'node:fs';
@@ -400,7 +401,7 @@ export async function extractVueContract(filePath: string, content: string, opti
     let defaultsMap: Record<string, string> = Object.create(null);
 
     // Defaults are expressions: commas, nested literals and aliases must retain their AST boundaries.
-    const defaultsSource = ts.createSourceFile('props-defaults.ts', descriptor.scriptSetup?.content ?? '', ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+    const defaultsSource = parseTypeScript('props-defaults.ts', descriptor.scriptSetup?.content ?? '', ts.ScriptKind.TS);
     const readDefaults = (expression: ts.Expression): boolean => {
       let call = unwrapExpression(expression);
       if (ts.isCallExpression(call) && ts.isIdentifier(call.expression) && call.expression.text === 'withDefaults') {

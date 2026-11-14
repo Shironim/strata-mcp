@@ -1,4 +1,5 @@
 import { executeAstGrep, isBinaryExecutionError } from './astgrep';
+import { checkAnalysisCancelled } from './analysis-context';
 import { remapTemplateExpressionMatches } from './remapper';
 import type { TemplateExpression } from './template';
 import type { RawMatch, ResolvedMatch, SfcBlock } from '../types';
@@ -116,7 +117,8 @@ async function querySingleExpression(
   filePath: string,
   pattern: string | undefined,
   rule: string | undefined,
-  language: string | undefined
+  language: string | undefined,
+  maxResults?: number
 ): Promise<ResolvedMatch[]> {
   try {
     const rawMatches = await executeAstGrep({
@@ -124,15 +126,18 @@ async function querySingleExpression(
       pattern,
       rule,
       language: language || 'ts',
+      maxResults,
     });
     return remapTemplateExpressionMatches(rawMatches, templateBlock, expression.start, filePath);
   } catch (err) {
+    checkAnalysisCancelled();
     if (isBinaryExecutionError(err)) throw err;
     return [];
   }
 }
 
 export interface TemplateExpressionQueryArgs {
+  maxResults?: number;
   expressions: TemplateExpression[];
   templateBlock: SfcBlock;
   filePath: string;
@@ -149,11 +154,11 @@ export interface TemplateExpressionQueryArgs {
 export async function queryTemplateExpressions(
   args: TemplateExpressionQueryArgs
 ): Promise<ResolvedMatch[]> {
-  const { expressions, templateBlock, filePath, pattern, rule, language } = args;
+  const { expressions, templateBlock, filePath, pattern, rule, language, maxResults } = args;
 
-  if (expressions.length === 0) return [];
+  if (expressions.length === 0 || (maxResults !== undefined && maxResults <= 0)) return [];
   if (expressions.length === 1) {
-    return querySingleExpression(expressions[0], templateBlock, filePath, pattern, rule, language);
+    return querySingleExpression(expressions[0], templateBlock, filePath, pattern, rule, language, maxResults);
   }
 
   const batch = buildExpressionBatch(expressions);
@@ -165,13 +170,16 @@ export async function queryTemplateExpressions(
       pattern,
       rule,
       language: language || 'ts',
+      maxResults,
     });
     return routeBatchMatches(rawMatches, batch.segments, expressions, templateBlock, filePath);
   } catch (err) {
+    checkAnalysisCancelled();
     if (isBinaryExecutionError(err)) throw err;
 
     const results: ResolvedMatch[] = [];
     for (const expression of expressions) {
+      if (maxResults !== undefined && results.length >= maxResults) break;
       results.push(
         ...(await querySingleExpression(
           expression,
@@ -179,7 +187,8 @@ export async function queryTemplateExpressions(
           filePath,
           pattern,
           rule,
-          language
+          language,
+          maxResults === undefined ? undefined : maxResults - results.length
         ))
       );
     }

@@ -1,3 +1,4 @@
+import { parseTypeScript } from '../source-parser';
 import ts from 'typescript';
 import type { Evidence, StateDependencyInfo, StateDependencyItem } from '../../types';
 import { reactBindings } from './react-bindings';
@@ -14,7 +15,7 @@ const COLLECTION_READS = new Set(['filter', 'slice', 'map', 'flat', 'flatMap', '
 interface Dependency { kind: StateDependencyItem['kind']; identifier: string; evidence: Evidence }
 
 export function extractReactStateDependencies(content: string, self?: string): StateDependencyInfo {
-  const sf = ts.createSourceFile('file.tsx', content, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const sf = parseTypeScript('file.tsx', content, ts.ScriptKind.TSX);
   const bindings = reactBindings(sf);
   const dependencies = new Map<string, Dependency>();
   const items: StateDependencyItem[] = [];

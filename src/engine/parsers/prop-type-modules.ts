@@ -1,3 +1,4 @@
+import { parseTypeScript } from '../source-parser';
 import ts from 'typescript';
 import { isAbsolute, relative, resolve } from 'node:path';
 import { readSourceSnapshot } from '../source-file';
@@ -71,7 +72,7 @@ export class PropTypeModules {
     for (const file of targets) {
       if (this.modules.has(file)) continue;
       const snapshot = await this.capture(file);
-      if (snapshot) await this.prepare(ts.createSourceFile(file, snapshot.content, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS), depth + 1);
+      if (snapshot) await this.prepare(parseTypeScript(file, snapshot.content, ts.ScriptKind.TS), depth + 1);
     }
   }
 

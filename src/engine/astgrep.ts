@@ -4,6 +4,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir, homedir } from 'node:os';
 import type { RawMatch } from '../types';
+import { analysisSignal, checkAnalysisCancelled } from './analysis-context';
 
 /**
  * Universal cross-platform resolver for the current module's directory
@@ -281,10 +282,21 @@ export function isPatternParseError(err: unknown): boolean {
   );
 }
 
+function attachAnalysisCancellation(proc: ReturnType<typeof spawn>) {
+  const signal = analysisSignal();
+  const abort = () => {
+    try { proc.kill('SIGTERM'); } catch { /* The child may already have exited. */ }
+  };
+  signal?.addEventListener('abort', abort, { once: true });
+  if (signal?.aborted) abort();
+  return { signal, cleanup: () => signal?.removeEventListener('abort', abort) };
+}
+
 /**
  * Executes an ast-grep query either on an in-memory string (via stdin) or against file paths on disk.
  */
 export async function executeAstGrep(options: AstGrepQueryOptions): Promise<RawMatch[]> {
+  checkAnalysisCancelled();
   const bin = resolveAstGrepBinary();
   const isCmd = bin.endsWith('.cmd') || bin.endsWith('.bat');
   let lang = options.language || 'ts';
@@ -358,6 +370,8 @@ export async function executeAstGrep(options: AstGrepQueryOptions): Promise<RawM
         return;
       }
 
+      const { signal, cleanup } = attachAnalysisCancellation(proc);
+
       proc.stdout?.on('data', (chunk) => {
         if (earlyStopped) return;
         const str = chunk.toString();
@@ -413,6 +427,7 @@ export async function executeAstGrep(options: AstGrepQueryOptions): Promise<RawM
       });
 
       proc.on('error', (err) => {
+        cleanup();
         reject(
           new Error(
             `Failed to execute ast-grep at "${bin}": ${err.message}. ${installHint()}`
@@ -421,6 +436,11 @@ export async function executeAstGrep(options: AstGrepQueryOptions): Promise<RawM
       });
 
       proc.on('close', (code) => {
+        cleanup();
+        if (signal?.aborted) {
+          reject(signal.reason);
+          return;
+        }
         if (earlyStopped && matches.length >= maxResults) {
           resolve(matches.slice(0, maxResults));
           return;
@@ -496,6 +516,7 @@ export async function executeAstGrep(options: AstGrepQueryOptions): Promise<RawM
  * Dumps the CST of a code snippet.
  */
 export async function dumpSyntaxTree(code: string, language: string = 'ts'): Promise<string> {
+  checkAnalysisCancelled();
   let lang = language;
   if (lang === 'vue' || lang === 'astro' || lang === 'auto') {
     lang = (/^\s*<[A-Za-z0-9_$-]/.test(code) || code.includes('</') || code.endsWith('/>')) ? 'html' : 'ts';
@@ -522,6 +543,7 @@ export async function dumpSyntaxTree(code: string, language: string = 'ts'): Pro
       return;
     }
 
+    const { signal, cleanup } = attachAnalysisCancellation(proc);
     // Immediately close stdin to prevent ast-grep from scanning the working directory
     proc.stdin?.on('error', () => {});
     proc.stdin?.end();
@@ -531,10 +553,13 @@ export async function dumpSyntaxTree(code: string, language: string = 'ts'): Pro
     });
 
     proc.on('error', (err) => {
+      cleanup();
       reject(new Error(`Failed to dump syntax tree: ${err.message}`));
     });
 
     proc.on('close', (code) => {
+      cleanup();
+      if (signal?.aborted) { reject(signal.reason); return; }
       const output = stderr.trim();
       // Compat: ast-grep >= 0.4x exits 1 for --debug-query (no JSON matches
       // are produced) while still printing the CST to stderr; 0.38 exits 0

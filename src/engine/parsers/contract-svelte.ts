@@ -1,3 +1,4 @@
+import { parseTypeScript } from '../source-parser';
 import { basename, extname } from 'node:path';
 import ts from 'typescript';
 import { unwrapExpression, staticPropertyName } from './ts-syntax';
@@ -72,7 +73,7 @@ export async function extractSvelteContract(filePath: string, content: string): 
   if (descriptor.instance) scriptsToParse.push({ content: descriptor.instance.content, isInstance: true });
 
   for (const { content: scriptContent, isInstance } of scriptsToParse) {
-    const sf = ts.createSourceFile('svelte-script.ts', scriptContent, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+    const sf = parseTypeScript('svelte-script.ts', scriptContent, ts.ScriptKind.TS);
 
     const declaredTypes = new Map<string, ts.InterfaceDeclaration | ts.TypeAliasDeclaration>();
     for (const stmt of sf.statements) {
