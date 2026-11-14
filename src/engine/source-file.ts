@@ -1,6 +1,7 @@
 import { promises as fs, statSync, readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';
+import { checkAnalysisCancelled } from './analysis-context';
 import type { SourceLineRange, SourcePosition, SourceRef, SourceSnapshot } from '../types';
 
 export const MAX_SOURCE_BYTES = 8 * 1024 * 1024;
@@ -13,6 +14,7 @@ import { getSourcePosition, lineStarts, assertSafeOffset } from '../utils/source
 export { getSourcePosition, lineStarts, assertSafeOffset };
 
 export async function readSourceSnapshot(path: string): Promise<{ snapshot: SourceSnapshot; content: string }> {
+  checkAnalysisCancelled();
   const filePath = resolve(path);
   const file = await fs.open(filePath, 'r');
   try {
@@ -21,6 +23,7 @@ export async function readSourceSnapshot(path: string): Promise<{ snapshot: Sour
     const chunks: Buffer[] = [];
     let total = 0;
     while (true) {
+      checkAnalysisCancelled();
       const chunk = Buffer.allocUnsafe(64 * 1024);
       const { bytesRead } = await file.read(chunk);
       if (!bytesRead) break;
@@ -89,12 +92,14 @@ export async function readSourceRef(path: string, ref: SourceRef): Promise<strin
 
 /** Bound reads even when a file grows between stat and read. */
 export async function readSourceFile(path: string): Promise<string> {
+  checkAnalysisCancelled();
   const file = await fs.open(path, 'r');
   try {
     assertSourceSize((await file.stat()).size, path);
     const chunks: Buffer[] = [];
     let total = 0;
     while (true) {
+      checkAnalysisCancelled();
       const chunk = Buffer.allocUnsafe(64 * 1024);
       const { bytesRead } = await file.read(chunk);
       if (!bytesRead) break;

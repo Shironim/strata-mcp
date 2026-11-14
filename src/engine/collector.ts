@@ -68,6 +68,7 @@ export const IGNORED_DIRS = new Set([
   '.opencode',
   'opencode',
   '.strata',
+  '.toolbench',
   '.vue-ast',
 
   // Documentation & Non-Code Folders

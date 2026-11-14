@@ -49,13 +49,14 @@ export async function sourceRetrievalEvidence(options: {
 
 export function formatRetrievalEvidence(evidence: RetrievalEvidence): string {
   const parts = [
-    `Retrieval: status=${evidence.freshness}; completeness=${evidence.completeness}; policy=${evidence.policy}; query=${evidence.queryId}`,
+    `Retrieval: status=${evidence.freshness}; completeness=${evidence.completeness}; policy=${evidence.policy}`,
   ];
   if (evidence.source?.sha256) {
     parts.push(`sha256=${evidence.source.sha256.slice(0, 12)}`);
   }
   if (evidence.omissions && evidence.omissions.length > 0) {
-    parts.push(`omissions=${evidence.omissions.map((o) => o.code).join(',')}`);
+    const uniqueCodes = Array.from(new Set(evidence.omissions.map((o) => o.code)));
+    parts.push(`omissions=${uniqueCodes.join(',')}`);
   }
   return parts.join(' | ');
 }

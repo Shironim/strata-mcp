@@ -1,5 +1,5 @@
 import { promises as fs } from 'node:fs';
-import { basename, extname, join, resolve } from 'node:path';
+import { basename, extname, join, relative, resolve } from 'node:path';
 import { collectFilesWithReport, type ExcludedDirectoryReport } from './collector';
 import { detectCodeDomains, classifyFileDomain } from './domains';
 
@@ -13,8 +13,15 @@ export async function mapFrontendScope(path: string, options: { limit?: number; 
   const files = collected.files.sort();
   const excludedDirs = collected.excludedDirs;
   const domainResolution = await detectCodeDomains(root);
-  const manifest = await readPackageManifest(root);
-  const dependencies = { ...manifest?.dependencies, ...manifest?.devDependencies };
+  const manifests = await Promise.all([
+    readPackageManifest(root),
+    ...domainResolution.activeDomainRoots.map((d) => readPackageManifest(d)),
+  ]);
+  const dependencies: Record<string, string> = {};
+  for (const manifest of manifests) {
+    if (manifest?.dependencies) Object.assign(dependencies, manifest.dependencies);
+    if (manifest?.devDependencies) Object.assign(dependencies, manifest.devDependencies);
+  }
   const frameworks = ['vue', 'nuxt', 'react', 'next', 'astro', 'svelte', 'solid']
     .filter(name => {
       if (name === 'react') return Boolean(dependencies.react);
@@ -22,6 +29,19 @@ export async function mapFrontendScope(path: string, options: { limit?: number; 
       return Boolean(dependencies[name]);
     })
     .map(name => ({ name, evidence: { basis: 'derived' as const, resolution: 'candidate' as const, method: 'package-manifest-dependency' } }));
+  if (frameworks.length === 0) {
+    const configMap: Array<[RegExp, string]> = [
+      [/\/nuxt\.config\.(?:ts|js|mjs|cjs)$/i, 'nuxt'],
+      [/\/next\.config\.(?:ts|js|mjs|cjs)$/i, 'next'],
+      [/\/astro\.config\.(?:ts|js|mjs|cjs)$/i, 'astro'],
+      [/\/svelte\.config\.(?:ts|js|mjs|cjs)$/i, 'svelte'],
+    ];
+    for (const [re, name] of configMap) {
+      if (files.some((f) => re.test(f.replace(/\\/g, '/'))) && !frameworks.some((fw) => fw.name === name)) {
+        frameworks.push({ name, evidence: { basis: 'derived' as const, resolution: 'candidate' as const, method: 'package-manifest-dependency' } });
+      }
+    }
+  }
   const selected = files.slice(offset, offset + limit);
   const extensions = Object.fromEntries(COVERED.map(ext => [ext, files.filter(file => extname(file).toLowerCase() === ext).length]));
   return {
@@ -67,7 +87,10 @@ export function formatFrontendMapAsText(result: Awaited<ReturnType<typeof mapFro
     `Frontend map: ${result.root}`,
     `Status: ${result.status}${exclusionNote}; ${result.coverage.returnedFiles}/${result.coverage.knownFiles} files returned (offset ${result.coverage.offset})`,
     `Framework candidates: ${result.frameworkCandidates.map(item => item.name).join(', ') || 'unknown'} (${result.frameworkDetection})`,
-    ...result.files.map(file => `- ${file.path}${file.roleHint ? ` [${file.roleHint}; heuristic]` : ''}`),
+    ...result.files.map(file => {
+      const rel = relative(result.root, file.path) || file.path;
+      return `- ${rel}${file.roleHint ? ` [${file.roleHint}; heuristic]` : ''}`;
+    }),
   ];
   if (excludedDirs.length > 0) {
     const shown = excludedDirs.slice(0, 20).map(item => `${item.path} (${item.reason})`);
@@ -85,7 +108,11 @@ async function readPackageManifest(root: string): Promise<{ dependencies?: Recor
 
 function roleHint(root: string, file: string): string | undefined {
   const relative = file.slice(root.length).replace(/\\/g, '/');
-  const parts = relative.split('/').slice(1);
-  const folder = parts.length > 1 ? parts[0] : basename(file, extname(file));
-  return /^(components?|ui)$/i.test(folder) ? 'component' : /^(pages?|app|routes?)$/i.test(folder) ? 'route-or-page' : /^(composables?|hooks?)$/i.test(folder) ? 'reusable-logic' : undefined;
+  const parts = relative.split('/').filter(Boolean);
+  const segments = parts.length > 1 ? parts.slice(0, -1) : [basename(file, extname(file))];
+  if (segments.some((s) => /^(components?|ui)$/i.test(s))) return 'component';
+  if (segments.some((s) => /^(pages?|routes?)$/i.test(s))) return 'route-or-page';
+  if (segments.some((s) => /^(composables?|hooks?)$/i.test(s))) return 'reusable-logic';
+  if (segments.some((s) => /^app$/i.test(s))) return 'route-or-page';
+  return undefined;
 }

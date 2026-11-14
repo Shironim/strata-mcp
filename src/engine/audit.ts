@@ -1,17 +1,12 @@
 import { readSourceFile } from './source-file';
-import { promises as fs } from 'node:fs';
 import { basename, extname, isAbsolute, normalize, relative, resolve } from 'node:path';
 import { collectFiles } from './collector';
-import { getCandidateNames } from './template';
+import { getCandidateNames, toKebabCase } from './template';
 import { detectFramework } from './contract';
 import { escapeRegExp } from './patterns';
-import { isRenderedInContent } from './graph/downward-traversal';
+import { renderedComponentKeys } from './graph/downward-traversal';
 import { scanDynamicImportsAndGlobals } from './dynamic-imports';
-import type {
-  UnusedComponentInfo,
-  UnusedComponentsOptions,
-  UnusedComponentsResult,
-} from '../types';
+import type { UnusedComponentInfo, UnusedComponentsOptions, UnusedComponentsResult } from '../types';
 
 /**
  * Checks if a file path matches a glob pattern (supports **, *, and ?; case-insensitive).
@@ -40,6 +35,9 @@ export function matchesGlob(filePath: string, glob: string): boolean {
  */
 export function isPagePath(filePath: string): boolean {
   const norm = filePath.replace(/\\/g, '/').toLowerCase();
+  if (/(?:^|\/)(?:app|pages|views)\/(?:.*\/)?(?:partials|components?|_components?)\//.test(norm)) {
+    return false;
+  }
   return (
     norm.includes('/pages/') ||
     norm.includes('/views/') ||
@@ -50,17 +48,6 @@ export function isPagePath(filePath: string): boolean {
     norm.startsWith('routes/') ||
     norm.startsWith('app/')
   );
-}
-
-/**
- * Checks whether a component candidate name appears as an active rendered tag or usage in file content.
- * Prevents import-only declarations in script from falsely counting as component usage (FND-02).
- */
-function isComponentReferencedInContent(content: string, candidateNames: string[]): boolean {
-  for (const cand of candidateNames) {
-    if (isRenderedInContent(content, cand)) return true;
-  }
-  return false;
 }
 
 /**
@@ -92,27 +79,26 @@ export async function findUnusedComponents(
 
   const excludePages = options.excludePages !== false;
 
-  const ignorePatterns =
-    options.ignorePatterns && options.ignorePatterns.length > 0
-      ? options.ignorePatterns
-      : excludePages
-        ? [...defaultPageIgnores, ...defaultTestLayoutIgnores]
-        : defaultTestLayoutIgnores;
+  const hasCustomIgnore = Boolean(options.ignorePatterns && options.ignorePatterns.length > 0);
+  const ignorePatterns = hasCustomIgnore
+    ? options.ignorePatterns!
+    : excludePages
+      ? [...defaultPageIgnores, ...defaultTestLayoutIgnores]
+      : defaultTestLayoutIgnores;
+
+  function matchesAnyGlob(filePath: string, relPath: string, baseName: string, patterns: string[]): boolean {
+    return patterns.some(
+      (pat) => matchesGlob(relPath, pat) || matchesGlob(filePath, pat) || matchesGlob(baseName, pat)
+    );
+  }
 
   function shouldIgnore(filePath: string): boolean {
     const relPath = relative(targetDir, filePath).replace(/\\/g, '/');
     const baseName = basename(filePath);
-
-    for (const pat of ignorePatterns) {
-      if (
-        matchesGlob(relPath, pat) ||
-        matchesGlob(filePath, pat) ||
-        matchesGlob(baseName, pat)
-      ) {
-        return true;
-      }
+    if (!hasCustomIgnore && excludePages && /(?:^|\/)app\/(?:.*\/)?(?:components?|_components?)\//i.test(relPath)) {
+      return matchesAnyGlob(filePath, relPath, baseName, defaultTestLayoutIgnores);
     }
-    return false;
+    return matchesAnyGlob(filePath, relPath, baseName, ignorePatterns);
   }
 
   // Pass 1: Collect component declarations (scoped to scopePath if provided)
@@ -163,6 +149,15 @@ export async function findUnusedComponents(
 
   // Scan dynamic imports, Inertia glob resolvers, and global component registrations
   const dynamicRegistry = await scanDynamicImportsAndGlobals(targetDir, fileContents, allFiles);
+  const referencedBy = new Map<string, Set<string>>();
+  for (const { file, content } of fileContents) {
+    for (const key of renderedComponentKeys(content)) {
+      let files = referencedBy.get(key);
+      if (!files) referencedBy.set(key, files = new Set());
+      files.add(file);
+    }
+  }
+  fileContents.length = 0;
 
   for (const comp of declaredComponents) {
     const normCompPath = normalize(comp.filePath);
@@ -176,13 +171,12 @@ export async function findUnusedComponents(
       continue;
     }
 
-    for (const { file, content } of fileContents) {
-      if (file === comp.filePath) continue; // skip self references
-      if (isComponentReferencedInContent(content, comp.candidates)) {
-        comp.usageCount++;
-        break; // Once referenced, no need to keep searching for this component
-      }
-    }
+    comp.usageCount = comp.candidates.some(candidate =>
+      [`case:${candidate.toLowerCase()}`, `kebab:${toKebabCase(candidate)}`].some(key => {
+        const files = referencedBy.get(key);
+        return files && (files.size > 1 || !files.has(normCompPath));
+      })
+    ) ? 1 : 0;
   }
 
   const unused = declaredComponents

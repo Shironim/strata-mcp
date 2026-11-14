@@ -13,7 +13,7 @@ import { escapeRegExp, JS_IDENTIFIER } from './patterns';
 import type { RawMatch, ResolvedMatch } from '../types';
 import { collectFiles } from './collector';
 import { formatMatchesAsText } from './formatter';
-import { runConcurrent } from './pool';
+import { collectConcurrentMatches } from './pool';
 import { createDocumentAdapter } from '../adapters/factory';
 
 // Re-export utility functions
@@ -122,11 +122,18 @@ async function findScriptUsages(
   const localAliases: string[] = [];
   const candidates = getCandidateNames(componentName);
 
-  // 1. Static imports: `import $$$ from '$$$'`
+  // 1. Static imports: rule using kind: import_statement (matches single & double quotes)
+  const importRule = `
+id: all-imports
+message: match import
+language: ${lang === 'js' ? 'js' : 'ts'}
+rule:
+  kind: import_statement
+`;
   try {
     const staticImports = await executeAstGrep({
       code,
-      pattern: `import $$$ from '$$$'`,
+      rule: importRule,
       language: lang,
     });
 
@@ -209,13 +216,13 @@ rule:
  * Searches code by simple pattern across all supported files concurrently using DocumentAdapters.
  */
 export async function findCode(options: SearchOptions): Promise<ResolvedMatch[]> {
-  const files = await collectFiles(resolve(options.targetPath), {
+  const files = (await collectFiles(resolve(options.targetPath), {
     excludeDirs: options.excludeDirs,
-  });
+  })).sort();
   const limit = options.maxResults || 200;
   const keywords = extractPatternKeywords(options.pattern);
 
-  const fileResults = await runConcurrent(
+  const matches = await collectConcurrentMatches(
     files,
     async (file) => {
       const content = await readSourceFile(file);
@@ -240,11 +247,13 @@ export async function findCode(options: SearchOptions): Promise<ResolvedMatch[]>
           : undefined;
 
       for (const block of adapter.getScriptBlocks()) {
+        if (matches.length >= limit) return matches;
         try {
           const rawMatches = await executeAstGrep({
             code: block.content,
             pattern: options.pattern,
             language: effectiveScriptLang || block.lang || 'ts',
+            maxResults: limit - matches.length,
           });
           matches.push(...remapMatches(rawMatches, block, file));
         } catch (err) {
@@ -254,6 +263,7 @@ export async function findCode(options: SearchOptions): Promise<ResolvedMatch[]>
       }
 
       // Scan template block for HTML / component tag patterns in .vue and .astro
+      if (matches.length >= limit) return matches;
       const templateBlock = adapter.getTemplateBlock();
       if (templateBlock) {
         const isTagPattern =
@@ -267,6 +277,7 @@ export async function findCode(options: SearchOptions): Promise<ResolvedMatch[]>
               code: templateBlock.content,
               pattern: options.pattern,
               language: 'html',
+              maxResults: limit - matches.length,
             });
             matches.push(...remapMatches(rawMatches, templateBlock, file));
           } catch (err) {
@@ -283,6 +294,7 @@ export async function findCode(options: SearchOptions): Promise<ResolvedMatch[]>
               filePath: file,
               pattern: options.pattern,
               language: effectiveScriptLang || 'ts',
+              maxResults: limit - matches.length,
             }))
           );
         }
@@ -290,11 +302,10 @@ export async function findCode(options: SearchOptions): Promise<ResolvedMatch[]>
 
       return matches;
     },
-    options.concurrency
+    limit, options.concurrency
   );
 
-  const allMatches = fileResults.flat();
-  return allMatches.slice(0, limit);
+  return matches;
 }
 
 /**
@@ -305,13 +316,13 @@ export async function findCodeByRule(options: SearchOptions): Promise<ResolvedMa
     throw new Error('Rule YAML is required for findCodeByRule');
   }
 
-  const files = await collectFiles(resolve(options.targetPath), {
+  const files = (await collectFiles(resolve(options.targetPath), {
     excludeDirs: options.excludeDirs,
-  });
+  })).sort();
   const limit = options.maxResults || 200;
   const keywords = extractRuleKeywords(options.rule);
 
-  const fileResults = await runConcurrent(
+  const matches = await collectConcurrentMatches(
     files,
     async (file) => {
       const content = await readSourceFile(file);
@@ -330,15 +341,18 @@ export async function findCodeByRule(options: SearchOptions): Promise<ResolvedMa
           : undefined;
 
       for (const block of adapter.getScriptBlocks()) {
+        if (matches.length >= limit) return matches;
         const rawMatches = await executeAstGrep({
           code: block.content,
           rule: options.rule,
           language: effectiveScriptLang || block.lang || 'ts',
+          maxResults: limit - matches.length,
         });
         matches.push(...remapMatches(rawMatches, block, file));
       }
 
       // Scan template block if rule targets HTML; otherwise scan JS expressions in the template.
+      if (matches.length >= limit) return matches;
       const templateBlock = adapter.getTemplateBlock();
       if (templateBlock) {
         const ruleTargetsHtml =
@@ -350,6 +364,7 @@ export async function findCodeByRule(options: SearchOptions): Promise<ResolvedMa
               code: templateBlock.content,
               rule: options.rule,
               language: 'html',
+              maxResults: limit - matches.length,
             });
             matches.push(...remapMatches(rawMatches, templateBlock, file));
           } catch (err) {
@@ -364,6 +379,7 @@ export async function findCodeByRule(options: SearchOptions): Promise<ResolvedMa
               templateBlock,
               filePath: file,
               rule: options.rule,
+              maxResults: limit - matches.length,
             }))
           );
         }
@@ -371,25 +387,24 @@ export async function findCodeByRule(options: SearchOptions): Promise<ResolvedMa
 
       return matches;
     },
-    options.concurrency
+    limit, options.concurrency
   );
 
-  const allMatches = fileResults.flat();
-  return allMatches.slice(0, limit);
+  return matches;
 }
 
 /**
  * Searches component usage across templates (Vue/Astro/JSX) and scripts (imports/lazy/re-exports) concurrently.
  */
 export async function findComponentUsage(options: ComponentSearchOptions): Promise<ResolvedMatch[]> {
-  const files = await collectFiles(resolve(options.targetPath), {
+  const files = (await collectFiles(resolve(options.targetPath), {
     excludeDirs: options.excludeDirs,
-  });
+  })).sort();
   const scope = options.scope || 'both';
   const limit = options.maxResults || 200;
   const candidates = getCandidateNames(options.componentName);
 
-  const fileResults = await runConcurrent(
+  const matches = await collectConcurrentMatches(
     files,
     async (file) => {
       const content = await readSourceFile(file);
@@ -418,7 +433,7 @@ export async function findComponentUsage(options: ComponentSearchOptions): Promi
 
         if (scope === 'script' || scope === 'both') {
           const remapped = remapMatches(scriptMatches, block, file);
-          for (const m of remapped) m.usageKind = 'import';
+          for (const m of remapped) m.usageKind = /^\s*export\b/.test(m.snippet) ? 'export' : 'import';
           matches.push(...remapped);
         }
       }
@@ -443,12 +458,10 @@ export async function findComponentUsage(options: ComponentSearchOptions): Promi
             }
           }
         } else if (adapter.isJsx()) {
-          // React / JSX elements
+          // React / JSX elements (PascalCase/namespaced only; exclude intrinsic lowercase HTML tags)
           const candidateNames = getCandidateNames(options.componentName);
-          const targetNames = [...candidateNames];
-          for (const alias of detectedAliases) {
-            targetNames.push(...getCandidateNames(alias));
-          }
+          const targetNames = [...candidateNames, ...Array.from(detectedAliases).flatMap((a) => getCandidateNames(a))]
+            .filter((name) => /^[A-Z]/.test(name));
 
           const jsxRule = `
 id: all-jsx-elements
@@ -493,9 +506,8 @@ rule:
 
       return matches;
     },
-    options.concurrency
+    limit, options.concurrency
   );
 
-  const allMatches = fileResults.flat();
-  return allMatches.slice(0, limit);
+  return matches;
 }

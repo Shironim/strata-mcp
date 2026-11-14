@@ -251,6 +251,7 @@ export interface ResponseBudgetOptions {
   maxBytes?: number;
   continuationToken?: string;
   format?: 'text' | 'json';
+  omitStructuredForText?: boolean;
   collectionPaths?: string[];
   formatText?: (data: Record<string, any>, page: PaginatedPageContext) => string | undefined;
   render?: (result: ToolCallResponse) => ToolCallResponse;
@@ -345,6 +346,16 @@ function setPath(data: Record<string, any>, path: string, value: unknown): void 
   parent[last] = value;
 }
 
+function dedupeOmissions(omissions: Array<{ code: string; reason: string }>): Array<{ code: string; reason: string }> {
+  const seen = new Set<string>();
+  return omissions.filter((o) => {
+    const key = `${o.code}\0${o.reason}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 /**
  * Measures the FINAL rendered response, not a fixed allowance per item.
  * Only one explicitly selected collection is pageable. Other mandatory payloads remain atomic.
@@ -352,12 +363,26 @@ function setPath(data: Record<string, any>, path: string, value: unknown): void 
 export function applyResponseBudget(result: ToolCallResponse, options: ResponseBudgetOptions): ToolCallResponse {
   const { maxBytes, continuationToken, tokenContext } = options;
   const render = options.render ?? ((value: ToolCallResponse) => value);
+  const measureBudget = (candidate: ToolCallResponse): number => {
+    if (
+      options.omitStructuredForText &&
+      candidate.structuredContent &&
+      Array.isArray(candidate.content) &&
+      candidate.content.length > 0
+    ) {
+      return measureResponseBytes({
+        ...candidate,
+        structuredContent: { summary: 'omitted_for_text_format' },
+      });
+    }
+    return measureResponseBytes(candidate);
+  };
   if (maxBytes === undefined && !continuationToken) return render(result);
   if (maxBytes !== undefined && (!Number.isSafeInteger(maxBytes) || maxBytes < MINIMUM_RESPONSE_BUDGET_BYTES)) {
     return render({ isError: true, content: [{ type: 'text', text: `BUDGET_TOO_SMALL: max_bytes must be an integer >= ${MINIMUM_RESPONSE_BUDGET_BYTES}` }] });
   }
   const fitOrReject = (candidate: ToolCallResponse): ToolCallResponse => {
-    const bytes = measureResponseBytes(candidate);
+    const bytes = measureBudget(candidate);
     return maxBytes === undefined || bytes <= maxBytes ? candidate
       : budgetRejection('BUDGET_RESPONSE_TOO_LARGE', maxBytes, bytes, candidate);
   };
@@ -366,7 +391,11 @@ export function applyResponseBudget(result: ToolCallResponse, options: ResponseB
   // Preserve exact source and legacy primary text when the complete response already fits.
   if (!continuationToken) {
     const complete = render(structuredClone(result));
-    if (maxBytes === undefined || measureResponseBytes(complete) <= maxBytes) return complete;
+    const completeRetrieval = complete.structuredContent?.retrieval as { omissions?: Array<{ code: string; reason: string }> } | undefined;
+    if (completeRetrieval && Array.isArray(completeRetrieval.omissions)) {
+      completeRetrieval.omissions = dedupeOmissions(completeRetrieval.omissions);
+    }
+    if (maxBytes === undefined || measureBudget(complete) <= maxBytes) return complete;
   }
 
   const original = result.structuredContent ?? {};
@@ -383,8 +412,10 @@ export function applyResponseBudget(result: ToolCallResponse, options: ResponseB
     const retrieval = failure.structuredContent?.retrieval as any;
     if (retrieval) {
       if (message.startsWith('STALE_CONTINUATION_TOKEN')) retrieval.freshness = 'stale';
-      retrieval.omissions ??= [];
-      retrieval.omissions.push({ code: 'CONTINUATION_REJECTED', reason: message });
+      retrieval.omissions = dedupeOmissions([
+        ...(retrieval.omissions ?? []),
+        { code: 'CONTINUATION_REJECTED', reason: message },
+      ]);
     }
     // Rejected pages must not carry fresh analysis items or overflow the error budget.
     failure.structuredContent = retrieval ? { retrieval } : {};
@@ -441,8 +472,12 @@ export function applyResponseBudget(result: ToolCallResponse, options: ResponseB
       retrieval.budget = budget;
       if (partial) {
         retrieval.completeness = 'partial';
-        retrieval.omissions ??= [];
-        retrieval.omissions.push({ code: 'CONTEXT_BUDGET_EXCEEDED', reason: `Paginated selection: entries ${start} through ${end} of ${items.length}. Excluded entries are not evidence of absence.` });
+        retrieval.omissions = dedupeOmissions([
+          ...(retrieval.omissions ?? []),
+          { code: 'CONTEXT_BUDGET_EXCEEDED', reason: `Paginated selection: entries ${start} through ${end} of ${items.length}. Excluded entries are not evidence of absence.` },
+        ]);
+      } else if (Array.isArray(retrieval.omissions)) {
+        retrieval.omissions = dedupeOmissions(retrieval.omissions);
       }
     } else data.budget = budget;
     candidate.structuredContent = data;
@@ -478,7 +513,7 @@ export function applyResponseBudget(result: ToolCallResponse, options: ResponseB
         candidate.content = [{ type: 'text', text: primaryText }, ...extras];
       } else candidate.content = [...result.content, { type: 'text', text: JSON.stringify({ budget }) }];
       rendered = render(candidate);
-      const bytes = measureResponseBytes(rendered);
+      const bytes = measureBudget(rendered);
       if (budget.estimatedBytes === bytes) break;
       budget.estimatedBytes = bytes;
     }
@@ -486,19 +521,19 @@ export function applyResponseBudget(result: ToolCallResponse, options: ResponseB
   };
 
   const full = build(items.length);
-  if (maxBytes === undefined || measureResponseBytes(full) <= maxBytes) return full;
-  if (!path || start === items.length) return budgetRejection('BUDGET_METADATA_TOO_LARGE', maxBytes, measureResponseBytes(full));
+  if (maxBytes === undefined || measureBudget(full) <= maxBytes) return full;
+  if (!path || start === items.length) return budgetRejection('BUDGET_METADATA_TOO_LARGE', maxBytes, measureBudget(full));
   const minimum = build(start);
   const one = build(start + 1);
-  if (measureResponseBytes(minimum) > maxBytes) return budgetRejection('BUDGET_METADATA_TOO_LARGE', maxBytes, measureResponseBytes(one));
-  if (measureResponseBytes(one) > maxBytes) return budgetRejection('BUDGET_ITEM_TOO_LARGE', maxBytes, measureResponseBytes(one));
+  if (measureBudget(minimum) > maxBytes) return budgetRejection('BUDGET_METADATA_TOO_LARGE', maxBytes, measureBudget(one));
+  if (measureBudget(one) > maxBytes) return budgetRejection('BUDGET_ITEM_TOO_LARGE', maxBytes, measureBudget(one));
   let low = start + 1;
   let high = items.length - 1;
   let best = one;
   while (low <= high) {
     const middle = Math.floor((low + high) / 2);
     const page = build(middle);
-    if (measureResponseBytes(page) <= maxBytes) { best = page; low = middle + 1; }
+    if (measureBudget(page) <= maxBytes) { best = page; low = middle + 1; }
     else high = middle - 1;
   }
   return best;

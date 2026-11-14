@@ -44,11 +44,58 @@ function declarationName(statement: ts.Statement): string | undefined {
       ts.isEnumDeclaration(statement) || ts.isModuleDeclaration(statement)) {
     return statement.name?.text;
   }
+  if (ts.isImportDeclaration(statement)) {
+    const spec = ts.isStringLiteral(statement.moduleSpecifier) ? statement.moduleSpecifier.text : undefined;
+    return spec ? `'${spec}'` : undefined;
+  }
+  if (ts.isExportDeclaration(statement)) {
+    if (statement.moduleSpecifier && ts.isStringLiteral(statement.moduleSpecifier)) {
+      return `'${statement.moduleSpecifier.text}'`;
+    }
+    if (statement.exportClause && ts.isNamedExports(statement.exportClause)) {
+      const names = statement.exportClause.elements.map((e) => e.name.text);
+      return names.length > 0 ? `{ ${names.join(', ')} }` : 'export';
+    }
+    return 'export';
+  }
+  if (
+    ts.isExpressionStatement(statement) &&
+    ts.isStringLiteral(statement.expression) &&
+    (statement.expression.text === 'use client' || statement.expression.text === 'use server')
+  ) {
+    return `'${statement.expression.text}'`;
+  }
+  if (ts.isExportAssignment(statement)) {
+    return 'export default';
+  }
   if (ts.isVariableStatement(statement)) {
     const first = statement.declarationList.declarations[0];
-    return first && ts.isIdentifier(first.name) ? first.name.text : undefined;
+    if (!first) return undefined;
+    if (ts.isIdentifier(first.name)) return first.name.text;
+    if (first.initializer && ts.isCallExpression(first.initializer) && ts.isIdentifier(first.initializer.expression)) {
+      return first.initializer.expression.text;
+    }
+    return undefined;
+  }
+  if (ts.isExpressionStatement(statement) && ts.isCallExpression(statement.expression)) {
+    const callee = statement.expression.expression;
+    if (ts.isIdentifier(callee)) return callee.text;
+    if (ts.isPropertyAccessExpression(callee) && ts.isIdentifier(callee.name)) return callee.name.text;
   }
   return undefined;
+}
+
+function statementKind(statement: ts.Statement): 'import' | 'export' | 'directive' | 'symbol' {
+  if (ts.isImportDeclaration(statement)) return 'import';
+  if (ts.isExportDeclaration(statement)) return 'export';
+  if (
+    ts.isExpressionStatement(statement) &&
+    ts.isStringLiteral(statement.expression) &&
+    (statement.expression.text === 'use client' || statement.expression.text === 'use server')
+  ) {
+    return 'directive';
+  }
+  return 'symbol';
 }
 
 function countJsxRegions(node: ts.Node, insideJsx = false): number {
@@ -66,7 +113,7 @@ function mapScriptBlock(snapshot: SourceSnapshot, content: string, block: SfcBlo
   const source = ts.createSourceFile(snapshot.file, block.content, ts.ScriptTarget.Latest, true, kind);
   let childRegionsTruncated = false;
   const regions = source.statements.slice(0, maxRegions).map(statement => {
-    const item = region(snapshot, content, 'symbol', block.loc.start.offset + statement.getStart(source), block.loc.start.offset + statement.end, declarationName(statement));
+    const item = region(snapshot, content, statementKind(statement), block.loc.start.offset + statement.getStart(source), block.loc.start.offset + statement.end, declarationName(statement));
     if (kind !== ts.ScriptKind.TSX && kind !== ts.ScriptKind.JSX) return item;
     const children: SourceRegion[] = [];
     const visit = (node: ts.Node, insideJsx: boolean): void => {
@@ -167,6 +214,8 @@ function mapVue(snapshot: SourceSnapshot, content: string, maxRegions: number): 
             const significantChildren = childElements.filter(isSignificant);
             if (significantChildren.length > 0) {
               elemRegion.children = significantChildren.slice(0, 10).map((c: any) => mapElementTree(c, depth + 1));
+            } else if (depth === 0 && el.loc?.end?.line - el.loc?.start?.line > 50) {
+              elemRegion.children = childElements.slice(0, 15).map((c: any) => mapElementTree(c, depth + 1));
             }
           }
 
@@ -338,17 +387,17 @@ function mapScript(snapshot: SourceSnapshot, content: string, ext: string, maxRe
   const source = ts.createSourceFile(snapshot.file, content, ts.ScriptTarget.Latest, true, scriptKind);
   let childRegionsTruncated = false;
   const regions: SourceRegion[] = source.statements.slice(0, maxRegions).map(statement => {
-    const isImport = ts.isImportDeclaration(statement) || ts.isExportDeclaration(statement);
+    const stmtKind = statementKind(statement);
     const isType = ts.isInterfaceDeclaration(statement) || ts.isTypeAliasDeclaration(statement);
     const name = declarationName(statement);
-    const isComponent = Boolean(name && /^[A-Z]/.test(name));
-    const isCustomHook = Boolean(name && /^use[A-Z]/.test(name));
+    const isComponent = stmtKind === 'symbol' && Boolean(name && /^[A-Z]/.test(name));
+    const isCustomHook = stmtKind === 'symbol' && Boolean(name && /^use[A-Z]/.test(name));
     const role = isType ? 'type-declaration' : isComponent ? 'component' : isCustomHook ? 'custom-hook' : undefined;
 
     const parent = region(
       snapshot,
       content,
-      isImport ? 'import' : 'symbol',
+      stmtKind,
       statement.getStart(source),
       statement.end,
       name,

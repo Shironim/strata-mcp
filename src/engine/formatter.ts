@@ -1,21 +1,26 @@
+import { relative } from 'node:path';
 import type { ComponentContract, ResolvedMatch } from '../types';
 
 /**
  * Formats match results as token-efficient human-readable text.
  */
-export function formatMatchesAsText(matches: ResolvedMatch[]): string {
+export function formatMatchesAsText(matches: ResolvedMatch[], rootDir?: string): string {
   if (matches.length === 0) {
     return 'No matches found.';
   }
 
-  return matches
-    .map((m) => {
-      const usage = m.usageKind ? ` [${m.usageKind}]` : '';
-      const directive = m.clientDirective ? ` [${m.clientDirective}]` : '';
-      const loc = m.column !== undefined ? `${m.file}:${m.line}:${m.column}` : `${m.file}:${m.line}`;
-      return `${loc}${usage}${directive} - ${m.snippet}`;
-    })
-    .join('\n');
+  const lines = matches.map((m) => {
+    const usage = m.usageKind ? ` [${m.usageKind}]` : '';
+    const directive = m.clientDirective ? ` [${m.clientDirective}]` : '';
+    let displayFile = m.file;
+    if (rootDir) {
+      const rel = relative(rootDir, m.file);
+      if (rel && !rel.startsWith('..')) displayFile = rel;
+    }
+    const loc = m.column !== undefined ? `${displayFile}:${m.line}:${m.column}` : `${displayFile}:${m.line}`;
+    return `${loc}${usage}${directive} - ${m.snippet}`;
+  });
+  return rootDir ? `Root: ${rootDir}\n${lines.join('\n')}` : lines.join('\n');
 }
 
 function appendHeaderAndProps(contract: ComponentContract, lines: string[]): void {

@@ -453,11 +453,12 @@ export async function extractWorkspaceApiContracts(
  * Formats API Contract extraction results as human-readable markdown.
  */
 export function formatApiContractsAsText(result: ApiContractResult): string {
+  const totalInvocations = (result as ApiContractResult & { totalAvailable?: number }).totalAvailable ?? result.endpoints.length;
   const lines: string[] = [
     `# Cross-Boundary API Contracts`,
     `- **Workspace:** \`${result.workspaceRoot}\``,
     `- **Total Unique Endpoints:** ${result.totalEndpointsFound}`,
-    `- **Total API Invocations:** ${result.endpoints.length}`,
+    `- **Total API Invocations:** ${totalInvocations}`,
     '',
   ];
 
@@ -483,7 +484,7 @@ export function formatApiContractsAsText(result: ApiContractResult): string {
     lines.push(
       `- **\`${item.method}\`** \`${item.endpoint}\` via *${item.clientKind}* at [${basename(item.file)}#L${item.line}](file://${item.file}#L${item.line})${payloadStr}`
     );
-    if (item.backendTargetHint) {
+    if (item.backendTargetHint?.namedRoute) {
       lines.push(
         `  - *Backend Target Hint:* \`${item.backendTargetHint.targetIntent}\` ➔ \`${item.backendTargetHint.suggestedSymbols[0]}\` *(Pure Naming Convention Heuristic - verify actual routes)*`
       );
