@@ -223,6 +223,8 @@ describe('CLI Companion (Task 6 DoD)', () => {
     try {
       await main(['find', '--map', FIXTURES_DIR, '--json', '--limit', '1']);
       await main(['inspect', file, '--view', 'map', '--json']);
+      expect(JSON.parse(logs[1]).retrieval).toBeUndefined();
+      expect(JSON.parse(logs[1]).decision).toBeUndefined();
       await main(['find', 'defineProps', '--mode', 'literal', '--path', FIXTURES_DIR]);
     } finally {
       console.log = originalLog;

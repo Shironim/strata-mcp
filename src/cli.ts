@@ -1,359 +1,29 @@
 #!/usr/bin/env bun
-import { getSourceLineRange, readSourceFile, readSourceRef, readSourceSnapshot } from './engine/source-file';
-import { mapSourceFile, formatSourceMapAsText } from './engine/source-map';
+import { inspectFromCli } from './cli/inspect';
+import { readSourceFile } from './engine/source-file';
 import { mapFrontendScope, formatFrontendMapAsText } from './engine/frontend-map';
 import { dumpSyntaxTree } from './engine/astgrep';
-import { extractComponentOutline, formatOutlineAsText } from './engine/outline';
 import { findCodeTool } from './tools/find-code';
-import { existsSync, promises as fs, statSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import { findCodeByRule, findComponentUsage, formatMatchesAsText } from './engine/search';
-import { extractComponentContract, formatContractAsText } from './engine/contract';
-import { sliceSymbol, formatSymbolSliceAsText } from './engine/slicer';
-import { auditEventHandlers, formatEventHandlerAuditAsText } from './engine/reactivity';
 import { getComponentTree, formatTreeAsText, formatTreeAsMermaid } from './engine/tree';
-import { findUnusedComponents, formatUnusedAsText } from './engine/audit';
 import { scanRoutes, formatRoutesAsText } from './engine/routes';
 import { generatePatchPlan } from './engine/patch-plan';
 import { extractWorkspaceApiContracts, formatApiContractsAsText } from './engine/api-contract';
-import {
-  formatStateImpactAsText,
-  formatUnusedStateAsText,
-  findUnusedState,
-  queryStateImpact,
-  syncWorkspace,
-  closeAllDatabases,
-  traceStateChain,
-  formatStateChainAsText,
-} from './engine/database';
+import { formatStateImpactAsText, formatUnusedStateAsText, findUnusedState, queryStateImpact, syncWorkspace, closeAllDatabases, traceStateChain, formatStateChainAsText } from './engine/database';
 import { handleStrataInit } from './cli/commands/init';
-import {
-  normalizeAuditTarget,
-  parseAliasMapInput,
-  parseSafePositiveInt,
-  parseStringList,
-  resolveProjectRoot,
-  VALID_AUDIT_TARGETS,
-} from './engine/path-resolver';
+import { normalizeAuditTarget, parseAliasMapInput, parseSafePositiveInt, parseStringList, VALID_AUDIT_TARGETS } from './engine/path-resolver';
 import { STRATA_VERSION } from './version';
 import { StrataTelemetry, formatSummaryAsText } from './engine/telemetry';
 import type { PatchRefactorType, RouteFramework } from './types';
+import { printRootHelp, printCommandHelp } from './cli/help';
+import { parseStringFlag, parseArgs } from './cli/arguments';
+import { analyzeFrontend, formatFrontendAudit, type AuditTarget } from './engine/frontend-audit';
 
-export function printRootHelp() {
-  console.log(`
-strata — Frontend Structural Code Search & Intelligence CLI
-
-Usage:
-  strata <command> [options]
-  strata <command> --help        Show options for a specific command
-
-Operational Commands:
-  serve                          Start MCP stdio daemon server
-  init [dir]                     Initialize strata index, configs, and agent rules
-  sync [dir]                     Synchronize project cache and index database
-
-Core Analytical Commands (Aligned with 6 MCP Tools):
-  find, search <pattern>         AST code search (--component, --rule, --lang, --mode)
-  inspect, contract <file>       Inspect component (--view map|source, --symbol, --outline)
-  tree, component-tree [entry]   Inspect component hierarchy tree (--route, --direction)
-  trace, impact <state-id>       Trace state blast radius and consumers (--depth, --role)
-  audit [dir]                    Inspect topology and unused candidates (--target)
-  patch, patch-plan <file>       Generate prescriptive refactoring patch plan
-  stats, telemetry [dir]         Show tool latency, error rates, and telemetry stats
-
-Direct Shortcuts:
-  routes, apis, dead-state, usage, rule
-
-Global Options:
-  -p, --path <dir|file>          Target directory or file (default: .)
-  -v, --version                  Show version number
-  --json                         Output raw JSON instead of formatted text
-  -h, --help                     Show help message
-`);
-}
-
-export function printCommandHelp(command: string) {
-  switch (command) {
-    case 'init':
-      console.log(`
-Usage: strata init [target-dir] [options]
-
-Initialize strata index, local MCP configs, and agent rules.
-
-Options:
-  --harness, --agent <name>  Target harness (antigravity | claude | codex | opencode | agents | all)
-  -f, --force                Overwrite existing agent rules and configurations
-  -y, --yes                  Skip interactive prompts, auto-accept defaults
-  -p, --path <dir>           Target directory (default: .)
-`);
-      break;
-
-    case 'find':
-    case 'search':
-    case 'usage':
-    case 'rule':
-      console.log(`
-Usage: strata find <pattern> [options]
-
-AST code search across components and scripts.
-
-Options:
-  --component <name>         Search all usages of a component (alias for "usage")
-  --rule <rule-yaml>         Execute custom ast-grep YAML rule (alias for "rule")
-  --lang <lang>              Target language hint (default: ts)
-  --scope <scope>            Scope: template | script | both (default: both)
-  --mode <mode>              Pattern mode: ast | auto | literal
-  --map                      Return bounded frontend inventory (no source bodies)
-  --dump-ast                 Dump CST syntax tree for a code snippet (CLI developer debug)
-  --limit <n>                Result/page size (default: 100 for map, 200 for search)
-  --offset <n>               Zero-based inventory offset
-  -p, --path <path>          Target directory or file (default: .)
-  --json                     Output raw JSON
-`);
-      break;
-
-    case 'inspect':
-    case 'contract':
-      console.log(`
-Usage: strata inspect <component-file> [options]
-
-Inspect component contract (props, emits, slots, state, dependencies).
-
-Options:
-  --view <map|source>        Map regions or return a map-selected source slice
-  --source-ref <json>        Source ref copied from --view map output
-  --source-range <start:end> Return inclusive source lines (optional --expected-hash)
-  --symbol <name>            Extract specific symbol or function with line numbers
-  --outline                  Extract component symbol outline
-  --audit-events             Audit template-to-script event handler integrity
-  --json                     Output raw JSON
-`);
-      break;
-
-    case 'tree':
-    case 'component-tree':
-      console.log(`
-Usage: strata tree [entry-file] [options]
-
-Inspect component hierarchy and import dependency trees.
-
-Options:
-  --route <route-path>       Resolve tree starting from URL route (e.g. "/catalog")
-  --depth, --max-depth <n>   Max tree depth (default: 3)
-  --direction <dir>          Traversal: downward | upward (default: downward)
-  --alias <prefix=path>      Path alias mapping (e.g. "@/=resources/js/")
-  --scope-filter <scope>     Domain or package filter (e.g. "apps/web")
-  -p, --path <dir>           Target directory (default: .)
-  --json                     Output raw JSON
-`);
-      break;
-
-    case 'trace':
-    case 'impact':
-      console.log(`
-Usage: strata trace <state-id> [options]
-
-Trace reactive state blast radius and consumers.
-
-Options:
-  --depth <n>                Traversal depth (default: 1, >1 for multi-hop)
-  --direction <dir>          Direction: consumers | dependencies | both (default: both)
-  --role <role>              Role filter: all | mutators | readers (default: all)
-  -p, --path <dir>           Target directory (default: .)
-  --json                     Output raw JSON
-`);
-      break;
-
-    case 'audit':
-    case 'routes':
-    case 'apis':
-    case 'dead-state':
-    case 'unused-state':
-      console.log(`
-Usage: strata audit [target-dir] [options]
-
-Inspect route/API topology and unused component/state candidates.
-
-Targets (--target <target>):
-  dead-components (default)  Find unreferenced components
-  dead-state                 Detect unused reactive state / stores
-  routes                     Extract client-side route manifest
-  api-contracts              Extract outbound API endpoint calls
-  all                        Run the four retained audit targets
-
-Options:
-  --ignore <patterns>        Comma-separated glob patterns to ignore
-  --include-pages            Include file-based page views in dead-code audit
-  --scope-path <dir>         Sub-directory or package scope filter
-  --exclude-dirs <dirs>      Comma-separated directory names to exclude
-  -p, --path <dir>           Target directory (default: .)
-  --json                     Output raw JSON
-`);
-      break;
-
-    case 'patch':
-    case 'patch-plan':
-      console.log(`
-Usage: strata patch <component-file> [options]
-
-Generate prescriptive refactoring patch plans across callers and contracts.
-
-Options:
-  --refactor <type>          Operation: rename_prop | remove_prop | rename_event |
-                             rename_model | rename_slot (default: rename_prop)
-  --old <name>               Current/old identifier or property name
-  --new <name>               New identifier or property name (required for rename_*)
-  -p, --path <dir>           Workspace root path (default: .)
-  --json                     Output raw JSON
-`);
-      break;
-
-    case 'sync':
-      console.log(`
-Usage: strata sync [target-dir] [options]
-
-Synchronize project cache and AST index database.
-
-Options:
-  -p, --path <dir>           Target directory (default: .)
-  --json                     Output raw JSON
-`);
-      break;
-
-    case 'stats':
-    case 'telemetry':
-      console.log(`
-Usage: strata stats [target-dir] [options]
-
-Show tool latency percentiles, error rates, and telemetry statistics.
-
-Options:
-  -p, --path <dir>           Target directory (default: .)
-  --json                     Output raw JSON
-`);
-      break;
-
-    case 'serve':
-      console.log(`
-Usage: strata serve
-
-Start MCP stdio daemon server for AI agent integrations.
-`);
-      break;
-
-    default:
-      printRootHelp();
-      break;
-  }
-}
-
-function toCamelCase(str: string): string {
-  return str.replace(/-([a-z0-9])/g, (_, char) => char.toUpperCase());
-}
-
-export const BOOLEAN_FLAGS = new Set([
-  'json',
-  'version',
-  'v',
-  'help',
-  'h',
-  'yes',
-  'y',
-  'force',
-  'f',
-  'audit-events',
-  'auditEvents',
-  'include-pages',
-  'includePages',
-  'map',
-  'dump-ast',
-  'dumpAst',
-  'outline',
-]);
-
-export function parseStringFlag(val: unknown): string | undefined {
-  return typeof val === 'string' && val.trim() ? val.trim() : undefined;
-}
-
-function parseArgs(args: string[]) {
-  const flags: Record<string, string | boolean> = {};
-  const positional: string[] = [];
-  let endOfFlags = false;
-
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-
-    if (endOfFlags) {
-      positional.push(arg);
-      continue;
-    }
-
-    if (arg === '--') {
-      endOfFlags = true;
-      continue;
-    }
-
-    if (arg === '--json') {
-      flags.json = true;
-    } else if (arg === '--version' || arg === '-v') {
-      flags.version = true;
-      flags.v = true;
-    } else if (arg === '--help' || arg === '-h') {
-      flags.help = true;
-      flags.h = true;
-    } else if (arg === '-y' || arg === '--yes') {
-      flags.yes = true;
-      flags.y = true;
-    } else if (arg === '-f' || arg === '--force') {
-      flags.force = true;
-      flags.f = true;
-    } else if (arg === '-p') {
-      const next = args[i + 1];
-      if (next && !next.startsWith('-')) {
-        flags.path = next;
-        flags.p = next;
-        i++;
-      } else {
-        flags.path = true;
-        flags.p = true;
-      }
-    } else if (arg.startsWith('--no-')) {
-      const rawKey = arg.slice(5);
-      const camelKey = toCamelCase(rawKey);
-      flags[rawKey] = false;
-      if (camelKey !== rawKey) {
-        flags[camelKey] = false;
-      }
-    } else if (arg.startsWith('--')) {
-      const equalsIdx = arg.indexOf('=');
-      let key = arg.slice(2);
-      let val: string | boolean = true;
-      if (equalsIdx > 2) {
-        key = arg.slice(2, equalsIdx);
-        val = arg.slice(equalsIdx + 1);
-      } else if (BOOLEAN_FLAGS.has(key)) {
-        val = true;
-      } else {
-        const next = args[i + 1];
-        if (next !== undefined && !next.startsWith('-')) {
-          val = next;
-          i++;
-        }
-      }
-      const camelKey = toCamelCase(key);
-      flags[key] = val;
-      if (camelKey !== key) {
-        flags[camelKey] = val;
-      }
-    } else if (arg.startsWith('-')) {
-      const flagKey = arg.replace(/^-+/, '');
-      flags[flagKey] = true;
-    } else {
-      positional.push(arg);
-    }
-  }
-
-  return { flags, positional };
-}
+export { printRootHelp } from './cli/help';
+export { printCommandHelp } from './cli/help';
+export { BOOLEAN_FLAGS } from './cli/arguments';
+export { parseStringFlag } from './cli/arguments';
 
 /**
  * Parses a comma-separated `--alias prefix=path` value into an alias map.
@@ -571,91 +241,7 @@ export async function main(argv: string[] = process.argv.slice(2)) {
         process.exit(1);
       }
 
-      const view = parseStringFlag(flags.view);
-      if (view === 'map') {
-        const map = await mapSourceFile(filePath, { maxRegions: parseSafePositiveInt(flags.limit, 200) });
-        console.log(isJson ? JSON.stringify(map, null, 2) : formatSourceMapAsText(map));
-        return;
-      }
-      if (view === 'source') {
-        const rawRef = parseStringFlag(flags['source-ref'] ?? flags.sourceRef);
-        if (!rawRef) {
-          console.error('Error: --view source requires --source-ref <json> returned by --view map.');
-          process.exit(1);
-        }
-        let ref;
-        try {
-          ref = JSON.parse(rawRef);
-        } catch {
-          console.error(`Error: Invalid JSON for --source-ref: "${rawRef}".`);
-          process.exit(1);
-        }
-        const source = await readSourceRef(filePath, ref);
-        console.log(isJson ? JSON.stringify({ file: filePath, source_ref: ref, source }, null, 2) : source);
-        return;
-      }
-      const rawRange = parseStringFlag(flags['source-range'] ?? flags.sourceRange);
-      if (rawRange) {
-        const match = rawRange.match(/^(\d+):(\d+)$/);
-        if (!match) throw new Error('--source-range must use <start:end> inclusive line numbers');
-        const { snapshot, content } = await readSourceSnapshot(filePath);
-        const selected = getSourceLineRange(snapshot, content, Number(match[1]), Number(match[2]));
-        const expectedHash = parseStringFlag(flags['expected-hash'] ?? flags.expectedHash);
-        if (expectedHash && expectedHash !== snapshot.sha256) throw new Error('STALE_SOURCE_REF: expected_hash does not match current source');
-        const source = await readSourceRef(filePath, selected.ref);
-        if (selected.clamped && !isJson) {
-          process.stderr.write(`[strata] Note: end_line ${selected.requestedEndLine} clamped to EOF (L${selected.lineRange.endLine}).\n`);
-        }
-        console.log(isJson
-          ? JSON.stringify({
-              file: filePath,
-              startLine: selected.lineRange.startLine,
-              endLine: selected.lineRange.endLine,
-              ...(selected.clamped ? { clamped: true, requestedEndLine: selected.requestedEndLine } : {}),
-              source_ref: selected.ref,
-              source,
-            }, null, 2)
-          : source);
-        return;
-      }
-
-      const symbol = parseStringFlag(flags.symbol ?? flags['symbol-name']);
-      if (symbol) {
-        const sliced = await sliceSymbol({ path: filePath, symbolName: symbol });
-        if (!sliced) {
-          console.error(`Error: Symbol "${symbol}" not found in "${filePath}".`);
-          process.exit(1);
-        }
-        if (isJson) {
-          console.log(JSON.stringify(sliced, null, 2));
-        } else {
-          console.log(formatSymbolSliceAsText(sliced));
-        }
-        return;
-      }
-
-      if (flags['audit-events']) {
-        const auditRes = await auditEventHandlers({ path: filePath });
-        if (isJson) {
-          console.log(JSON.stringify(auditRes, null, 2));
-        } else {
-          console.log(formatEventHandlerAuditAsText(auditRes));
-        }
-        return;
-      }
-
-      if (flags.outline) {
-        const outline = await extractComponentOutline(filePath, { path: filePath });
-        console.log(isJson ? JSON.stringify(outline, null, 2) : formatOutlineAsText(outline));
-        return;
-      }
-
-      const contract = await extractComponentContract(filePath);
-      if (isJson) {
-        console.log(JSON.stringify(contract, null, 2));
-      } else {
-        console.log(formatContractAsText(contract));
-      }
+      await inspectFromCli(filePath, flags, isJson);
       return;
     }
 
@@ -733,117 +319,15 @@ export async function main(argv: string[] = process.argv.slice(2)) {
         );
         process.exit(1);
       }
-      const excludeDirs = parseStringList(flags['exclude-dirs'] ?? flags.excludeDirs ?? flags.exclude_dirs);
-      const scopePath = (flags['scope-path'] || flags.scopePath || flags.scope_path || flags['scope-filter'] || flags.scopeFilter) as string | undefined;
-
-      if (target === 'dead-state') {
-        const result = await findUnusedState(auditPath, { scopePath, excludeDirs });
-        if (isJson) {
-          console.log(JSON.stringify(result, null, 2));
-        } else {
-          console.log(formatUnusedStateAsText(result));
-        }
-        return;
-      }
-
-      if (target === 'routes') {
-        const result = await scanRoutes({
-          targetPath: auditPath,
-          scopePath,
-          excludeDirs,
-          frameworkHint: flags.framework as RouteFramework | undefined,
-          prefix: (flags.prefix as string) || undefined,
-          view: (flags.view as 'summary' | 'full' | 'tree') || 'summary',
-        });
-        if (isJson) {
-          console.log(JSON.stringify(result, null, 2));
-        } else {
-          console.log(formatRoutesAsText(result));
-        }
-        return;
-      }
-
-      if (target === 'api-contracts' || target === 'apis') {
-        const result = await extractWorkspaceApiContracts({
-          targetPath: auditPath,
-          scopePath,
-          excludeDirs,
-        });
-        if (isJson) {
-          console.log(JSON.stringify(result, null, 2));
-        } else {
-          console.log(formatApiContractsAsText(result));
-        }
-        return;
-      }
-
-      if (target === 'all') {
-        const [routes, unusedComponents, unusedState, apiContracts] =
-          await Promise.all([
-            scanRoutes({
-              targetPath: auditPath,
-              scopePath,
-              excludeDirs,
-              frameworkHint: flags.framework as RouteFramework | undefined,
-              prefix: (flags.prefix as string) || undefined,
-              view: (flags.view as 'summary' | 'full' | 'tree') || undefined,
-            }),
-            findUnusedComponents({
-              targetPath: auditPath,
-              scopePath,
-              ignorePatterns: flags.ignore ? String(flags.ignore).split(',') : undefined,
-              excludePages: flags['include-pages'] ? false : true,
-              excludeDirs,
-            }),
-            findUnusedState(auditPath, { scopePath, excludeDirs }),
-            extractWorkspaceApiContracts({
-              targetPath: auditPath,
-              scopePath,
-              excludeDirs,
-            }),
-          ]);
-
-        if (isJson) {
-          console.log(
-            JSON.stringify(
-              { routes, unusedComponents, unusedState, apiContracts },
-              null,
-              2
-            )
-          );
-        } else {
-          const report = [
-            '## Frontend Architecture & Health Audit',
-            `Target: \`${auditPath}\`\n`,
-            formatRoutesAsText(routes),
-            '\n---\n',
-            formatUnusedAsText(unusedComponents),
-            '\n---\n',
-            formatUnusedStateAsText(unusedState),
-            '\n---\n',
-            formatApiContractsAsText(apiContracts),
-          ].join('\n');
-          console.log(report);
-        }
-        return;
-      }
-
-      // Default target: dead-components
-      const ignoreArg = flags.ignore ? String(flags.ignore).split(',') : undefined;
-      const excludePages = flags['include-pages'] ? false : true;
-
-      const result = await findUnusedComponents({
-        targetPath: auditPath,
-        ignorePatterns: ignoreArg,
-        excludePages,
-        excludeDirs,
+      const analysis = await analyzeFrontend({
+        target: target as AuditTarget, targetPath: auditPath,
+        scopePath: parseStringFlag(flags['scope-path'] || flags.scopePath || flags.scope_path || flags['scope-filter'] || flags.scopeFilter),
+        excludeDirs: parseStringList(flags['exclude-dirs'] ?? flags.excludeDirs ?? flags.exclude_dirs),
+        ignorePatterns: flags.ignore ? String(flags.ignore).split(',') : undefined,
+        includePages: Boolean(flags['include-pages']), frameworkHint: flags.framework as RouteFramework | undefined,
+        prefix: parseStringFlag(flags.prefix), view: parseStringFlag(flags.view) as 'summary' | 'full' | 'tree' | undefined,
       });
-
-      if (isJson) {
-        console.log(JSON.stringify(result, null, 2));
-      } else {
-        console.log(formatUnusedAsText(result));
-      }
+      console.log(isJson ? JSON.stringify(analysis.data, null, 2) : formatFrontendAudit(analysis, auditPath));
       return;
     }
 
@@ -870,12 +354,14 @@ export async function main(argv: string[] = process.argv.slice(2)) {
       const depth = parseSafePositiveInt(flags.depth ?? flags['max-depth'] ?? flags.maxDepth, 1) ?? 1;
       const rawDirection = parseStringFlag(flags.direction)?.toLowerCase();
       const direction = (rawDirection as 'consumers' | 'dependencies' | 'both') || 'both';
+      const role = (flags.role as 'all' | 'mutators' | 'readers') || 'all';
 
       if (depth > 1 || rawDirection === 'dependencies' || rawDirection === 'both') {
         const result = await traceStateChain(impactTarget, {
           identifier,
           direction,
           maxDepth: depth,
+          role,
         });
         if (isJson) {
           console.log(JSON.stringify(result, null, 2));
@@ -885,7 +371,6 @@ export async function main(argv: string[] = process.argv.slice(2)) {
         return;
       }
 
-      const role = (flags.role as 'all' | 'mutators' | 'readers') || 'all';
       const result = await queryStateImpact(impactTarget, identifier, role);
       if (isJson) {
         console.log(JSON.stringify(result, null, 2));
