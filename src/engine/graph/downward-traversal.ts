@@ -40,7 +40,7 @@ import {
   extractPassedProps,
   detectPropsDrilling,
 } from "./props-drilling";
-import { extractComponentContextNodes } from "./context-analyzer";
+import { createHookContextAnalyzer } from './hook-context';
 
 export interface DynamicComponentWarning {
   component: string;
@@ -389,6 +389,7 @@ export async function getDownwardComponentTree(
   const allConsumers: ContextDependencyNode[] = [];
   const contextRelations: ContextDependencyRelation[] = [];
   const danglingConsumers: ContextDependencyRelation[] = [];
+  const analyzeContexts = createHookContextAnalyzer(aliasConfig);
 
 
 
@@ -463,7 +464,7 @@ export async function getDownwardComponentTree(
     const currentBranchIsClient = hasUseClient || isClientParent;
 
     // Extract Context Nodes (Vue provide/inject & React Context)
-    const { providers: localProviders, consumers: localConsumers } = extractComponentContextNodes(normPath, content);
+    const { providers: localProviders, consumers: localConsumers } = await analyzeContexts(normPath, content);
     allProviders.push(...localProviders);
     allConsumers.push(...localConsumers);
 

@@ -103,3 +103,50 @@ test('multiline directive whitespace preserves the actual write line', () => {
   const result = extractStateDependencies(content, 'vue');
   expect(result.items?.filter(i => i.accessMode === 'write').map(i => i.lineNumber)).toEqual([3]);
 });
+
+function contextFixture(root: string, hookImport: string, extra = '') {
+  put(root, 'src/context.ts', "import {createContext} from 'react'; export const ThemeContext=createContext(null);");
+  put(root, 'src/Wrapped.tsx', `${hookImport}\nexport function Wrapped(){\nconst theme = useTheme();\nreturn <p>{theme}</p>;\n}\n${extra}`);
+  return put(root, 'src/App.tsx', "import {ThemeContext} from './context'; import {Wrapped} from './Wrapped'; export function App(){return <ThemeContext.Provider value='dark'><Wrapped/></ThemeContext.Provider>}");
+}
+test.each([
+  "import {useTheme} from './hook';",
+  "import {usePalette as useTheme} from './barrel';",
+  "import useTheme from './default-hook';",
+])('context graph resolves hook wrappers: %s', async binding => {
+  const root = workspace();
+  put(root, 'src/hook.ts', "import {useContext as read} from 'react'; import {ThemeContext as Palette} from './context'; export const useTheme = () => read(Palette);");
+  put(root, 'src/barrel.ts', "export {useTheme as usePalette} from './hook';");
+  put(root, 'src/default-hook.ts', "export {useTheme as default} from './hook';");
+  const entryPath = contextFixture(root, binding);
+  const tree = await getDownwardComponentTree({ entryPath });
+  const relation = tree.contextGraph?.relations.find(r => r.consumer.component === 'Wrapped.tsx');
+  expect(relation?.key).toBe('ThemeContext');
+  expect(relation?.consumer.line).toBe(3);
+  expect(relation?.consumer.evidence?.method).toBe('react-hook-wrapper');
+  expect(relation?.isCoveredInTree).toBe(true);
+  expect(tree.contextGraph?.danglingConsumers).toEqual([]);
+});
+
+test('context graph follows local and nested hooks, skips shadowed imports and unused nested functions', async () => {
+  const root = workspace();
+  put(root, 'src/hook.ts', `import {useContext} from 'react'; import {ThemeContext} from './context';
+function useInner(){return useContext(ThemeContext)}
+export function useTheme(){function unused(){return useContext(UnrelatedContext)} return useInner()}`);
+  const entryPath = contextFixture(root, "import {useTheme} from './hook';", 'function Shadow({useTheme}) {return useTheme()}');
+  const tree = await getDownwardComponentTree({ entryPath });
+  const consumers = tree.contextGraph?.consumers.filter(c => c.component === 'Wrapped.tsx');
+  expect(consumers?.map(c => [c.key, c.line])).toEqual([['ThemeContext', 3]]);
+});
+
+test('cyclic hook imports terminate and a new query reads changed hook dependencies', async () => {
+  const root = workspace();
+  put(root, 'src/hook.ts', "import {useLoop} from './loop'; export function useTheme(){return useLoop()}");
+  put(root, 'src/loop.ts', "import {useTheme} from './hook'; export function useLoop(){return useTheme()}");
+  const entryPath = contextFixture(root, "import {useTheme} from './hook';");
+  const before = await getDownwardComponentTree({ entryPath });
+  expect(before.contextGraph?.consumers.some(c => c.component === 'Wrapped.tsx')).toBe(false);
+  put(root, 'src/loop.ts', "import {useContext} from 'react'; import {ThemeContext} from './context'; export function useLoop(){return useContext(ThemeContext)}");
+  const after = await getDownwardComponentTree({ entryPath });
+  expect(after.contextGraph?.relations.some(r => r.key === 'ThemeContext' && r.consumer.component === 'Wrapped.tsx' && r.isCoveredInTree)).toBe(true);
+});
