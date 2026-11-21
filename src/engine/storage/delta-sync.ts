@@ -1,166 +1,11 @@
-import { createHash } from 'node:crypto';
-import { readSourceFile } from '../source-file';
-import { parseVueSource } from '../vue-parser';
-import { Database } from 'bun:sqlite';
-import { basename, dirname, extname, normalize, resolve } from 'node:path';
-import {
-  extractComponentContract,
-  extractRenderBoundary,
-} from '../contract';
-import {
-  extractLocalImports,
-  isPageFile,
-  extractPassedProps,
-  extractComponentContextNodes,
-  resolveImportPath,
-  resolveBarrelExport,
-  isRenderedInContent,
-} from '../tree';
-import { loadAliasConfig } from '../resolver';
+import type { Database } from 'bun:sqlite';
+import type { SyncStats } from '../../types';
 import { canonicalizePath } from '../path-resolver';
-import { getCandidateNames } from '../template';
-import { scanRoutes } from '../routes';
-import { getWorkspaceDatabase, resolveIndexedWorkspaceRoot } from './schema';
-import type {
-  ComponentContract,
-  FrontendFramework,
-  EdgePayload,
-  InputDependency,
-  StateDependencyInfo,
-  SyncStats,
-} from '../../types';
+import { assertCompatibleSchema, getWorkspaceDatabase, resolveIndexedWorkspaceRoot } from './schema';
+import { stagedSync } from './staged-sync';
 
-export interface ParsedFilePayload {
-  path: string;
-  framework: string;
-  boundary: { boundary: string; directive?: string };
-  stateDeps: StateDependencyInfo;
-  compName: string;
-  contract: ComponentContract | null;
-  edges: Array<{ targetPath: string; isDynamic: boolean; isRendered: boolean; payload?: EdgePayload }>;
-  dependencies?: InputDependency[];
-}
-
-export interface ParsedWorkspaceBatch {
-  files: Map<string, ParsedFilePayload>;
-  routes: Awaited<ReturnType<typeof scanRoutes>> | null;
-}
-
-/**
- * 2. Parses changed/added files in-memory for contracts, boundaries, state dependencies, and edges.
- */
-export async function batchParser(
-  toProcess: string[],
-  absRoot: string,
-  _diskMap: Map<string, { fullPath: string; mtime: number; size: number }>,
-  includeRoutes = true
-): Promise<ParsedWorkspaceBatch> {
-  const parsedFiles = new Map<string, ParsedFilePayload>();
-
-  for (const path of toProcess) {
-    try {
-      const content = await readSourceFile(path);
-      if (extname(path) === '.vue') {
-        const { errors } = parseVueSource(content, { filename: path, sourceMap: false });
-        if (errors.length) throw new Error(`PARSE_FAILED: ${path}: ${errors.map(error => typeof error === 'string' ? error : error.message).join('; ')}`);
-      }
-      const contract = await extractComponentContract(path, content, { path, workspaceRoot: absRoot });
-      const framework = contract.framework as FrontendFramework | 'vue-composable';
-      const stateDeps = contract.stateDependencies ?? { stores: [], contexts: [], composables: [] };
-      const compName = contract.component;
-      const boundary = contract?.renderBoundary ?? extractRenderBoundary(path, content, framework, contract?.projectContext);
-      const aliasConfig = await loadAliasConfig(path);
-      const allImports = extractLocalImports(content, aliasConfig, path);
-      const { providers, consumers } = extractComponentContextNodes(path, content);
-
-      const fileDependencies: InputDependency[] = contract?.dependencies ? [...contract.dependencies] : [];
-      const edges: Array<{ targetPath: string; isDynamic: boolean; isRendered: boolean; payload?: EdgePayload }> = [];
-      for (const imp of allImports) {
-        let matchedPath = resolveImportPath(path, imp.source, aliasConfig);
-        let barrelPath: string | null = null;
-        if (matchedPath && /[/\\]index\.[tj]sx?$/.test(matchedPath)) {
-          barrelPath = canonicalizePath(matchedPath);
-          matchedPath = resolveBarrelExport(matchedPath, imp.name, aliasConfig) ?? matchedPath;
-        }
-        if (matchedPath) matchedPath = canonicalizePath(matchedPath);
-
-        // If this import was resolved through a barrel file, record the barrel file as a dependency
-        if (barrelPath && barrelPath !== matchedPath) {
-          try {
-            const bCode = await readSourceFile(barrelPath);
-            const bHash = createHash('sha256').update(bCode).digest('hex');
-            if (!fileDependencies.some(d => d.path === barrelPath)) {
-              fileDependencies.push({ path: barrelPath, hash: bHash, isExternal: false });
-            }
-          } catch {}
-        }
-
-        // If import cannot be resolved to an existing file, record prospective candidate paths as unresolved dependencies
-        if (!matchedPath) {
-          let potentialTarget: string | null = null;
-          if (imp.source.startsWith('.')) {
-            potentialTarget = resolve(dirname(path), imp.source);
-          } else if (aliasConfig && aliasConfig.isAlias(imp.source)) {
-            potentialTarget = aliasConfig.resolve(imp.source);
-          }
-          if (potentialTarget) {
-            const candidateExtensions = ['', '.vue', '.tsx', '.jsx', '.astro', '.svelte', '.ts', '.js'];
-            for (const ext of candidateExtensions) {
-              const cand = canonicalizePath(potentialTarget + ext);
-              if (!fileDependencies.some(d => d.path === cand)) {
-                fileDependencies.push({ path: cand, hash: '', isExternal: false });
-              }
-            }
-          }
-        }
-
-        if (matchedPath) {
-          const candidateNames = getCandidateNames(imp.alias || imp.name || basename(matchedPath, extname(matchedPath)));
-          const passedProps = extractPassedProps(content, candidateNames);
-          const isRendered = isRenderedInContent(content, imp.alias || imp.name || basename(matchedPath, extname(matchedPath)));
-
-          edges.push({
-            targetPath: matchedPath,
-            isDynamic: imp.isDynamic ?? false,
-            isRendered,
-            payload: {
-              alias: imp.alias,
-              passedProps: passedProps.length > 0 ? passedProps : undefined,
-              contexts: (providers.length > 0 || consumers.length > 0) ? {
-                provided: providers.length > 0 ? providers : undefined,
-                consumed: consumers.length > 0 ? consumers : undefined,
-              } : undefined,
-            },
-          });
-        }
-      }
-
-      parsedFiles.set(path, {
-        path,
-        framework,
-        boundary,
-        stateDeps,
-        compName,
-        contract,
-        edges,
-        dependencies: fileDependencies.length > 0 ? fileDependencies : undefined,
-      });
-    } catch (err) {
-      throw new Error(`PARSE_FAILED: ${path}: ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }
-
-  let routeManifest: Awaited<ReturnType<typeof scanRoutes>> | null = null;
-  if (includeRoutes) {
-    const manifest = await scanRoutes({ targetPath: absRoot });
-    routeManifest = manifest;
-  }
-
-  return {
-    files: parsedFiles,
-    routes: routeManifest,
-  };
-}
+export { batchParser } from './index-payload';
+export type { ParsedFilePayload, ParsedWorkspaceBatch } from './index-payload';
 
 /**
  * Synchronizes the workspace disk state with SQLite using staged sync.
@@ -178,9 +23,11 @@ export async function syncWorkspace(
   const previous = syncQueues.get(db) ?? Promise.resolve();
   const operation = previous.catch(() => {}).then(async () => {
     if (options?.rebuild) {
-      db.run("INSERT OR REPLACE INTO meta(key,value) VALUES ('index_invalid','1')");
+      db.transaction(() => {
+        assertCompatibleSchema(db);
+        db.run("INSERT OR REPLACE INTO meta(key,value) VALUES ('index_invalid','1')");
+      }).immediate();
     }
-    const { stagedSync } = await import('./staged-sync');
     const maxRetries = 3;
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       try {

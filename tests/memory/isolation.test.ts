@@ -23,16 +23,19 @@ test('a successful component-tree call leaves no analysis database in the MCP pa
   } finally { await server.close(); }
 });
 
-test('calling component-tree on an unindexed workspace does not create .strata and returns NOT_INDEXED', async () => {
+test('calling component-tree on an unindexed workspace uses source fallback without creating .strata', async () => {
   const root = mkdtempSync('/tmp/strata-unindexed-'); roots.push(root);
   writeFileSync(join(root, 'package.json'), '{"dependencies":{"vue":"3"}}');
   writeFileSync(join(root, 'App.vue'), '<template><div /></template>');
   const server = createMcpServer();
   try {
     const handler = (server as any)._requestHandlers.get('tools/call');
-    const response = await handler({method: 'tools/call', params: {name: 'get_component_tree', arguments: {path: join(root, 'App.vue')}}});
+    const response = await handler({method: 'tools/call', params: {name: 'get_component_tree', arguments: {path: join(root, 'App.vue'), format: 'json'}}});
     expect(response.isError).toBeFalsy();
-    expect(response.content[0].text).toContain('NOT_INDEXED');
+    const parsed = JSON.parse(response.content[0].text);
+    expect(parsed.root?.component).toBe('App.vue');
+    expect((response.structuredContent as any)?.retrieval?.basis).toBe('derived');
+    expect((response.structuredContent as any)?.retrieval?.index).toBeNull();
     const { existsSync } = await import('node:fs');
     expect(existsSync(join(root, '.strata'))).toBe(false);
   } finally { await server.close(); }

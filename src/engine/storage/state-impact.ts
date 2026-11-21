@@ -3,6 +3,49 @@ import type { StateImpactConsumer, StateImpactResult } from '../../types';
 import { canonicalizePath } from '../path-resolver';
 import { prepareStateQuery } from './state-query';
 
+type StateObservation = {
+  kind: FileStateDepItem['kind'];
+  identifier: string;
+  access_mode: FileStateDepItem['accessMode'];
+  line_number: number | null;
+  usage_snippet: string | null;
+  accessed_properties: string | null;
+};
+
+const accessPriority = { read: 0, watch: 1, write: 2 };
+
+/** Rows are ordered by source line, with unlocated observations last. */
+function summarizeStateObservations(rows: [StateObservation, ...StateObservation[]]): FileStateDepItem {
+  const first = rows[0];
+  let evidence = first;
+  const actions = new Set<string>();
+  const properties = new Set<string>();
+  for (const row of rows) {
+    if (accessPriority[row.access_mode] > accessPriority[evidence.access_mode]) evidence = row;
+    if (row.access_mode === 'write' && row.usage_snippet) actions.add(row.usage_snippet);
+    if (row.accessed_properties) {
+      try {
+        const parsed: unknown = JSON.parse(row.accessed_properties);
+        if (Array.isArray(parsed)) {
+          for (const property of parsed) if (typeof property === 'string') properties.add(property);
+        }
+      } catch {
+        // Older or malformed index rows may lack usable property metadata.
+      }
+    }
+  }
+  return {
+    kind: first.kind,
+    identifier: first.identifier,
+    role: evidence.access_mode === 'write' ? 'mutator' : 'reader',
+    accessMode: evidence.access_mode,
+    lineNumber: evidence.line_number || undefined,
+    usageSnippet: evidence.usage_snippet || undefined,
+    actionsCalled: actions.size ? [...actions] : undefined,
+    accessedProperties: properties.size ? [...properties] : undefined,
+  };
+}
+
 /**
  * Queries the impact of a state dependency (store, context, composable) across all files in SQLite.
  * Categorizes consumers into Mutators (triggers/actions) and Readers (renderers/watchers) via SQLite SSOT.
@@ -24,89 +67,28 @@ export async function queryStateImpact(
     FROM state_deps s
     JOIN files f ON s.file_id = f.id
     WHERE s.identifier = ?
-    ORDER BY f.is_page DESC, f.path ASC;
+    ORDER BY f.is_page DESC, f.path ASC, (s.line_number > 0) DESC, s.line_number ASC, s.id ASC;
   `
     )
-    .all(identifier) as Array<{
+    .all(identifier) as Array<StateObservation & {
     path: string;
     is_page: number;
     render_boundary: string | null;
-    kind: 'store' | 'context' | 'composable';
-    identifier: string;
-    access_mode: 'read' | 'write' | 'watch';
-    line_number: number;
-    usage_snippet: string | null;
-    accessed_properties: string | null;
   }>;
 
-  // Aggregate rows by consumer path so that a file with write actions is classified as mutator
-  const consumerMap = new Map<string, StateImpactConsumer>();
-
-  for (const r of rows) {
-    let consumer = consumerMap.get(r.path);
-    if (!consumer) {
-      consumer = {
-        path: r.path,
-        isPage: r.is_page === 1,
-        renderBoundary: r.render_boundary || undefined,
-        kind: r.kind,
-        identifier: r.identifier,
-        role: 'reader',
-        accessMode: r.access_mode,
-        lineNumber: r.line_number || undefined,
-        actionsCalled: [],
-        accessedProperties: [],
-        usageSnippet: r.usage_snippet || undefined,
-      };
-      consumerMap.set(r.path, consumer);
-    }
-
-    if (r.accessed_properties) {
-      try {
-        const parsed = JSON.parse(r.accessed_properties);
-        if (Array.isArray(parsed)) {
-          consumer.accessedProperties = Array.from(new Set([...(consumer.accessedProperties || []), ...parsed]));
-        }
-      } catch {}
-    }
-
-    if (r.access_mode === 'write') {
-      consumer.role = 'mutator';
-      consumer.accessMode = 'write';
-      if (r.usage_snippet) {
-        consumer.usageSnippet = r.usage_snippet;
-        if (!consumer.actionsCalled) consumer.actionsCalled = [];
-        consumer.actionsCalled.push(r.usage_snippet);
-      }
-      if (r.line_number) {
-        consumer.lineNumber = r.line_number;
-      }
-    } else if (consumer.role !== 'mutator') {
-      if (r.access_mode === 'watch') {
-        consumer.accessMode = 'watch';
-      }
-      if (!consumer.usageSnippet && r.usage_snippet) {
-        consumer.usageSnippet = r.usage_snippet;
-      }
-      if (!consumer.lineNumber && r.line_number) {
-        consumer.lineNumber = r.line_number;
-      }
-    }
+  const byPath = new Map<string, [(typeof rows)[number], ...StateObservation[]]>();
+  for (const row of rows) {
+    const group = byPath.get(row.path);
+    if (group) group.push(row);
+    else byPath.set(row.path, [row]);
   }
 
-  const consumers = Array.from(consumerMap.values());
-  for (const c of consumers) {
-    if (c.actionsCalled && c.actionsCalled.length > 0) {
-      c.actionsCalled = Array.from(new Set(c.actionsCalled));
-    } else {
-      c.actionsCalled = undefined;
-    }
-    if (c.accessedProperties && c.accessedProperties.length > 0) {
-      c.accessedProperties = Array.from(new Set(c.accessedProperties));
-    } else {
-      c.accessedProperties = undefined;
-    }
-  }
+  const consumers: StateImpactConsumer[] = Array.from(byPath.values(), group => ({
+    ...summarizeStateObservations(group),
+    path: group[0].path,
+    isPage: group[0].is_page === 1,
+    renderBoundary: group[0].render_boundary || undefined,
+  }));
 
   const mutators = consumers.filter((c) => c.role === 'mutator');
   const readers = consumers.filter((c) => c.role === 'reader');
@@ -180,65 +162,20 @@ export async function queryFileStateDeps(
     FROM state_deps s
     JOIN files f ON s.file_id = f.id
     WHERE f.path = ?
-    ORDER BY s.identifier ASC, s.line_number ASC;
+    ORDER BY s.identifier ASC, (s.line_number > 0) DESC, s.line_number ASC, s.id ASC;
   `
     )
-    .all(canonicalFile) as Array<{
-    kind: 'store' | 'context' | 'composable';
-    identifier: string;
-    access_mode: 'read' | 'write' | 'watch';
-    line_number: number;
-    usage_snippet: string | null;
-    accessed_properties: string | null;
-  }>;
+    .all(canonicalFile) as StateObservation[];
 
-  const byKey = new Map<string, FileStateDepItem>();
-  for (const r of rows) {
-    const key = `${r.kind}:${r.identifier}`;
-    let item = byKey.get(key);
-    if (!item) {
-      item = {
-        identifier: r.identifier,
-        kind: r.kind,
-        role: 'reader',
-        accessMode: r.access_mode,
-        lineNumber: r.line_number || undefined,
-        actionsCalled: [],
-        accessedProperties: [],
-        usageSnippet: r.usage_snippet || undefined,
-      };
-      byKey.set(key, item);
-    }
-
-    if (r.accessed_properties) {
-      try {
-        const parsed = JSON.parse(r.accessed_properties);
-        if (Array.isArray(parsed)) {
-          item.accessedProperties = Array.from(new Set([...(item.accessedProperties || []), ...parsed]));
-        }
-      } catch {}
-    }
-
-    if (r.access_mode === 'write') {
-      item.role = 'mutator';
-      item.accessMode = 'write';
-      if (r.usage_snippet) {
-        item.usageSnippet = r.usage_snippet;
-        item.actionsCalled!.push(r.usage_snippet);
-      }
-      if (!item.lineNumber && r.line_number) item.lineNumber = r.line_number;
-    } else if (item.role !== 'mutator') {
-      if (r.access_mode === 'watch') item.accessMode = 'watch';
-      if (!item.usageSnippet && r.usage_snippet) item.usageSnippet = r.usage_snippet;
-      if (!item.lineNumber && r.line_number) item.lineNumber = r.line_number;
-    }
+  const byKey = new Map<string, [StateObservation, ...StateObservation[]]>();
+  for (const row of rows) {
+    const key = `${row.kind}:${row.identifier}`;
+    const group = byKey.get(key);
+    if (group) group.push(row);
+    else byKey.set(key, [row]);
   }
 
-  const all = Array.from(byKey.values()).map((item) => ({
-    ...item,
-    actionsCalled: item.actionsCalled?.length ? Array.from(new Set(item.actionsCalled)) : undefined,
-    accessedProperties: item.accessedProperties?.length ? Array.from(new Set(item.accessedProperties)) : undefined,
-  }));
+  const all = Array.from(byKey.values(), summarizeStateObservations);
 
   const filtered =
     roleFilter === 'mutators'

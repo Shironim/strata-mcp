@@ -1,17 +1,20 @@
 import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
-import { basename, extname, normalize, sep, resolve } from 'node:path';
+import { basename, dirname, extname, join, normalize, sep, resolve } from 'node:path';
 import type { Database, Statement } from 'bun:sqlite';
 import { isConfigFile, iterateFiles } from '../collector';
-import { checkAnalysisCancelled, analysisSignal } from '../analysis-context';
+import { checkAnalysisCancelled, analysisSignal, reportAnalysisProgress } from '../analysis-context';
+import { setTelemetryStage } from '../telemetry';
 import { loadAliasConfigWithDependencies } from '../resolver';
 import { assertSourceSize } from '../source-file';
 import { canonicalizePath } from '../path-resolver';
 import { scanRoutes } from '../routes';
-import { batchParser, type ParsedFilePayload } from './delta-sync';
-import { SUPPORTED_EXTENSIONS, isLayoutFile } from './schema';
-import { isPageFile } from '../tree';
-import { STRATA_VERSION, FULL_ENGINE_REVISION } from '../../version';
+import { resolveNextAppRoot, resolveProjectOwnership } from '../project-ownership';
+import { batchParser, type ParsedFilePayload } from './index-payload';
+import { assertCompatibleSchema, IndexSchemaTooNewError, SUPPORTED_EXTENSIONS, isLayoutFile } from './schema';
+import { isSameMonorepoBoundary } from '../graph/path-helpers';
+import { buildAutoComponentCatalog, isComponentCandidate } from '../graph/component-relationships';
+import { ANALYSIS_FINGERPRINT, STRATA_VERSION } from '../../version';
 import type { SyncStats, StateDependencyItem } from '../../types';
 
 async function hashFile(path: string): Promise<{hash: string; mtime: number; size: number}> {
@@ -38,6 +41,8 @@ function meta(db: Database, key: string): string {
 
 /** Stage parsing before publishing a coherent index transaction. */
 export async function stagedSync(root: string, scopePath: string | undefined, db: Database): Promise<SyncStats> {
+  setTelemetryStage('sync');
+  assertCompatibleSchema(db);
   const start = performance.now(); const statements: Statement[] = [];
   let parserInvocations = 0;
   const prepare = (sql: string) => { const stmt = db.prepare(sql); statements.push(stmt); return stmt; };
@@ -86,18 +91,34 @@ export async function stagedSync(root: string, scopePath: string | undefined, db
       }
     }
     await scan(insert, false);
-    const configHash = createHash('sha256').update(FULL_ENGINE_REVISION);
+    reportAnalysisProgress(1, 3, 'Scanned workspace files');
+    const configHash = createHash('sha256');
+    const checkedOwners = new Set<string>();
+    const nextAppRoots = new Map<string, string | null>();
+    function recordNextAppRoot(input: string): void {
+      const directory = dirname(input);
+      if (checkedOwners.has(directory)) return;
+      checkedOwners.add(directory);
+      const owner = resolveProjectOwnership(input);
+      if (owner.applicationFramework !== 'next' || !owner.ownerRoot || nextAppRoots.has(owner.ownerRoot)) return;
+      nextAppRoots.set(owner.ownerRoot, owner.appRoot);
+      configHash.update(JSON.stringify(['next-app-root', owner.ownerRoot, owner.appRoot])).update('\n');
+    }
+    // A subdirectory index can inherit its app root from outside its own file scan.
+    recordNextAppRoot(join(root, '__strata_route_probe__.ts'));
     const configRows = prepare('SELECT path, hash FROM sync_files WHERE config = 1 ORDER BY path');
     for (const row of configRows.iterate() as Iterable<{path: string; hash: string}>) {
-      configHash.update(row.path).update('\0').update(row.hash);
-      if (/^(tsconfig|jsconfig)(\..+)?\.json$/i.test(basename(row.path))) {
+      configHash.update(JSON.stringify([row.path, row.hash])).update('\n');
+      const name = basename(row.path);
+      if (name === 'package.json' || /^next\.config\./.test(name)) recordNextAppRoot(row.path);
+      if (/^(tsconfig|jsconfig)(\..+)?\.json$/i.test(name)) {
         try {
           const { configFiles } = await loadAliasConfigWithDependencies(row.path);
           for (const extendedPath of configFiles) {
             if (extendedPath !== row.path) {
               try {
                 const h = await hashFile(extendedPath);
-                configHash.update(extendedPath).update('\0').update(h.hash);
+                configHash.update(JSON.stringify([extendedPath, h.hash])).update('\n');
               } catch {}
             }
           }
@@ -105,7 +126,9 @@ export async function stagedSync(root: string, scopePath: string | undefined, db
       }
     }
     const fingerprint = configHash.digest('hex');
-    const reset = meta(db, 'index_invalid') === '1' || meta(db, 'cache_version') !== STRATA_VERSION || meta(db, 'config_fingerprint') !== fingerprint;
+    const reset = meta(db, 'index_invalid') === '1'
+      || meta(db, 'analysis_fingerprint') !== ANALYSIS_FINGERPRINT
+      || meta(db, 'config_fingerprint') !== fingerprint;
     let scope = normalize(reset ? root : targetScope), prefix = scope + sep;
     const scopeSql = '(s.path = $scope OR substr(s.path, 1, length($prefix)) = $prefix)';
     let bindings = {$scope: scope, $prefix: prefix};
@@ -192,21 +215,14 @@ export async function stagedSync(root: string, scopePath: string | undefined, db
     const impactedSet = new Set<string>(directMutations);
     if (!reset && directMutations.size > 0) {
       const queue = Array.from(directMutations);
-
-      // If new files were added, inspect existing workspace files that reference the newly added symbol/component name
-      if (addedRows.length > 0) {
-        const addedBaseNames = addedRows.map(r => basename(r.path, extname(r.path))).filter(n => n.length > 0);
-        const existingFiles = db.query('SELECT path FROM files').all() as Array<{ path: string }>;
-        for (const f of existingFiles) {
-          if (!impactedSet.has(f.path)) {
-            try {
-              const code = await fs.readFile(f.path, 'utf8');
-              if (addedBaseNames.some(base => code.includes(base))) {
-                impactedSet.add(f.path);
-                queue.push(f.path);
-              }
-            } catch {}
-          }
+      // A name can become ambiguous or unique without changing any of its consumers.
+      const catalogChanges = [...addedRows, ...deletedFilesList].filter(row => isComponentCandidate(row.path));
+      if (catalogChanges.length > 0) {
+        for (const row of db.query('SELECT path FROM sync_files WHERE config = 0').iterate() as Iterable<{ path: string }>) {
+          if (!/\.(vue|astro|svelte)$/i.test(row.path) || impactedSet.has(row.path)) continue;
+          if (!catalogChanges.some(change => isSameMonorepoBoundary(row.path, change.path))) continue;
+          impactedSet.add(row.path);
+          queue.push(row.path);
         }
       }
 
@@ -227,30 +243,29 @@ export async function stagedSync(root: string, scopePath: string | undefined, db
       for (let cursor = 0; cursor < queue.length; cursor++) {
         checkAnalysisCancelled();
         const curr = queue[cursor];
-        try {
-          for (const row of findReverseFileDeps.all(curr) as Array<{ dependent_path: string }>) {
-            const depPath = row.dependent_path;
-            if (!impactedSet.has(depPath)) {
-              impactedSet.add(depPath);
-              queue.push(depPath);
-            }
+        for (const row of findReverseFileDeps.all(curr) as Array<{ dependent_path: string }>) {
+          const depPath = row.dependent_path;
+          if (!impactedSet.has(depPath)) {
+            impactedSet.add(depPath);
+            queue.push(depPath);
           }
-        } catch {}
+        }
 
-        try {
-          for (const row of findReverseEdgeParents.all(curr) as Array<{ parent_path: string }>) {
-            const parentPath = row.parent_path;
-            if (!impactedSet.has(parentPath)) {
-              impactedSet.add(parentPath);
-              queue.push(parentPath);
-            }
+        for (const row of findReverseEdgeParents.all(curr) as Array<{ parent_path: string }>) {
+          const parentPath = row.parent_path;
+          if (!impactedSet.has(parentPath)) {
+            impactedSet.add(parentPath);
+            queue.push(parentPath);
           }
-        } catch {}
+        }
       }
     }
 
     const changed = reset || directMutations.size > 0;
     if (changed) {
+      const catalog = buildAutoComponentCatalog(Array.from(
+        db.query('SELECT path FROM sync_files WHERE config = 0').iterate() as Iterable<{ path: string }>, row => row.path,
+      ));
       // Rebuild impacted candidates: only parse files within the impacted set (or full scope on reset)
       let candidatesIterable: Iterable<{ path: string; hash: string }>;
       if (reset) {
@@ -273,34 +288,26 @@ export async function stagedSync(root: string, scopePath: string | undefined, db
       const update = prepare('UPDATE sync_files SET payload = ? WHERE path = ?');
       for (const row of candidatesIterable) {
         checkAnalysisCancelled();
-        try {
-          parserInvocations++;
-          const parsed = await batchParser([row.path], root, new Map(), false);
-          const payload = parsed.files.get(row.path);
-          if (!payload) throw new Error('PARSE_FAILED: parser returned no result');
-          if ((await hashFile(row.path)).hash !== row.hash) throw new Error('WORKSPACE_CHANGED: file changed during analysis');
-          const inputDeps = payload.dependencies ?? payload.contract?.dependencies;
-          if (Array.isArray(inputDeps)) {
-            for (const dep of inputDeps) {
-              if (dep.hash !== '') {
-                try {
-                  const depH = await hashFile(dep.path);
-                  if (depH.hash !== dep.hash) throw new Error('WORKSPACE_CHANGED: secondary dependency changed during analysis');
-                } catch {
-                  throw new Error('WORKSPACE_CHANGED: secondary dependency missing during analysis');
-                }
+        parserInvocations++;
+        const parsed = await batchParser([row.path], root, new Map(), false, catalog);
+        const payload = parsed.files.get(row.path);
+        if (!payload) throw new Error('PARSE_FAILED: parser returned no result');
+        if ((await hashFile(row.path)).hash !== row.hash) throw new Error('WORKSPACE_CHANGED: file changed during analysis');
+        const inputDeps = payload.dependencies ?? payload.contract?.dependencies;
+        if (Array.isArray(inputDeps)) {
+          for (const dep of inputDeps) {
+            if (dep.hash !== '') {
+              try {
+                const depH = await hashFile(dep.path);
+                if (depH.hash !== dep.hash) throw new Error('WORKSPACE_CHANGED: secondary dependency changed during analysis');
+              } catch {
+                throw new Error('WORKSPACE_CHANGED: secondary dependency missing during analysis');
               }
             }
           }
-          update.run(JSON.stringify(payload), row.path);
-          parsed.files.clear();
-        } catch (err) {
-          if (!analysisSignal()?.aborted && !(err instanceof Error && err.message.startsWith('WORKSPACE_CHANGED'))) {
-            db.run('DELETE FROM files WHERE path = ?', [row.path]);
-            db.run("INSERT OR REPLACE INTO meta VALUES ('index_invalid', '1')");
-          }
-          throw err;
         }
+        update.run(JSON.stringify(payload), row.path);
+        parsed.files.clear();
       }
     }
     // Routes must be refreshed even when no source delta exists or the new manifest is empty.
@@ -314,6 +321,9 @@ export async function stagedSync(root: string, scopePath: string | undefined, db
     const snapshotChanged = changed || meta(db, 'routes_fingerprint') !== routesFingerprint;
     const nextGeneration = Number(generation || 0) + (snapshotChanged ? 1 : 0);
     await scan(verifyInsert, true);
+    for (const [owner, appRoot] of nextAppRoots) {
+      if (resolveNextAppRoot(owner) !== appRoot) throw new Error('WORKSPACE_CHANGED: Next App Router root changed during sync');
+    }
     const mismatch = db.query(`
       WITH in_files_only AS (
         SELECT path, hash FROM sync_files EXCEPT SELECT path, hash FROM sync_verify
@@ -329,7 +339,9 @@ export async function stagedSync(root: string, scopePath: string | undefined, db
     `).get();
     if (mismatch || meta(db, 'sync_generation') !== generation) throw new Error('WORKSPACE_CHANGED: workspace or index changed before commit');
     checkAnalysisCancelled();
+    reportAnalysisProgress(2, 3, 'Committing graph index');
     const commit = db.transaction(() => {
+      assertCompatibleSchema(db);
       if (meta(db, 'sync_generation') !== generation) throw new Error('WORKSPACE_CHANGED: concurrent index publication');
       if (changed) {
         if (reset) db.run('DELETE FROM files');
@@ -358,13 +370,13 @@ export async function stagedSync(root: string, scopePath: string | undefined, db
           const p = JSON.parse(row.payload) as ParsedFilePayload;
           const existing = checkFileExists.get(row.path) as { id: number } | null;
           if (existing) {
-            updateFile.run(p.framework, row.mtime, row.size, row.hash, isPageFile(row.path) ? 1 : 0, isLayoutFile(row.path) ? 1 : 0, p.boundary.boundary, p.boundary.directive ?? null, row.path);
+            updateFile.run(p.framework, row.mtime, row.size, row.hash, p.isPage ? 1 : 0, isLayoutFile(row.path) ? 1 : 0, p.boundary.boundary, p.boundary.directive ?? null, row.path);
             clearComponents.run(existing.id);
             clearState.run(existing.id);
             clearFileDeps.run(existing.id);
             clearOutgoingEdges.run(existing.id);
           } else {
-            insertFile.run(row.path, p.framework, row.mtime, row.size, row.hash, isPageFile(row.path) ? 1 : 0, isLayoutFile(row.path) ? 1 : 0, p.boundary.boundary, p.boundary.directive ?? null);
+            insertFile.run(row.path, p.framework, row.mtime, row.size, row.hash, p.isPage ? 1 : 0, isLayoutFile(row.path) ? 1 : 0, p.boundary.boundary, p.boundary.directive ?? null);
           }
 
           insertComponent.run(p.compName, JSON.stringify(p.contract), row.path);
@@ -384,23 +396,27 @@ export async function stagedSync(root: string, scopePath: string | undefined, db
 
         // 3. Re-link outgoing edges from re-parsed files
         db.run(`INSERT OR IGNORE INTO edges(parent_file_id,child_file_id,import_type,is_rendered,payload_json)
-          SELECT parent.id,child.id,CASE WHEN json_extract(edge.value,'$.isDynamic') THEN 'dynamic' ELSE 'static' END,
+          SELECT parent.id,child.id,CASE WHEN json_extract(edge.value,'$.isAutoImported') THEN 'auto'
+            WHEN json_extract(edge.value,'$.isDynamic') THEN 'dynamic' ELSE 'static' END,
             CASE WHEN json_extract(edge.value,'$.isRendered') = 1 OR json_extract(edge.value,'$.isRendered') = true THEN 1 ELSE 0 END,
             json_extract(edge.value,'$.payload')
           FROM sync_files staged JOIN files parent ON parent.path=staged.path,
           json_each(staged.payload,'$.edges') edge JOIN files child ON child.path=json_extract(edge.value,'$.targetPath')
-          WHERE staged.payload IS NOT NULL`);
+          WHERE staged.payload IS NOT NULL
+          ORDER BY json_extract(edge.value,'$.isRendered') DESC`);
       }
       db.run('DELETE FROM routes');
       db.run(`INSERT INTO routes(url_path,file_id,type,params_json,handlers_json,layout_chain_json)
         SELECT r.url,f.id,r.type,r.params,r.handlers,r.layouts FROM sync_routes r JOIN files f ON f.path=r.path`);
       const setMeta = prepare('INSERT OR REPLACE INTO meta(key,value) VALUES (?,?)');
-      setMeta.run('cache_version', STRATA_VERSION); setMeta.run('config_fingerprint', fingerprint);
+      if (snapshotChanged) setMeta.run('cache_version', STRATA_VERSION);
+      setMeta.run('analysis_fingerprint', ANALYSIS_FINGERPRINT);
+      setMeta.run('config_fingerprint', fingerprint);
       setMeta.run('sync_generation', String(nextGeneration));
       setMeta.run('routes_fingerprint', routesFingerprint);
       setMeta.run('index_invalid', '');
     });
-    commit();
+    commit.immediate();
     return {
       added: counts.added ?? 0,
       modified: (counts.modified ?? 0) + staleCount,
@@ -411,11 +427,12 @@ export async function stagedSync(root: string, scopePath: string | undefined, db
       durationMs: Math.round(performance.now() - start),
       syncGeneration: nextGeneration,
       configFingerprint: fingerprint,
+      analysisFingerprint: ANALYSIS_FINGERPRINT,
       cacheHit: !snapshotChanged,
       scope: { requested: targetScope, effective: scope, fallbackReason },
     };
   } catch (err) {
-    if (analysisSignal()?.aborted) throw err;
+    if (analysisSignal()?.aborted || err instanceof IndexSchemaTooNewError) throw err;
     // Derived data cannot be trusted after an unreadable file or an unsuccessful refresh.
     const isBusy =
       (err as { code?: string })?.code === 'SQLITE_BUSY' ||
@@ -423,8 +440,10 @@ export async function stagedSync(root: string, scopePath: string | undefined, db
     if (!isBusy && !(err instanceof Error && err.message.startsWith('WORKSPACE_CHANGED'))) {
       try {
         db.transaction(() => {
+          assertCompatibleSchema(db);
+          if (meta(db, 'sync_generation') !== generation) return;
           db.run('DELETE FROM files'); db.run("INSERT OR REPLACE INTO meta VALUES ('index_invalid', '1')");
-        })();
+        }).immediate();
       } catch {
         // ignore if database cannot be written during clean up
       }

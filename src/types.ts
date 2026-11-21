@@ -726,6 +726,7 @@ export interface SyncStats {
   durationMs: number;
   syncGeneration: number;
   configFingerprint: string;
+  analysisFingerprint: string;
   cacheHit: boolean;
 }
 

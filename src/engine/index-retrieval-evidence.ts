@@ -1,14 +1,15 @@
-import { Database } from 'bun:sqlite';
+import type { Database } from 'bun:sqlite';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import type { RetrievalEvidence } from '../types';
 import { FULL_ENGINE_REVISION } from '../version';
 import { hashRetrievalIdentity } from './retrieval-evidence';
-import { resolveIndexedWorkspaceRoot } from './storage/schema';
+import { assertCompatibleSchema, openReadonlyIndex, resolveIndexedWorkspaceRoot } from './storage/schema';
 
 export interface IndexObservation {
   generation: string;
   configFingerprint: string;
+  analysisFingerprint?: string;
   cacheVersion: string;
   manifestHash: string;
 }
@@ -18,13 +19,15 @@ export function observeRetrievalIndex(workspace: string): IndexObservation | nul
   let db: Database | undefined;
   try {
     const indexedRoot = resolveIndexedWorkspaceRoot(workspace) ?? workspace;
-    db = new Database(join(indexedRoot, '.strata', 'graph.db'), { readonly: true });
+    db = openReadonlyIndex(join(indexedRoot, '.strata', 'graph.db'));
     const connection = db;
     return connection.transaction(() => {
+      assertCompatibleSchema(connection);
       const meta = (key: string) => (connection.query('SELECT value FROM meta WHERE key = ?').get(key) as {value: string} | null)?.value ?? '';
       if (meta('index_invalid') === '1') return null;
       const generation = meta('sync_generation');
       const configFingerprint = meta('config_fingerprint');
+      const analysisFingerprint = meta('analysis_fingerprint') || undefined;
       const cacheVersion = meta('cache_version');
       if (!generation || !configFingerprint || !cacheVersion) return null;
       const hash = createHash('sha256');
@@ -32,7 +35,7 @@ export function observeRetrievalIndex(workspace: string): IndexObservation | nul
         if (!row.content_hash) return null;
         hash.update(JSON.stringify([row.path, row.content_hash])).update('\n');
       }
-      return { generation, configFingerprint, cacheVersion, manifestHash: hash.digest('hex') };
+      return { generation, configFingerprint, analysisFingerprint, cacheVersion, manifestHash: hash.digest('hex') };
     })();
   } catch {
     return null;
