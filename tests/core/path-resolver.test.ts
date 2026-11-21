@@ -67,4 +67,16 @@ describe('Sprint 1 — Path Resolver & Project Root Auto-Discovery', () => {
     expect(resolvedWithoutHint).toBe(fakeAbs);
     expect(resolvedWithoutHint).not.toContain(process.cwd() + fakeAbs);
   });
+
+  it('strips redundant leading root-folder prefix when relative path includes workspace folder name', () => {
+    const mockRoot = join(import.meta.dir, '../fixtures');
+    setLastKnownProjectRoot(mockRoot);
+
+    const resolvedFromSession = resolveWorkspacePath('fixtures/VueCounter.vue');
+    expect(resolvedFromSession).toBe(join(mockRoot, 'VueCounter.vue'));
+
+    clearLastKnownProjectRoot();
+    const resolvedFromHint = resolveWorkspacePath('./fixtures/VueCounter.vue', mockRoot);
+    expect(resolvedFromHint).toBe(join(mockRoot, 'VueCounter.vue'));
+  });
 });

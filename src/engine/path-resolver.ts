@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { existsSync, promises as fs, statSync, readFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, normalize, resolve } from 'node:path';
 
@@ -25,9 +26,18 @@ export const PROJECT_ROOT_MARKERS = [
 ];
 
 /**
- * In-memory session store for the most recently identified or active project root.
+ * In-memory session store for the most recently identified or active project root,
+ * plus per-request isolation via AsyncLocalStorage to avoid cross-request root leakage.
  */
 let lastKnownProjectRoot: string | undefined;
+const requestProjectRootStorage = new AsyncLocalStorage<string>();
+
+export function runWithRequestProjectRoot<T>(root: string | undefined, fn: () => T): T {
+  if (root && typeof root === 'string' && root.trim()) {
+    return requestProjectRootStorage.run(canonicalizePath(root), fn);
+  }
+  return fn();
+}
 
 /**
  * Canonicalizes a file or directory path for cross-platform consistency:
@@ -46,13 +56,13 @@ export function canonicalizePath(targetPath: string): string {
 }
 
 export function setLastKnownProjectRoot(root: string): void {
-  if (root && typeof root === 'string') {
+  if (root && typeof root === 'string' && requestProjectRootStorage.getStore() === undefined) {
     lastKnownProjectRoot = canonicalizePath(root);
   }
 }
 
 export function getLastKnownProjectRoot(): string | undefined {
-  return lastKnownProjectRoot;
+  return requestProjectRootStorage.getStore() ?? lastKnownProjectRoot;
 }
 
 export function clearLastKnownProjectRoot(): void {
@@ -139,6 +149,31 @@ export function findMonorepoRoot(fromPath: string): string | null {
     }
   } catch {
     // Filesystem traversal error fallback
+  }
+  return null;
+}
+
+/**
+ * Strips a redundant leading folder segment when a relative path is prefixed with
+ * the base directory's own folder name (e.g. "app-name/src/..." resolved from ".../app-name").
+ */
+function tryStripRootPrefix(baseDir: string, normalizedSlashes: string): string | null {
+  const cleanRel = normalizedSlashes.replace(/^(?:\.\/)+/, '').replace(/^\/+/, '');
+  const baseName = basename(baseDir);
+  if (!baseName) return null;
+  if (cleanRel === baseName) {
+    return existsSync(baseDir) ? canonicalizePath(baseDir) : null;
+  }
+  const prefix = `${baseName}/`;
+  const matches = process.platform === 'win32'
+    ? cleanRel.toLowerCase().startsWith(prefix.toLowerCase())
+    : cleanRel.startsWith(prefix);
+  if (matches) {
+    const stripped = cleanRel.slice(prefix.length);
+    const candidate = canonicalizePath(resolve(baseDir, stripped));
+    if (existsSync(candidate)) {
+      return candidate;
+    }
   }
   return null;
 }
@@ -231,6 +266,23 @@ export function resolveWorkspacePath(rawPath: string, rootHint?: string): string
     return cwdCandidate;
   }
 
+  // Candidate 4: Strip redundant leading root-folder prefix (e.g. "app-name/src/..." when root is ".../app-name")
+  const candidateBases = [
+    rootHint ? canonicalizePath(rootHint.trim().replace(/^['"]|['"]$/g, '')) : undefined,
+    lastKnownProjectRoot,
+    canonicalizePath(process.cwd()),
+  ].filter((base): base is string => Boolean(base));
+
+  for (const base of candidateBases) {
+    const strippedMatch = tryStripRootPrefix(base, normalizedSlashes);
+    if (strippedMatch) {
+      const detectedRoot = findProjectRoot(strippedMatch);
+      if (detectedRoot) {
+        setLastKnownProjectRoot(detectedRoot);
+      }
+      return strippedMatch;
+    }
+  }
 
   // Fallback: If not found on disk, resolve against best available root
   const baseDir = rootHint

@@ -5,7 +5,9 @@ import { resolveProjectOwnership } from '../../src/engine/project-ownership';
 import { detectFrameworkWithEvidence } from '../../src/engine/framework-detector';
 import { extractComponentContract } from '../../src/engine/contract';
 import { inspectComponentTool } from '../../src/tools/inspect-component';
-import { batchParser } from '../../src/engine/storage/delta-sync';
+import { batchParser, syncWorkspace } from '../../src/engine/storage/delta-sync';
+import { closeWorkspaceDatabase, getWorkspaceDatabase } from '../../src/engine/storage/schema';
+import { getComponentTree } from '../../src/engine/tree';
 import { scanRoutes } from '../../src/engine/routes';
 import { auditFrontendTool } from '../../src/tools/audit-frontend';
 
@@ -16,6 +18,60 @@ async function fixture(run:(root:string)=>Promise<void>) {
 async function put(root:string,path:string,content:string) {
   const file=join(root,path);await mkdir(join(file,'..'),{recursive:true});await writeFile(file,content);return file;
 }
+
+test('Next App Router page role agrees across routes, source traversal, and SQLite', async () => fixture(async root => {
+  const appA = join(root, 'apps/a');
+  const appB = join(root, 'apps/b');
+  const code = 'export default function Page() { return null; }';
+  for (const app of [appA, appB]) await put(app, 'package.json', '{"dependencies":{"next":"15"}}');
+  const page = await put(appA, 'src/app/page.ts', code);
+  const helper = await put(appA, 'src/app/page.helpers.ts', code);
+  const wrongRoot = await put(appA, 'features/app/page.tsx', code);
+  const otherApp = await put(appB, 'app/item/page.ts', code);
+  const files = [page, helper, wrongRoot, otherApp];
+
+  const readTreeRoles = async (direction: 'upward' | 'downward') => Promise.all(files.map(async entryPath =>
+    (await getComponentTree({ entryPath, targetPath: root, direction, skipSync: true })).root.isPage));
+  const initial = [true, false, false, true];
+  expect((await scanRoutes({ targetPath: appA })).routes.map(({ path, filePath }) => [path, filePath])).toEqual([['/', page]]);
+  expect((await scanRoutes({ targetPath: appB })).routes.map(({ path, filePath }) => [path, filePath])).toEqual([['/item', otherApp]]);
+  expect(await readTreeRoles('downward')).toEqual(initial);
+  expect(await readTreeRoles('upward')).toEqual(initial);
+
+  const db = getWorkspaceDatabase(root, { create: true });
+  try {
+    await syncWorkspace(root);
+    expect(await readTreeRoles('upward')).toEqual(initial);
+    const rows = files.map(file => db.query('SELECT is_page FROM files WHERE path = ?').get(file));
+    expect(rows).toEqual(initial.map(isPage => ({ is_page: Number(isPage) })));
+
+    // The empty root app directory takes precedence over src/app without editing any source bytes.
+    await mkdir(join(appA, 'app'));
+    expect((await scanRoutes({ targetPath: appA })).routes).toEqual([]);
+    await syncWorkspace(root);
+    expect(await readTreeRoles('downward')).toEqual([false, false, false, true]);
+    expect(await readTreeRoles('upward')).toEqual([false, false, false, true]);
+
+    await rm(join(appA, 'app'), { recursive: true });
+    await syncWorkspace(root);
+    expect(await readTreeRoles('upward')).toEqual(initial);
+  } finally {
+    closeWorkspaceDatabase(root);
+  }
+
+  const scopedRoot = join(appA, 'src');
+  const scopedDb = getWorkspaceDatabase(scopedRoot, { create: true });
+  try {
+    await syncWorkspace(scopedRoot);
+    expect(scopedDb.query('SELECT is_page FROM files WHERE path = ?').get(page)).toEqual({ is_page: 1 });
+    await mkdir(join(appA, 'app'));
+    await syncWorkspace(scopedRoot);
+    expect(scopedDb.query('SELECT is_page FROM files WHERE path = ?').get(page)).toEqual({ is_page: 0 });
+  } finally {
+    closeWorkspaceDatabase(scopedRoot);
+  }
+}));
+
 const samples=[
   {fw:'vue',file:'Card.client.vue',code:'<template><ClientOnly/></template>',deps:{vue:'3.5.13'},boundary:'isomorphic'},
   {fw:'nuxt',file:'Card.client.vue',code:'<template><p/></template>',deps:{nuxt:'3.17.0'},boundary:'client-only'},

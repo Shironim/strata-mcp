@@ -149,6 +149,10 @@ export function stripJsonComments(text: string): string {
     .replace(/,\s*([\]}])/g, '$1');
 }
 
+function isExistingFile(filePath: string): boolean {
+  return existsSync(filePath) && statSync(filePath).isFile();
+}
+
 function resolveExtendsTarget(fromConfigFile: string, extendsTarget: string): string | null {
   const fromDir = dirname(fromConfigFile);
 
@@ -161,9 +165,7 @@ function resolveExtendsTarget(fromConfigFile: string, extendsTarget: string): st
       join(candidateBase, 'jsconfig.json'),
     ];
     for (const c of candidates) {
-      try {
-        if (statSync(c).isFile()) return c;
-      } catch {}
+      if (isExistingFile(c)) return c;
     }
     return null;
   }
@@ -180,22 +182,24 @@ function resolveExtendsTarget(fromConfigFile: string, extendsTarget: string): st
       join(targetInModules, 'jsconfig.json'),
     ];
     for (const c of candidates) {
-      try {
-        if (statSync(c).isFile()) return c;
-      } catch {}
+      if (isExistingFile(c)) return c;
     }
 
-    try {
-      const pkgPath = join(targetInModules, 'package.json');
-      if (statSync(pkgPath).isFile()) {
+    const pkgPath = join(targetInModules, 'package.json');
+    if (isExistingFile(pkgPath)) {
+      try {
         const pkgRaw = readSourceFileSync(pkgPath);
         const pkg = JSON.parse(pkgRaw) as { tsconfig?: string };
         if (pkg.tsconfig) {
           const direct = resolve(targetInModules, pkg.tsconfig);
-          if (statSync(direct).isFile()) return direct;
+          if (isExistingFile(direct)) return direct;
+        }
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+          console.warn(`[strata-resolver] Failed to parse ${pkgPath}: ${err instanceof Error ? err.message : String(err)}`);
         }
       }
-    } catch {}
+    }
 
     const parent = dirname(cur);
     if (parent === cur) break;

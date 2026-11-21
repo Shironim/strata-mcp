@@ -1,11 +1,12 @@
+import { nextAppFileType } from './next-app-file';
 import { parseTypeScript } from '../source-parser';
 import { readSourceFile } from '../source-file';
-import { basename, dirname, extname, join, normalize, relative } from 'node:path';
+import { basename, dirname, extname, normalize, relative } from 'node:path';
 import ts from 'typescript';
 import { unwrapExpression } from '../parsers/ts-syntax';
 import { collectFiles } from '../collector';
 import { deriveNextEffectiveConfig } from '../next-effective-config';
-import type { NextSegmentConfigContract, RouteInfo, RouteType } from '../../types';
+import type { NextSegmentConfigContract, RouteInfo } from '../../types';
 import { extractRouteParams, extractApiHandlers } from './shared';
 
 /**
@@ -149,18 +150,15 @@ export function extractNextSegmentConfig(content: string): NextSegmentConfigCont
   };
 }
 
-/**
- * Scans a Next.js App Router directory and builds its route manifest.
- */
+export { nextAppFileType } from './next-app-file';
+
+/** Scans a Next.js App Router directory and builds its route manifest. */
 export async function scanNextAppRouter(baseDir: string): Promise<RouteInfo[]> {
   const files = await collectFiles(baseDir);
   const routes: RouteInfo[] = [];
 
   // Index all layout files
-  const layoutFiles = files.filter((f) => {
-    const b = basename(f);
-    return b.startsWith('layout.') && ['.tsx', '.jsx', '.js', '.ts'].includes(extname(f));
-  });
+  const layoutFiles = files.filter(file => nextAppFileType(file) === 'layout');
 
   function getLayoutChain(fileDir: string): string[] {
     const chain: string[] = [];
@@ -176,12 +174,9 @@ export async function scanNextAppRouter(baseDir: string): Promise<RouteInfo[]> {
     return chain;
   }
 
-  const validExts = ['.tsx', '.jsx', '.js', '.ts'];
-
   for (const file of files) {
-    const b = basename(file);
-    const ext = extname(file);
-    if (!validExts.includes(ext)) continue;
+    const routeType = nextAppFileType(file);
+    if (!routeType) continue;
 
     const fileDir = dirname(file);
     const relDir = relative(baseDir, fileDir).replace(/\\/g, '/');
@@ -209,28 +204,6 @@ export async function scanNextAppRouter(baseDir: string): Promise<RouteInfo[]> {
 
     const routePath = '/' + urlSegments.join('/');
     const normalizedPath = routePath === '//' ? '/' : routePath || '/';
-
-    // Determine convention type
-    let routeType: RouteType | undefined;
-    if (b.startsWith('page.')) {
-      routeType = 'page';
-    } else if (b.startsWith('route.') && ['.ts', '.js'].includes(ext)) {
-      routeType = 'api';
-    } else if (b.startsWith('layout.')) {
-      routeType = 'layout';
-    } else if (b.startsWith('loading.')) {
-      routeType = 'loading';
-    } else if (b.startsWith('error.') || b.startsWith('global-error.')) {
-      routeType = 'error';
-    } else if (b.startsWith('not-found.')) {
-      routeType = 'not-found';
-    } else if (b.startsWith('template.')) {
-      routeType = 'template';
-    } else if (b.startsWith('default.')) {
-      routeType = 'default';
-    }
-
-    if (!routeType) continue;
 
     let segmentConfig: NextSegmentConfigContract | undefined;
     let handlers: string[] | undefined;

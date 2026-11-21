@@ -26,6 +26,17 @@ function contains(root: string, path: string): boolean {
   return rel === '' || (!isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`));
 }
 
+export function resolveNextAppRoot(ownerRoot: string): string | null {
+  for (const path of [join(ownerRoot, 'app'), join(ownerRoot, 'src', 'app')]) {
+    try {
+      if (statSync(path).isDirectory()) return path;
+    } catch {
+      // Try the next supported location.
+    }
+  }
+  return null;
+}
+
 /** Scope bounds source membership; the nearest package/config owns it, even above a selected subdirectory. */
 export function resolveProjectOwnership(filePath: string, scopeRoot?: string): ProjectOwnershipInfo {
   const file = physicalPath(filePath);
@@ -80,10 +91,7 @@ export function resolveProjectOwnership(filePath: string, scopeRoot?: string): P
         result.diagnostics.push({ code: 'PROJECT_FRAMEWORK_CONFLICT', reason: `${dir}: competing application evidence (${candidates.join(', ')}${genericConfigs.some(name => found.includes(name)) ? ', Vite config' : ''}); no application convention is selected.` });
       } else if (candidates.length === 1) result.applicationFramework = candidates[0];
       if (result.applicationFramework === 'next') {
-        const isDirectory = (path: string) => { try { return statSync(path).isDirectory(); } catch { return false; } };
-        const rootApp = join(dir, 'app'); const srcApp = join(dir, 'src', 'app');
-        if (isDirectory(rootApp)) result.appRoot = rootApp;
-        else if (isDirectory(srcApp)) result.appRoot = srcApp;
+      result.appRoot = resolveNextAppRoot(dir);
       }
       return result;
     }

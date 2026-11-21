@@ -4,7 +4,7 @@ import { collectFiles } from './collector';
 import { resolveProjectOwnership } from './project-ownership';
 import type { ResolveRouteEntryResult, RouteFramework, RouteInfo, RouteManifestResult, ScanRoutesOptions } from '../types';
 import { extractRouteParams } from './routing/shared';
-import { scanNextAppRouter } from './routing/next';
+import { nextAppFileType, scanNextAppRouter } from './routing/next';
 import { scanNuxtPages, scanNuxtNitroRoutes } from './routing/nuxt';
 import { scanAstroPages, scanSvelteKitRoutes, scanInertiaPages } from './routing/filesystem';
 import { scanVueRouterPages } from './routing/vue-router';
@@ -112,12 +112,10 @@ export async function detectRouteFramework(
   for (const candidate of ownership.ownerRoot ? [] : [join(normTarget, 'app'), join(normTarget, 'src', 'app')]) {
     if (existsSync(candidate)) {
       const files = await collectFiles(candidate);
-      const hasAppRouterFile = files.some(
-        (f) =>
-          basename(f).startsWith('page.') ||
-          basename(f).startsWith('layout.') ||
-          basename(f).startsWith('route.')
-      );
+      const hasAppRouterFile = files.some(file => {
+        const type = nextAppFileType(file);
+        return type === 'page' || type === 'layout' || type === 'api';
+      });
       if (hasAppRouterFile) {
         return { framework: 'next-app', baseDir: candidate };
       }
