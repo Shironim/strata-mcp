@@ -1,5 +1,6 @@
 import type { BoundaryContract, BoundaryMethod, FormContract, FormFieldContract } from '../../types';
-import { synthesizeBackendTargetHint } from '../api-contract';
+import { synthesizeBackendTargetHint } from './backend-target-hint';
+import { extractOutboundHttpCalls } from './outbound-http';
 
 /**
  * Computes 1-based line number from a character offset.
@@ -26,14 +27,33 @@ export function extractObjectLiteralKeys(objSnippet: string): string[] {
   return keys;
 }
 
+function boundaryDocumentPath(content: string, framework: string): string {
+  if (/^\s*---(?:\r?\n)/.test(content)) return 'component.astro';
+  if (framework === 'svelte' && /<script\b/.test(content)) return 'component.svelte';
+  if (/<(?:script|template)(?:\s|>)/.test(content)) return 'component.vue';
+  return framework === 'react' || framework === 'next' ? 'component.tsx' : 'component.ts';
+}
+
+function boundaryMethod(method: string): BoundaryMethod {
+  switch (method) {
+    case 'GET': case 'POST': case 'PUT': case 'PATCH': case 'DELETE': return method;
+    default: return 'UNKNOWN';
+  }
+}
+
 /**
  * Extracts universal ingress & egress data fetching boundary contracts (Inertia, Nuxt, Next/React, Astro).
  */
 export function extractBoundaryContracts(
   content: string,
-  _framework: string
+  framework: string,
+  filePath?: string,
 ): BoundaryContract[] {
   const boundaries: BoundaryContract[] = [];
+  const documentPath = filePath ?? boundaryDocumentPath(content, framework);
+  const outbound = extractOutboundHttpCalls(content, documentPath).filter(call =>
+    call.clientKind === 'fetch' || call.clientKind === 'axios' || call.clientKind === '$fetch' || call.clientKind === 'useFetch');
+  const consumed = new Set<typeof outbound[number]>();
 
   // 1. Inertia useForm: const form = useForm({ ... })
   const formVarFields = new Map<string, string[]>();
@@ -121,48 +141,27 @@ export function extractBoundaryContracts(
     });
   }
 
-  // 2. Nuxt useFetch & $fetch
-  const nuxtFetchRegex = /\b(useFetch|\$fetch)\s*(?:<[^>]+>)?\s*\(\s*['"`]([^'"`]+)['"`](?:[\s\S]*?method\s*:\s*['"]([A-Za-z]+)['"])?/g;
-  for (const m of content.matchAll(nuxtFetchRegex)) {
-    const targetEndpoint = m[2].trim();
-    const method = (m[3]?.toUpperCase() || 'GET') as BoundaryMethod;
-    const line = getLineFromOffset(content, m.index || 0);
-    const endpointSource = targetEndpoint.includes('${') ? 'template-literal' : 'literal';
-
-    let payloadKeys: string[] | undefined;
-    const afterMatch = content.substring(m.index || 0, (m.index || 0) + 300);
-    const bodyMatch = afterMatch.match(/body\s*:\s*(\{[\s\S]*?\})/);
-    if (bodyMatch) {
-      payloadKeys = extractObjectLiteralKeys(bodyMatch[1]);
-    }
-
-    boundaries.push({
-      boundaryType: 'nuxt-fetch',
-      method,
-      targetEndpoint,
-      endpointSource,
-      payloadKeys: payloadKeys && payloadKeys.length > 0 ? payloadKeys : undefined,
-      optimisticUpdate: false,
-      loc: { line }
-    });
-  }
-
   // 3. TanStack Query: useMutation / useQuery
   const tanstackMutationRegex = /useMutation\s*\(\s*\{[\s\S]*?mutationFn\s*:\s*(?:async\s*)?(?:\([^)]*\)\s*=>|function)/g;
   for (const m of content.matchAll(tanstackMutationRegex)) {
-    const line = getLineFromOffset(content, m.index || 0);
+    const offset = m.index ?? 0;
+    const line = getLineFromOffset(content, offset);
+    const column = offset - content.lastIndexOf('\n', offset - 1);
+    const call = outbound.find(item => item.mutation?.line === line && item.mutation.column === column);
+    if (call) consumed.add(call);
     const mutationBlock = content.substring(m.index || 0, (m.index || 0) + 400);
     const urlMatch = mutationBlock.match(/['"`](\/(?:api\/)?[^'"`]+)['"`]/);
-    const targetEndpoint = urlMatch ? urlMatch[1] : 'mutationFn';
+    const targetEndpoint = call?.rawEndpoint ?? urlMatch?.[1] ?? 'mutationFn';
     const methodMatch = mutationBlock.match(/method\s*:\s*['"]([A-Z]+)['"]/i) || mutationBlock.match(/\.(post|put|patch|delete)\b/i);
-    const method = (methodMatch ? (methodMatch[1] || methodMatch[2]).toUpperCase() : 'POST') as BoundaryMethod;
+    const method = boundaryMethod(call?.method ?? (methodMatch ? (methodMatch[1] || methodMatch[2]).toUpperCase() : 'POST'));
 
     boundaries.push({
       boundaryType: 'tanstack-query',
       method,
       targetEndpoint,
-      endpointSource: urlMatch ? (targetEndpoint.includes('${') ? 'template-literal' : 'literal') : 'action-symbol',
-      optimisticUpdate: /onMutate\s*:/.test(mutationBlock),
+      endpointSource: call?.endpointSource ?? (urlMatch ? (targetEndpoint.includes('${') ? 'template-literal' : 'literal') : 'action-symbol'),
+      payloadKeys: call?.payloadKeys,
+      optimisticUpdate: call?.mutation?.optimisticUpdate ?? /onMutate\s*:/.test(mutationBlock),
       loc: { line }
     });
   }
@@ -182,47 +181,19 @@ export function extractBoundaryContracts(
     });
   }
 
-  // 5. Native fetch & Axios
-  const nativeFetchRegex = /\bfetch\s*\(\s*['"`](\/(?:api\/)?[^'"`]+)['"`](?:[\s\S]*?method\s*:\s*['"]([A-Za-z]+)['"])?/g;
-  for (const m of content.matchAll(nativeFetchRegex)) {
-    const targetEndpoint = m[1].trim();
-    const method = (m[2]?.toUpperCase() || 'GET') as BoundaryMethod;
-    const line = getLineFromOffset(content, m.index || 0);
-
-    const alreadyCaptured = boundaries.some(
-      (b) => b.loc?.line === line || (b.targetEndpoint === targetEndpoint && b.boundaryType === 'tanstack-query')
-    );
-    if (!alreadyCaptured) {
-      boundaries.push({
-        boundaryType: 'native-fetch',
-        method,
-        targetEndpoint,
-        endpointSource: targetEndpoint.includes('${') ? 'template-literal' : 'literal',
-        loc: { line }
-      });
-    }
-  }
-
-  // 5b. Axios calls: axios.get(...), axios.post(...)
-  const axiosRegex = /\baxios\.(get|post|put|patch|delete)\s*\(\s*['"`]([^'"`]+)['"`]/g;
-  for (const m of content.matchAll(axiosRegex)) {
-    const method = m[1].toUpperCase() as BoundaryMethod;
-    const targetEndpoint = m[2].trim();
-    const line = getLineFromOffset(content, m.index || 0);
-    const alreadyCaptured = boundaries.some(
-      (b) => b.loc?.line === line || (b.targetEndpoint === targetEndpoint && b.boundaryType === 'tanstack-query')
-    );
-    if (!alreadyCaptured) {
-      const endpointSource = targetEndpoint.includes('${') ? 'template-literal' : 'literal';
-      boundaries.push({
-        boundaryType: 'axios',
-        method,
-        targetEndpoint,
-        endpointSource,
-        loc: { line },
-        backendTargetHint: synthesizeBackendTargetHint(method, targetEndpoint),
-      });
-    }
+  for (const call of outbound) {
+    if (consumed.has(call)) continue;
+    const boundaryType = call.clientKind === 'axios' ? 'axios' : call.clientKind === 'fetch' ? 'native-fetch' : 'nuxt-fetch';
+    boundaries.push({
+      boundaryType,
+      method: boundaryMethod(call.method),
+      targetEndpoint: call.rawEndpoint,
+      endpointSource: call.endpointSource,
+      payloadKeys: call.payloadKeys,
+      loc: { line: call.line, column: call.column },
+      ...(boundaryType === 'nuxt-fetch' ? { optimisticUpdate: false } : {}),
+      ...(boundaryType === 'axios' ? { backendTargetHint: synthesizeBackendTargetHint(call.method, call.endpoint) } : {}),
+    });
   }
 
   return boundaries;

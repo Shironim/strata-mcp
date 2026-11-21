@@ -45,14 +45,17 @@ function onCheckout() {
     const writeItem = cartItems.find((it) => it.accessMode === 'write');
     expect(writeItem).toBeDefined();
     expect(writeItem?.usageSnippet).toContain('cart.checkout()');
+    expect(writeItem?.accessedProperties).toContain('checkout');
 
     // Verify watcher is detected
     const watchItem = cartItems.find((it) => it.accessMode === 'watch');
     expect(watchItem).toBeDefined();
+    expect(watchItem?.accessedProperties).toContain('items');
 
     // Verify reader is detected
     const readItem = cartItems.find((it) => it.accessMode === 'read');
     expect(readItem).toBeDefined();
+    expect(cartItems.some((it) => it.accessMode === 'read' && it.accessedProperties?.includes('total'))).toBe(true);
   });
 
   it('classifies mutators and readers in SQLite SSOT without disk re-reads during queryStateImpact', async () => {
@@ -145,6 +148,8 @@ function onCheckout() {
 
     expect(mutatorPaths.some((p) => p.includes('CheckoutButton.vue'))).toBe(true);
     expect(readerPaths.some((p) => p.includes('CartBadge.vue'))).toBe(true);
+    expect(allImpact.mutators?.find((m) => m.path.replace(/\\/g, '/').includes('CheckoutButton.vue'))?.accessedProperties).toEqual(['checkout']);
+    expect(allImpact.readers?.find((r) => r.path.replace(/\\/g, '/').includes('CartBadge.vue'))?.accessedProperties).toEqual(['items']);
 
     // Filter by role
     const mutatorsOnly = await queryStateImpact(tempDir, 'useCartStore', 'mutators');

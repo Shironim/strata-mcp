@@ -2,6 +2,7 @@ import { parse as parseDom, NodeTypes, type ElementNode, type RootNode, type Tem
 import ts from 'typescript';
 import { parseAstro } from '../astro-sfc';
 import { escapeRegExp } from '../patterns';
+import { isVueTagBoundLocally, vueElementBindings } from '../template';
 import type { ComponentPatchItem, PatchRefactorType } from '../../types';
 
 /**
@@ -413,11 +414,13 @@ export function scanVueTemplateProps(
     }
   }
 
-  function walk(node: RootNode | TemplateChildNode): void {
+  function walk(node: RootNode | TemplateChildNode, outer: ReadonlySet<string>): void {
+    let scope = outer;
     if (node.type === NodeTypes.ELEMENT) {
       const el = node as ElementNode;
       if (removedElements.has(el)) return;
-      const tagMatches = targetTags.has(el.tag) || targetTags.has(toKebabCase(el.tag));
+      scope = vueElementBindings(el, outer);
+      const tagMatches = !isVueTagBoundLocally(el.tag, scope) && (targetTags.has(el.tag) || targetTags.has(toKebabCase(el.tag)));
 
       if (tagMatches) {
         for (const prop of el.props) {
@@ -512,11 +515,11 @@ export function scanVueTemplateProps(
     }
 
     if ('children' in node && Array.isArray((node as any).children)) {
-      (node as any).children.forEach(walk);
+      (node as any).children.forEach((child: TemplateChildNode) => walk(child, scope));
     }
   }
 
-  walk(ast);
+  walk(ast, new Set());
   return patches;
 }
 
@@ -524,6 +527,7 @@ export interface TsxLikeScanOptions {
   kindLabel: string;
   preserveKebabCase: boolean;
   maskAstroFrontmatter?: boolean;
+  resolvedTagStarts?: ReadonlySet<number>;
 }
 
 /**
@@ -556,7 +560,9 @@ export function scanTsxLikeProps(
   function visit(node: ts.Node): void {
     if (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) {
       const tag = node.tagName.getText(sf);
-      if (targetTags.has(tag) || targetTags.has(toKebabCase(tag))) {
+      if (options.resolvedTagStarts
+        ? options.resolvedTagStarts.has(node.getStart(sf))
+        : targetTags.has(tag) || targetTags.has(toKebabCase(tag))) {
         for (const attr of node.attributes.properties) {
           const attrName = ts.isJsxAttribute(attr) ? attr.name.getText(sf) : '';
           if (!ts.isJsxAttribute(attr) || !matchVueProp(attrName, cleanOld)) continue;

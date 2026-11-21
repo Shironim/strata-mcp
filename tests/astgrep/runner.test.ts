@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { executeAstGrep, verifyAstGrepBinary, dumpSyntaxTree, isBinaryExecutionError } from '../../src/engine/astgrep';
+import { executeAstGrep, verifyAstGrepBinary, isBinaryExecutionError } from '../../src/engine/astgrep';
 import { findComponentUsage } from '../../src/engine/search';
 import { join } from 'node:path';
 
@@ -79,18 +79,6 @@ rule:
     expect(matches.length).toBe(1);
     expect(matches[0].text).toContain('const insideVar = 10;');
   });
-
-  it('dumps syntax tree', async () => {
-    const status = await verifyAstGrepBinary();
-    if (!status.ok) {
-      return;
-    }
-
-    const dump = await dumpSyntaxTree('const x = 1;', 'ts');
-    expect(dump).toBeDefined();
-    expect(dump.length).toBeGreaterThan(0);
-  });
-
 
   it('correctly identifies binary execution errors vs parse warnings (GAP-06)', () => {
     expect(isBinaryExecutionError(new Error('Failed to execute ast-grep at "ast-grep": spawn ENOENT'))).toBe(true);

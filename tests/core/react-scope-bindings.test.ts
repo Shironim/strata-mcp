@@ -123,7 +123,7 @@ test('memory-v6 indexes reparse state identifiers under the new binding parser',
     const db=getWorkspaceDatabase(root,{create:true});
     await syncWorkspace(root);
     db.run("UPDATE state_deps SET identifier='stale-initializer'");
-    db.run("UPDATE meta SET value=? WHERE key='cache_version'",[`memory-v6:${STRATA_VERSION}`]);
+    db.run("UPDATE meta SET value=? WHERE key='analysis_fingerprint'",[`memory-v6:${STRATA_VERSION}`]);
     expect((await syncWorkspace(root)).modified).toBeGreaterThan(0);
     expect(db.query("SELECT identifier FROM state_deps WHERE identifier='stale-initializer'").all()).toHaveLength(0);
     expect(db.query("SELECT identifier FROM state_deps WHERE identifier='useCartStore'").all().length).toBeGreaterThan(0);

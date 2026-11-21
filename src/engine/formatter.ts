@@ -199,6 +199,13 @@ function appendDiagnosticsAndForms(contract: ComponentContract, lines: string[])
     }
   }
 
+  if (contract.boundaryDiagnostics?.length) {
+    lines.push('', 'Boundary contract diagnostics:');
+    for (const diagnostic of contract.boundaryDiagnostics) {
+      lines.push(`  - [${diagnostic.code}] ${diagnostic.reason}`);
+    }
+  }
+
   if (contract.formContracts && contract.formContracts.length > 0) {
     lines.push('');
     lines.push('Form & Field Contracts:');

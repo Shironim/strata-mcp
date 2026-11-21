@@ -1,6 +1,6 @@
 import { parse } from 'svelte/compiler';
 import { getSourcePosition } from '../utils/source-position';
-import type { SfcBlock, SvelteDescriptor } from '../types';
+import type { ComponentSlotDetail, SfcBlock, SvelteDescriptor } from '../types';
 
 export interface SvelteEventDirective {
   name: string;
@@ -11,24 +11,29 @@ export interface SvelteEventDirective {
   component: boolean;
 }
 
+function walkTemplate(node: any, visit: (node: any) => void): void {
+  if (!node || typeof node !== 'object') return;
+  if (Array.isArray(node)) {
+    for (const child of node) walkTemplate(child, visit);
+    return;
+  }
+  visit(node);
+  for (const [key, child] of Object.entries(node)) {
+    if (!['attributes', 'expression', 'metadata', 'loc', 'parent'].includes(key)) walkTemplate(child, visit);
+  }
+}
+
 /** Strict compiler AST only; malformed input must not revive textual event matches. */
 export function svelteEventDirectives(content: string, filename: string): SvelteEventDirective[] {
   const bom = content.charCodeAt(0) === 0xFEFF ? 1 : 0;
   const ast = parse(content.slice(bom), { modern: true, filename });
   const result: SvelteEventDirective[] = [];
-  function visit(node: any): void {
-    if (!node || typeof node !== 'object') return;
-    if (Array.isArray(node)) { for (const child of node) visit(child); return; }
+  walkTemplate(ast.fragment, node => {
     for (const attr of node.attributes ?? []) {
       if (attr.type === 'OnDirective') result.push({ name: attr.name, start: attr.start + bom, end: attr.end + bom,
         modifiers: attr.modifiers ?? [], forwarding: !attr.expression, component: node.type === 'Component' });
     }
-    // Expressions and script bodies cannot contain Svelte template directives.
-    for (const [key, child] of Object.entries(node)) {
-      if (!['attributes', 'expression', 'metadata', 'loc', 'parent'].includes(key)) visit(child);
-    }
-  }
-  visit(ast.fragment);
+  });
   return result;
 }
 
@@ -62,6 +67,7 @@ export function parseSvelte(content: string, filename = 'component.svelte'): Sve
   let moduleBlock: SfcBlock | null = null;
   let templateBlock: SfcBlock | null = null;
   const styles: SfcBlock[] = [];
+  const legacySlots: ComponentSlotDetail[] = [];
 
   try {
     let ast: any;
@@ -131,6 +137,18 @@ export function parseSvelte(content: string, filename = 'component.svelte'): Sve
           end: getSourcePosition(content, end),
         },
       };
+      if (templateBlock.content.includes('<slot')) {
+        walkTemplate(ast.fragment, node => {
+          if (node.type !== 'SlotElement') return;
+          const attrs = (node.attributes ?? []) as Array<{ type: string; name?: string; value?: unknown }>;
+          const nameAttr = attrs.find(attr => attr.type === 'Attribute' && attr.name === 'name');
+          const value = nameAttr?.value;
+          if (nameAttr && (!Array.isArray(value) || value.length !== 1 || value[0]?.type !== 'Text')) return;
+          const name = Array.isArray(value) ? value[0].data as string : 'default';
+          const bindings = attrs.flatMap(attr => attr.type === 'Attribute' && attr.name && attr.name !== 'name' ? [attr.name] : []);
+          legacySlots.push({ name, isScoped: bindings.length > 0, ...(bindings.length ? { bindings } : {}) });
+        });
+      }
     }
 
     // 4. CSS / Style
@@ -223,6 +241,7 @@ export function parseSvelte(content: string, filename = 'component.svelte'): Sve
     module: moduleBlock,
     template: templateBlock,
     styles: styles.length > 0 ? styles : undefined,
+    ...(legacySlots.length ? { legacySlots } : {}),
     diagnostics: diagnostics.length > 0 ? diagnostics : undefined,
   };
 }

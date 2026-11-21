@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { tmpdir, homedir } from 'node:os';
 import type { RawMatch } from '../types';
 import { analysisSignal, checkAnalysisCancelled } from './analysis-context';
+import { setTelemetryStage } from './telemetry';
 
 /**
  * Universal cross-platform resolver for the current module's directory
@@ -28,6 +29,7 @@ export interface AstGrepQueryOptions {
   code?: string; // Content if matching from memory / stdin
   targetPath?: string; // File or directory path if scanning disk
   maxResults?: number;
+  timeoutMs?: number; // Standalone execution timeout in ms (default: 30000)
 }
 
 export interface AstGrepItemOutput {
@@ -296,6 +298,7 @@ function attachAnalysisCancellation(proc: ReturnType<typeof spawn>) {
  * Executes an ast-grep query either on an in-memory string (via stdin) or against file paths on disk.
  */
 export async function executeAstGrep(options: AstGrepQueryOptions): Promise<RawMatch[]> {
+  setTelemetryStage('ast-grep');
   checkAnalysisCancelled();
   const bin = resolveAstGrepBinary();
   const isCmd = bin.endsWith('.cmd') || bin.endsWith('.bat');
@@ -371,6 +374,16 @@ export async function executeAstGrep(options: AstGrepQueryOptions): Promise<RawM
       }
 
       const { signal, cleanup } = attachAnalysisCancellation(proc);
+      const timeoutMs = options.timeoutMs !== undefined && options.timeoutMs > 0 ? options.timeoutMs : 30_000;
+      let timedOut = false;
+      const timeoutTimer = setTimeout(() => {
+        timedOut = true;
+        try { proc.kill('SIGTERM'); } catch { /* child may have exited */ }
+      }, timeoutMs);
+      const cleanupAll = () => {
+        clearTimeout(timeoutTimer);
+        cleanup();
+      };
 
       proc.stdout?.on('data', (chunk) => {
         if (earlyStopped) return;
@@ -427,7 +440,7 @@ export async function executeAstGrep(options: AstGrepQueryOptions): Promise<RawM
       });
 
       proc.on('error', (err) => {
-        cleanup();
+        cleanupAll();
         reject(
           new Error(
             `Failed to execute ast-grep at "${bin}": ${err.message}. ${installHint()}`
@@ -436,7 +449,11 @@ export async function executeAstGrep(options: AstGrepQueryOptions): Promise<RawM
       });
 
       proc.on('close', (code) => {
-        cleanup();
+        cleanupAll();
+        if (timedOut) {
+          reject(new Error(`ast-grep timed out after ${timeoutMs}ms.`));
+          return;
+        }
         if (signal?.aborted) {
           reject(signal.reason);
           return;
@@ -510,69 +527,4 @@ export async function executeAstGrep(options: AstGrepQueryOptions): Promise<RawM
       await fs.unlink(tempRuleFile).catch(() => {});
     }
   }
-}
-
-/**
- * Dumps the CST of a code snippet.
- */
-export async function dumpSyntaxTree(code: string, language: string = 'ts'): Promise<string> {
-  checkAnalysisCancelled();
-  let lang = language;
-  if (lang === 'vue' || lang === 'astro' || lang === 'auto') {
-    lang = (/^\s*<[A-Za-z0-9_$-]/.test(code) || code.includes('</') || code.endsWith('/>')) ? 'html' : 'ts';
-  }
-  const bin = resolveAstGrepBinary();
-  const isCmd = bin.endsWith('.cmd') || bin.endsWith('.bat');
-  const args = ['run', '--pattern', code, '--lang', lang, '--debug-query=cst', '--stdin'];
-
-  return new Promise((resolve, reject) => {
-    let stderr = '';
-
-    let proc;
-    try {
-      proc = spawn(bin, args, {
-        stdio: ['pipe', 'ignore', 'pipe'],
-        shell: isCmd,
-      });
-    } catch (err) {
-      reject(
-        new Error(
-            `Failed to dump syntax tree: ${err instanceof Error ? err.message : String(err)}. ${installHint()}`
-        )
-      );
-      return;
-    }
-
-    const { signal, cleanup } = attachAnalysisCancellation(proc);
-    // Immediately close stdin to prevent ast-grep from scanning the working directory
-    proc.stdin?.on('error', () => {});
-    proc.stdin?.end();
-
-    proc.stderr?.on('data', (chunk) => {
-      stderr += chunk.toString();
-    });
-
-    proc.on('error', (err) => {
-      cleanup();
-      reject(new Error(`Failed to dump syntax tree: ${err.message}`));
-    });
-
-    proc.on('close', (code) => {
-      cleanup();
-      if (signal?.aborted) { reject(signal.reason); return; }
-      const output = stderr.trim();
-      // Compat: ast-grep >= 0.4x exits 1 for --debug-query (no JSON matches
-      // are produced) while still printing the CST to stderr; 0.38 exits 0
-      // with identical output. Accept either as long as debug output exists.
-      if (/^debug \w+:/im.test(output)) {
-        resolve(output);
-        return;
-      }
-      if (code !== 0) {
-        reject(new Error(`ast-grep dump failed (exit ${code}): ${output || 'unknown error'}`));
-        return;
-      }
-      resolve(output);
-    });
-  });
 }

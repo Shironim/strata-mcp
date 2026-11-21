@@ -228,42 +228,23 @@ export async function extractSvelteContract(filePath: string, content: string): 
       }
     }
 
-    // Svelte 5 Snippets as Slots (e.g. Snippet, Snippet<...>, children)
-    if (prop.name === 'children') {
-      if (!slots.includes('default')) slots.push('default');
-      slotDetails.push({ name: 'default', isScoped: /\bSnippet\s*<\s*\[\s*[^\]\s]/.test(prop.type), description: 'Children snippet or default slot' });
-    } else if (prop.type.includes('Snippet') || prop.name === 'header' || prop.name === 'footer') {
-      if (!slots.includes(prop.name)) slots.push(prop.name);
-      slotDetails.push({ name: prop.name, isScoped: /\bSnippet\s*<\s*\[\s*[^\]\s]/.test(prop.type), description: `${prop.name} snippet` });
+    // Snippet props are public template inputs. Local snippet declarations live in the source map.
+    if (/\bSnippet\b/.test(prop.type)) {
+      const name = prop.name === 'children' ? 'default' : prop.name;
+      if (slots.includes(name)) continue;
+      slots.push(name);
+      slotDetails.push({
+        name,
+        isScoped: /\bSnippet\s*<\s*\[\s*[^\]\s]/.test(prop.type),
+        description: prop.name === 'children' ? 'Children snippet or default slot' : `${prop.name} snippet`,
+      });
     }
   }
 
-  // 5. Template slot and snippet scanning
-  const rawTemplate = descriptor.template?.content || content;
-
-  // Svelte 4 <slot /> and <slot name="..." />
-  const slotRegex = /<slot\b([^>]*)\/?>/gi;
-  let slotMatch: RegExpExecArray | null;
-  while ((slotMatch = slotRegex.exec(rawTemplate)) !== null) {
-    const attrs = slotMatch[1];
-    const nameMatch = attrs.match(/\bname=["']([^"']+)["']/i);
-    const slotName = nameMatch ? nameMatch[1] : 'default';
-    if (!slots.includes(slotName)) {
-      slots.push(slotName);
-      const bindings = Array.from(attrs.matchAll(/\b([A-Za-z_$][\w$-]*)\s*=/g), match => match[1]).filter(name => name !== 'name');
-      slotDetails.push({ name: slotName, isScoped: bindings.length > 0, ...(bindings.length ? { bindings } : {}) });
-    }
-  }
-
-  // Svelte 5 {#snippet name(...)}
-  const snippetRegex = /\{#snippet\s+([A-Za-z0-9_$]+)\s*\(([^)]*)\)\}/g;
-  let snippetMatch: RegExpExecArray | null;
-  while ((snippetMatch = snippetRegex.exec(rawTemplate)) !== null) {
-    const snippetName = snippetMatch[1];
-    if (!slots.includes(snippetName)) {
-      slots.push(snippetName);
-      slotDetails.push({ name: snippetName, isScoped: Boolean(snippetMatch[2].trim()), description: 'Template defined snippet' });
-    }
+  for (const slot of descriptor.legacySlots ?? []) {
+    if (slots.includes(slot.name)) continue;
+    slots.push(slot.name);
+    slotDetails.push(slot);
   }
 
   return {

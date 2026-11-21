@@ -66,7 +66,7 @@ return <div>{items.slice(0, 5).length}</div>;
     expect(mutators.consumers.map(item => item.path)).toEqual(all.mutators!.map(item => item.path));
     const db = getWorkspaceDatabase(root);
     db.run("UPDATE state_deps SET access_mode='write'");
-    db.run("UPDATE meta SET value=? WHERE key='cache_version'", [`memory-v12:${STRATA_VERSION}`]);
+    db.run("UPDATE meta SET value=? WHERE key='analysis_fingerprint'", [`memory-v12:${STRATA_VERSION}`]);
     const refreshed = await queryStateImpact(root, 'useProductsStore', 'all');
     expect(refreshed.readersCount).toBe(1);
     expect(refreshed.mutatorsCount).toBe(2);

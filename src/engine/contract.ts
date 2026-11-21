@@ -1,13 +1,7 @@
-import { parseTypeScript } from './source-parser';
 import { readSourceFile } from './source-file';
-import { createDocumentAdapter } from '../adapters/factory';
 import { extractNuxtPageMeta, extractNextSegmentConfig } from './routes';
-import { existsSync } from 'node:fs';
 import { basename, extname, resolve, dirname } from 'node:path';
-import { createHash } from 'node:crypto';
-import { findProjectRoot, canonicalizePath } from './path-resolver';
-import { resolveModuleFilePath, extractImportedSymbols } from './symbol-resolver';
-import ts from 'typescript';
+import { findProjectRoot } from './path-resolver';
 import type { ComponentContract } from '../types';
 import { extractVueContract, extractVueComposableContract } from './parsers/contract-vue';
 import { extractReactContract } from './parsers/contract-react';
@@ -19,6 +13,7 @@ import { extractLayoutStructure } from './layout-extractor';
 import { extractRenderBoundary } from './contracts/render-boundary';
 import { extractComponentVariants } from './contracts/variants';
 import { extractBoundaryContracts, extractFormContracts } from './contracts/boundaries';
+import { extractImportedComposableBoundaries } from './contracts/imported-composable-boundaries';
 
 export { extractRenderBoundary } from './contracts/render-boundary';
 export { extractComponentVariants } from './contracts/variants';
@@ -113,61 +108,17 @@ export async function extractComponentContract(
   const dataDependencies = extractDataDependencies(content, framework);
   const variants = extractComponentVariants(content, baseContract.props);
 
-  const boundaryContracts = extractBoundaryContracts(content, framework);
+  const boundaryContracts = extractBoundaryContracts(content, framework, resolvedPath);
   for (const b of boundaryContracts) {
     if (!b.source) b.source = 'inline';
   }
 
   const dependencies = new Map((baseContract.dependencies ?? []).map(input => [input.path, input]));
 
-  // 1-Hop outbound API resolution from local composables / hooks
   const workspaceRoot = options?.workspaceRoot || findProjectRoot(resolvedPath) || dirname(resolvedPath);
-  try {
-    const importedSymbols = extractImportedSymbols(resolvedPath, content);
-    const scriptBlocks = createDocumentAdapter(resolvedPath, content).getScriptBlocks();
-    for (const [localName, importInfo] of importedSymbols.entries()) {
-      if (!localName.startsWith('use') && !importInfo.importedName.startsWith('use')) continue;
-      let called = false;
-      let shadowed = false;
-      for (const block of scriptBlocks) {
-        const ast = parseTypeScript(resolvedPath, block.content, ts.ScriptKind.TSX);
-        const visit = (node: ts.Node): void => {
-          if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === localName) called = true;
-          if ((ts.isParameter(node) || ts.isVariableDeclaration(node) || ts.isFunctionDeclaration(node))
-            && node.name && ts.isIdentifier(node.name) && node.name.text === localName) shadowed = true;
-          ts.forEachChild(node, visit);
-        };
-        visit(ast);
-      }
-      if (!called || shadowed) continue;
-      const composablePath = resolveModuleFilePath(resolvedPath, importInfo.sourceModule, workspaceRoot);
-      if (!composablePath || composablePath === resolvedPath || !existsSync(composablePath)) continue;
-      const compContent = await readSourceFile(composablePath);
-      const canonCompPath = canonicalizePath(composablePath);
-      // Track inspected modules even when no endpoint is found, so later edits invalidate the contract.
-      dependencies.set(canonCompPath, { path: canonCompPath, hash: createHash('sha256').update(compContent).digest('hex'), isExternal: false });
-      const ast = parseTypeScript(composablePath, compContent, ts.ScriptKind.TSX);
-      for (const statement of ast.statements) {
-        let hook: ts.FunctionDeclaration | ts.ArrowFunction | ts.FunctionExpression | undefined;
-        if (ts.isFunctionDeclaration(statement) && statement.body
-          && (statement.name?.text === importInfo.importedName
-            || (importInfo.importedName === 'default' && statement.modifiers?.some(m => m.kind === ts.SyntaxKind.DefaultKeyword)))) hook = statement;
-        if (ts.isVariableStatement(statement)) {
-          for (const declaration of statement.declarationList.declarations) {
-            if (ts.isIdentifier(declaration.name) && declaration.name.text === importInfo.importedName
-              && declaration.initializer && (ts.isArrowFunction(declaration.initializer) || ts.isFunctionExpression(declaration.initializer))) hook = declaration.initializer;
-          }
-        }
-        if (!hook) continue;
-        const lineOffset = ast.getLineAndCharacterOfPosition(hook.getStart(ast)).line;
-        for (const cb of extractBoundaryContracts(hook.getText(ast), 'ts')) {
-          boundaryContracts.push({ ...cb, ...(cb.loc ? { loc: { ...cb.loc, line: cb.loc.line + lineOffset } } : {}), source: 'imported-composable', viaComposable: localName });
-        }
-      }
-    }
-  } catch {
-    // Graceful fallback
-  }
+  const imported = await extractImportedComposableBoundaries(resolvedPath, content, workspaceRoot);
+  boundaryContracts.push(...imported.boundaries);
+  for (const input of imported.dependencies) dependencies.set(input.path, input);
 
   const formContracts = extractFormContracts(content);
   const layoutStructure = extractLayoutStructure(resolvedPath, content, framework);
@@ -200,6 +151,7 @@ export async function extractComponentContract(
         ? layoutStructure
         : undefined,
     boundaryContracts: boundaryContracts.length > 0 ? boundaryContracts : undefined,
+    ...(imported.diagnostics.length ? { boundaryDiagnostics: imported.diagnostics } : {}),
     formContracts: formContracts.length > 0 ? formContracts : undefined,
     nuxtPageMeta,
     ...(nextSegmentConfig ? { nextSegmentConfig } : {}),

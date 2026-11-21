@@ -7,7 +7,8 @@ import { unwrapExpression } from './ts-syntax';
 const BUILTINS = new Set(['useState', 'useEffect', 'useCallback', 'useMemo', 'useRef', 'useId', 'useContext', 'useReducer',
   'useTransition', 'useDeferredValue', 'useImperativeHandle', 'useLayoutEffect', 'useInsertionEffect', 'useSyncExternalStore', 'useActionState', 'useOptimistic']);
 const REDUX = /^(useSelector|useDispatch|useAppSelector|useAppDispatch)$/;
-const ACTION = /^(set|update|delete|add|remove|open|close|mutate|trigger|toggle|reset|dispatch|handle|submit|checkout)/i;
+const ACTION = /^(set|update|delete|add|remove|open|close|mutate|trigger|toggle|reset|dispatch|handle|submit|checkout|clear)/i;
+const STORE_HOOK = /^use[A-Za-z0-9_$]*Store$/;
 // Conventional collection reads remain candidates: custom methods and callbacks can have side effects.
 const COLLECTION_READS = new Set(['filter', 'slice', 'map', 'flat', 'flatMap', 'concat', 'find', 'findIndex',
   'findLast', 'findLastIndex', 'includes', 'indexOf', 'lastIndexOf', 'some', 'every', 'reduce', 'reduceRight',
@@ -20,7 +21,7 @@ export function extractReactStateDependencies(content: string, self?: string): S
   const dependencies = new Map<string, Dependency>();
   const items: StateDependencyItem[] = [];
   const diagnostics: NonNullable<StateDependencyInfo['diagnostics']> = [];
-  const tracking = new Map<object, Array<{ dependency: Dependency; action: boolean }>>();
+  const tracking = new Map<object, Array<{ dependency: Dependency; action: boolean; property?: string }>>();
   const seenItems = new Set<string>();
   const lines = content.split('\n');
   function add(kind: Dependency['kind'], identifier: string, method = 'react-hook-name', reason = 'Conventional dependency name; runtime identity and behavior are not verified.'): Dependency {
@@ -50,7 +51,7 @@ export function extractReactStateDependencies(content: string, self?: string): S
     const name = value?.imported ?? identifier.text;
     if (name === 'router' && /^@inertiajs\/(react|core)$/.test(value?.source ?? '')) return add('composable', identifier.text, 'inertia-router-import');
     if (value?.source === 'react' || identifier.text === self || BUILTINS.has(name) || name === 'useStore') return;
-    if (REDUX.test(name) || /^use[A-Za-z0-9_$]*Store$/.test(name)) return add('store', identifier.text);
+    if (REDUX.test(name) || STORE_HOOK.test(name)) return add('store', identifier.text);
     if (/^use[A-Z][A-Za-z0-9_$]*$/.test(name)) return add('composable', identifier.text);
   }
   function seed(call: ts.CallExpression, dependency: Dependency, name: string): void {
@@ -59,11 +60,24 @@ export function extractReactStateDependencies(content: string, self?: string): S
       || ts.isAwaitExpression(current.parent) || ts.isNonNullExpression(current.parent)) current = current.parent;
     if (!ts.isVariableDeclaration(current.parent) || current.parent.initializer !== current) return;
     const declaration = current.parent;
-    const bind = (identifier: ts.Identifier, action: boolean) => {
+    const bind = (identifier: ts.Identifier, action: boolean, property?: string) => {
       const value = bindings.binding(identifier);
-      if (value) tracking.set(value, [...(tracking.get(value) ?? []), { dependency, action }]);
+      if (value) tracking.set(value, [...(tracking.get(value) ?? []), { dependency, action, property }]);
     };
-    if (ts.isIdentifier(declaration.name)) bind(declaration.name, name === 'useSetAtom' || /Dispatch$/.test(name));
+    if (ts.isIdentifier(declaration.name)) {
+      const selector = call.arguments[0] && unwrapExpression(call.arguments[0]);
+      let property: string | undefined;
+      if (dependency.kind === 'store' && (name === 'useStore' || STORE_HOOK.test(name)) &&
+        selector && ts.isArrowFunction(selector) && !ts.isBlock(selector.body)) {
+        const parameter = selector.parameters[0]?.name;
+        const projection = unwrapExpression(selector.body);
+        if (parameter && ts.isIdentifier(parameter) && ts.isPropertyAccessExpression(projection) &&
+          ts.isIdentifier(projection.expression) && projection.expression.text === parameter.text) {
+          property = projection.name.text;
+        }
+      }
+      bind(declaration.name, name === 'useSetAtom' || /Dispatch$/.test(name) || !!property && ACTION.test(property), property);
+    }
     else for (const [index, element] of declaration.name.elements.entries()) {
       if (!ts.isBindingElement(element) || !ts.isIdentifier(element.name)) continue;
       const field = element.propertyName?.getText(sf) ?? element.name.text;
@@ -171,7 +185,8 @@ export function extractReactStateDependencies(content: string, self?: string): S
             && (access === node ? tracked.action : !method || !COLLECTION_READS.has(method))
             || ts.isBinaryExpression(access.parent) && access.parent.left === access && access.parent.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && access.parent.operatorToken.kind <= ts.SyntaxKind.LastAssignment
             || (ts.isPrefixUnaryExpression(access.parent) || ts.isPostfixUnaryExpression(access.parent)) && [ts.SyntaxKind.PlusPlusToken, ts.SyntaxKind.MinusMinusToken].includes(access.parent.operator);
-          record(tracked.dependency, node, write ? 'write' : 'read', method ? [method] : undefined);
+          const property = tracked.property ?? method;
+          record(tracked.dependency, node, write ? 'write' : 'read', property ? [property] : undefined);
         }
       }
     }

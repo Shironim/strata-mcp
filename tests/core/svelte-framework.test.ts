@@ -216,10 +216,9 @@ describe('06 - Svelte Framework: Svelte 5 Runes, SFC Parsing, Contracts & Canoni
       // Slots (snippets & children)
       expect(contract.slots).toContain('default');
       expect(contract.slots).toContain('header');
-      expect(contract.slots).toContain('footer');
+      expect(contract.slots).not.toContain('footer');
       expect(contract.slotDetails?.find(slot => slot.name === 'header')).toMatchObject({ isScoped: true, description: 'header snippet' });
       expect(contract.slotDetails?.find(slot => slot.name === 'default')).toMatchObject({ isScoped: false });
-      expect(contract.slotDetails?.find(slot => slot.name === 'footer')).toMatchObject({ isScoped: false, description: 'Template defined snippet' });
 
       // Exposed methods
       expect(contract.exposed).toContain('focusInput');
