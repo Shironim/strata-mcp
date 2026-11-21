@@ -152,9 +152,28 @@ export function formatPatchPlanAsText(plan: PatchPlanResult, retrieval?: Retriev
     '',
   ];
 
+  const declLines: string[] = [];
+  if (plan.targetDeclarations && plan.targetDeclarations.length > 0) {
+    declLines.push('### Target Component Declarations:');
+    for (const decl of plan.targetDeclarations) {
+      if (decl.found && decl.line !== undefined) {
+        declLines.push(
+          `- **[\`${shortFile(decl.file)}#L${decl.line}\`](file://${decl.file}#L${decl.line})** (${decl.kind} \`${decl.symbol}\`): \`${decl.snippet ?? ''}\``
+        );
+      } else if (decl.found) {
+        declLines.push(`- **${decl.kind} \`${decl.symbol}\`:** declared in target contract (line not pinpointed)`);
+      } else {
+        declLines.push(`- **${decl.kind} \`${decl.symbol}\`:** not found in extracted target contract`);
+      }
+    }
+    declLines.push('');
+  }
+
   if (plan.patches.length === 0) {
+    lines.push(...declLines);
     lines.push('No patches found within the analyzed static usages. This does not establish that all affected usages were discovered or supported.');
   } else {
+    lines.push(...declLines);
     lines.push('### Proposed Code Replacements:');
     for (const patch of plan.patches) {
       lines.push(

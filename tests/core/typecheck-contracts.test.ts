@@ -15,15 +15,19 @@ test('boundary contract accepts detected framework identifiers without losing ex
   expect(extractRenderBoundary('/Card.svelte', '<div/>', 'svelte').boundary).toBe('unknown');
 });
 
-test('Svelte slot metadata distinguishes payloads and parameterized snippets from empty slots', async () => {
-  const legacy = await extractSvelteContract('Legacy.svelte', '<slot name="item" value={item}/><slot/>');
+test('Svelte public slots use template nodes and typed props, ignoring comments and local snippets', async () => {
+  const legacy = await extractSvelteContract('Legacy.svelte', '<!-- <slot name="fake"/> --><slot name="item" value={item}/><slot/>');
   expect(legacy.slotDetails).toEqual([
     { name: 'item', isScoped: true, bindings: ['value'] },
     { name: 'default', isScoped: false },
   ]);
-  const snippets = await extractSvelteContract('Snippets.svelte', '{#snippet row(item)}<span>{item}</span>{/snippet}{#snippet footer()}<span>footer</span>{/snippet}');
-  expect(snippets.slotDetails?.find(slot => slot.name === 'row')).toMatchObject({ isScoped: true });
-  expect(snippets.slotDetails?.find(slot => slot.name === 'footer')).toMatchObject({ isScoped: false });
+  const snippets = await extractSvelteContract('Snippets.svelte', `<script lang="ts">
+    let { row, footer }: { row: Snippet<[string]>; footer: string } = $props();
+    </script>
+    {#snippet internal()}<span>internal</span>{/snippet}
+    {@render internal()}`);
+  expect(snippets.slots).toEqual(['row']);
+  expect(snippets.slotDetails?.[0]).toMatchObject({ name: 'row', isScoped: true });
 });
 
 test('sync invalidates the Tier 4 fingerprint at the same package version and removes legacy enrichments', async () => {

@@ -10,7 +10,8 @@ import {
   findComponentUsage,
   formatMatchesAsText,
 } from '../engine/search';
-import { dumpSyntaxTree, executeAstGrep, isPatternParseError } from '../engine/astgrep';
+import { executeAstGrep, isPatternParseError } from '../engine/astgrep';
+import { reportAnalysisProgress } from '../engine/analysis-context';
 import { mapFrontendScope, formatFrontendMapAsText } from '../engine/frontend-map';
 import { findByComponentProp } from '../engine/search-intent';
 import {
@@ -34,6 +35,10 @@ const findCodeToolDefinition: McpToolDefinition = {
       : undefined;
     const language = args.language ? String(args.language) : undefined;
 
+    if (args.action !== undefined && !['search', 'map'].includes(String(args.action))) {
+      return { isError: true, content: [{ type: 'text', text: "Invalid action: must be 'search' or 'map'." }] };
+    }
+
     const rawPropName = args.prop_name ?? args.prop ?? args.propName;
     const rawPropPresence = args.prop_presence ?? args.propPresence;
     if (rawPropName !== undefined || rawPropPresence !== undefined) {
@@ -54,14 +59,14 @@ const findCodeToolDefinition: McpToolDefinition = {
       }
     }
 
-    if (pattern !== undefined && pattern.trim().length === 0 && !args.rule_yaml && !args.component && args.action !== 'map' && args.action !== 'dump_ast') {
+    if (pattern !== undefined && pattern.trim().length === 0 && !args.rule_yaml && !args.component && args.action !== 'map') {
       return { isError: true, content: [{ type: 'text', text: 'Pattern cannot be empty or whitespace only.' }] };
     }
 
     const mode = args.mode ?? 'ast';
     if (!['ast', 'auto', 'literal'].includes(mode) ||
-        (mode !== 'ast' && (!pattern || args.rule_yaml || args.component || args.component_name || args.componentName || args.action === 'dump_ast'))) {
-      return { isError: true, content: [{ type: 'text', text: 'Invalid mode: auto/literal require a pattern search, not YAML, component search, or dump_ast.' }] };
+        (mode !== 'ast' && (!pattern || args.rule_yaml || args.component || args.component_name || args.componentName))) {
+      return { isError: true, content: [{ type: 'text', text: 'Invalid mode: auto/literal require a pattern search, not YAML or component search.' }] };
     }
     let modeUsed = mode === 'literal' ? 'literal' : 'ast';
     let fallbackReason: string | undefined;
@@ -74,11 +79,13 @@ const findCodeToolDefinition: McpToolDefinition = {
       }
       try {
         const targetPath = rawTargetPath ? resolveWorkspacePath(rawTargetPath) : resolveProjectRoot();
+        reportAnalysisProgress(0, 1, 'Mapping frontend workspace scope');
         const result = await mapFrontendScope(targetPath, {
           limit: parseSafePositiveInt(args.limit ?? args.max_results ?? args.maxResults, 100),
           offset: Number.isSafeInteger(args.offset) && args.offset >= 0 ? args.offset : 0,
           excludeDirs: parseStringList(args.exclude_dirs ?? args.excludeDirs),
         });
+        reportAnalysisProgress(1, 1, 'Frontend workspace map ready');
         const payload = result;
         let textOutput = isJson ? JSON.stringify(payload, null, 2) : formatFrontendMapAsText(result);
         return {
@@ -90,17 +97,10 @@ const findCodeToolDefinition: McpToolDefinition = {
       }
     }
 
-    // Mode A: dump_ast
-    if (args.action === 'dump_ast' || (!rawTargetPath && codeSnippet && !pattern && !args.rule_yaml)) {
-      if (!codeSnippet) {
-        return {
-          isError: true,
-          content: [{ type: 'text', text: "Missing required argument 'code' to dump syntax tree." }],
-        };
-      }
-      const tree = await dumpSyntaxTree(codeSnippet, language || 'ts');
+    if (codeSnippet && !pattern && !args.rule_yaml) {
       return {
-        content: [{ type: 'text', text: isJson ? JSON.stringify({ tree }, null, 2) : tree }],
+        isError: true,
+        content: [{ type: 'text', text: "Missing required argument 'pattern' or 'rule_yaml' to test against 'code'." }],
       };
     }
 
@@ -143,6 +143,7 @@ const findCodeToolDefinition: McpToolDefinition = {
       // Mode C: Component usage search
       const componentName = args.component || args.component_name || args.componentName;
       if (componentName) {
+        reportAnalysisProgress(0, 1, `Searching usages of ${String(componentName)}`);
         const matches = await findComponentUsage({
           componentName: String(componentName),
           targetPath,
@@ -150,6 +151,7 @@ const findCodeToolDefinition: McpToolDefinition = {
           maxResults,
           excludeDirs,
         });
+        reportAnalysisProgress(1, 1, `Found ${matches.length} component usage matches`);
         const isTruncated = Boolean(maxResults && matches.length >= maxResults);
         const coverage = maxResults ? { truncated: isTruncated, limit: maxResults, returned: matches.length } : undefined;
         return {
@@ -165,12 +167,14 @@ const findCodeToolDefinition: McpToolDefinition = {
 
       // Mode D: YAML rule search
       if (args.rule_yaml) {
+        reportAnalysisProgress(0, 1, 'Running YAML AST rule search across workspace');
         const matches = await findCodeByRule({
           rule: String(args.rule_yaml),
           targetPath,
           maxResults,
           excludeDirs,
         });
+        reportAnalysisProgress(1, 1, `Rule search completed (${matches.length} matches)`);
         const isTruncated = Boolean(maxResults && matches.length >= maxResults);
         const coverage = maxResults ? { truncated: isTruncated, limit: maxResults, returned: matches.length } : undefined;
         return {
@@ -187,6 +191,7 @@ const findCodeToolDefinition: McpToolDefinition = {
       // Mode E: Pattern search
       if (pattern) {
         const options = { pattern, targetPath, language, maxResults, excludeDirs };
+        reportAnalysisProgress(0, 1, `Searching workspace (${mode})`);
         let matches;
         if (mode === 'literal') {
           matches = await findLiteralCode(options);
@@ -202,6 +207,7 @@ const findCodeToolDefinition: McpToolDefinition = {
             matches = await findLiteralCode(options);
           }
         }
+        reportAnalysisProgress(1, 1, `Search completed (${matches.length} matches)`);
         const isTruncated = Boolean(maxResults && matches.length >= maxResults);
         const coverage = maxResults ? { truncated: isTruncated, limit: maxResults, returned: matches.length } : undefined;
         const noMatchHint = !isJson && matches.length === 0
@@ -248,7 +254,7 @@ export const findCodeTool: McpToolDefinition = withRetrievalEvidence(findCodeToo
     const component = args.component || args.component_name || args.componentName;
     const propName = args.prop_name ?? args.prop ?? args.propName;
     const propPresence = args.prop_presence ?? args.propPresence;
-    const action = args.action === 'map' ? 'map' : args.action === 'dump_ast' || (!rawPath && snippet && !pattern && !args.rule_yaml) ? 'dump_ast' : 'search';
+    const action = args.action === 'map' ? 'map' : 'search';
     return {
       workspace: scope ? findProjectRoot(scope) : null, scope, policy: `find-code-${action}-v1`,
       ...(snippet ? { inputHash: hashRetrievalIdentity({ encoding: 'utf-8', content: snippet }) } : {}),

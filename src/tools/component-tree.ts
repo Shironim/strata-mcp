@@ -85,33 +85,8 @@ const componentTreeToolDefinition: McpToolDefinition = {
       const scopeFilter = rawScopeFilter ? String(rawScopeFilter) : undefined;
       const aliasMap = parseAliasMapInput(args.alias_map ?? args.aliasMap ?? args.alias);
 
-      const { isWorkspaceIndexed } = await import('../engine/storage/schema');
-      if (!isWorkspaceIndexed(targetPath)) {
-        const isJson = args.output_format === 'json' || args.format === 'json';
-        const notIndexedPayload = {
-          status: 'NOT_INDEXED',
-          workspace_root: targetPath,
-          suggested_action: {
-            cli: 'strata init',
-            tool: 'find_code',
-            params: { action: 'map' },
-          },
-          message: "Workspace has not been indexed by Strata yet. Run 'strata init' first in the terminal or call the approved initialization tool.",
-        };
-        return {
-          content: [
-            {
-              type: 'text',
-              text: isJson
-                ? JSON.stringify(notIndexedPayload, null, 2)
-                : `[strata NOT_INDEXED] ${notIndexedPayload.message}`,
-            },
-          ],
-        };
-      }
-
-      // Freshness preflight: ensure cached SQLite graph matches current disk state
-      const before = await prepareIndexedAnalysis(targetPath);
+      // Freshness preflight: refresh if indexed, or fall back to source traversal on unindexed workspaces
+      const before = await prepareIndexedAnalysis(targetPath, true);
 
       const tree = await getComponentTree({
         skipSync: true,

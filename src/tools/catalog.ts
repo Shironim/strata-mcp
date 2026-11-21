@@ -47,7 +47,7 @@ inputSchema: {
       },
       prop_name: {
         type: 'string',
-        description: 'Prop name to analyze across Vue component usages or omissions (requires component, e.g. "title"; alias: prop). Requires an unambiguous exact component basename in path scope. Returns usages or resolved static render omissions plus indeterminate supply counts.',
+        description: 'Prop name to analyze across component usages or omissions (Vue, React/JSX, Svelte, Astro; requires component, e.g. "title"; alias: prop). Requires an unambiguous exact component basename in path scope. Returns usages or resolved static render omissions plus indeterminate supply counts.',
       },
       prop_presence: {
         type: 'string',
@@ -71,7 +71,7 @@ inputSchema: {
         type: 'string',
         enum: ['auto', 'vue', 'astro', 'ts', 'js', 'tsx', 'jsx', 'html', 'css'],
         description:
-          'Parser hint. Disk searches infer languages from source files and Vue/Astro blocks. Snippet pattern searches and CST dumps default to ts; specify tsx/jsx/html for those syntaxes. Explicit auto uses a tag heuristic, not full language detection. YAML rules specify their own language.',
+          'Parser hint. Disk searches infer languages from source files and Vue/Astro blocks. Snippet pattern searches default to ts; specify tsx/jsx/html for those syntaxes. Explicit auto uses a tag heuristic, not full language detection. YAML rules specify their own language.',
       },
       scope: {
         type: 'string',
@@ -298,7 +298,7 @@ inputSchema: {
       direction: {
         type: 'string',
         enum: ['consumers', 'dependencies', 'both'],
-        description: 'Direction for multi-hop tracing (default: "both")',
+        description: 'Traversal direction: defaults to "consumers" at depth 1 (direct impact), or "both" when depth > 1 (chain mode). Passing "dependencies" or "both" at depth 1 also runs chain mode.',
       },
       format: {
         type: 'string',
@@ -502,9 +502,9 @@ const routing: Record<string, { alternative: string; example: Record<string, unk
 
 for (const tool of TOOL_CATALOG) {
   tool.inputSchema.properties ??= {};
-  tool.inputSchema.properties.response_detail = { type: 'string', enum: ['summary', 'full'], default: 'summary',
-    description: 'Explicit layered output: summary (recommended default for initial discovery) returns counts/previews and preserves evidence, risks and diagnostics; repeat the original request with full for primary analysis or exact source slices. Summary is not a continuation page or exact source.' };
+  tool.inputSchema.properties.response_detail = { type: 'string', enum: ['summary', 'full'], default: 'full',
+    description: 'Explicit layered output: "full" (default, primary analysis or exact source slices) or "summary" (counts/previews with preserved evidence, risks and diagnostics; repeat the original request with full before editing). Summary is not a continuation page or exact source.' };
   const guide = routing[tool.name]!;
   tool.description += ` ${guide.alternative} Example input: ${JSON.stringify(guide.example)}. Analysis does not modify application source; internal cache/index and telemetry may be updated.`;
-  tool.annotations = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true };
+  tool.annotations = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 }

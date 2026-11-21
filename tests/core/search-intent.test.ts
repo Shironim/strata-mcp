@@ -73,8 +73,14 @@ test('prop_presence omitted returns exact resolved render refs, preserves uncert
       expect((await findCodeTool.handler({ ...args, ...extra })).content[0]!.text).toContain('PROP_SELECTOR_CONFLICT');
     expect((await findCodeTool.handler({ ...args, path: join(root, 'Child.vue') })).content[0]!.text).toContain('INVALID_PROP_SEARCH_SCOPE');
     expect((await findCodeTool.handler({ ...args, component: 'Missing' })).content[0]!.text).toContain('PROP_COMPONENT_NOT_FOUND');
-    await writeFile(join(root, 'Other.svelte'), '<script>export let prop;</script>');
-    expect((await findCodeTool.handler({ ...args, component: 'Other' })).content[0]!.text).toContain('UNSUPPORTED_PROP_SEARCH_FRAMEWORK');
+    await writeFile(join(root, 'Other.svelte'), '<script>export let title = "";</script><div>{title}</div>');
+    await writeFile(join(root, 'SvelteParent.svelte'), '<script>import Other from "./Other.svelte";</script><Other title="hi"/><Other {...extra}/><Other/>');
+    const svelteRes = await findCodeTool.handler({ ...args, component: 'Other', prop_presence: 'present' });
+    expect(svelteRes.isError).not.toBe(true);
+    expect((svelteRes.structuredContent as any).matches.map((m: any) => m.resolution)).toEqual(['resolved', 'candidate']);
+    const svelteOmit = await findCodeTool.handler({ ...args, component: 'Other', prop_presence: 'omitted' });
+    expect((svelteOmit.structuredContent as any).matches).toHaveLength(1);
+    expect((svelteOmit.structuredContent as any).coverage.propSupply.indeterminateRenderCount).toBe(1);
     await mkdir(join(root, 'nested'));
     await writeFile(join(root, 'nested/Child.vue'), '<template><div/></template>');
     expect((await findCodeTool.handler(args)).content[0]!.text).toContain('AMBIGUOUS_PROP_COMPONENT');
@@ -109,9 +115,15 @@ test('component + prop_name searches return visible query, candidate boundaries,
     expect(ambiguous.isError).toBe(true);
     expect(ambiguous.content[0]!.text).toContain('AMBIGUOUS_PROP_COMPONENT');
     expect((await findCodeTool.handler({ ...args, component: 'Missing' })).isError).toBe(true);
-    await writeFile(join(root, 'AstroChild.astro'), '--- ---');
-    const unsupported = await findCodeTool.handler({ ...args, component: 'AstroChild' });
-    expect(unsupported.content[0]!.text).toContain('UNSUPPORTED_PROP_SEARCH_FRAMEWORK');
+    await writeFile(join(root, 'AstroChild.astro'), '---\ninterface Props { title?: string; }\n---\n<div>{Astro.props.title}</div>');
+    await writeFile(join(root, 'AstroParent.astro'), '---\nimport AstroChild from "./AstroChild.astro";\nconst title = "astro-prop";\n---\n<AstroChild client:load {title} /><AstroChild {...attrs} /><AstroChild />');
+    const astroUsages = await findCodeTool.handler({ ...args, component: 'AstroChild' });
+    expect(astroUsages.isError).not.toBe(true);
+    expect((astroUsages.structuredContent as any).matches.map((m: any) => m.resolution)).toEqual(['resolved', 'candidate']);
+    expect((astroUsages.structuredContent as any).matches[0].snippet).toBe('{title}');
+    const astroOmit = await findCodeTool.handler({ ...args, component: 'AstroChild', prop_presence: 'omitted' });
+    expect((astroOmit.structuredContent as any).matches).toHaveLength(1);
+    expect((astroOmit.structuredContent as any).coverage.propSupply.indeterminateRenderCount).toBe(1);
 
     // React TSX component prop search support
     await writeFile(join(root, 'ReactChild.tsx'), 'export function ReactChild(props: { title: string }) { return <div>{props.title}</div>; }');

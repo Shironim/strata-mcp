@@ -152,4 +152,28 @@ describe('patch plan runtime validation', () => {
     expect(vuePatches[0].newSnippet).toBe('title="Hi"');
     expect(vuePatches[1].newSnippet).toBe('@tap="handle"');
   });
+
+  it('reports hash-bound targetDeclarations for declared symbols and found: false for undeclared symbols', async () => {
+    writeFileSync(componentPath, '<script setup lang="ts">\ndefineProps<{ label: string }>();\n</script>\n<template><button>{{ label }}</button></template>');
+    const foundPlan = await generatePatchPlan({ componentPath, refactorType: 'rename_prop', oldName: 'label', newName: 'title' });
+    expect(foundPlan.targetDeclarations).toHaveLength(1);
+    expect(foundPlan.targetDeclarations?.[0]).toMatchObject({
+      refactorType: 'rename_prop',
+      symbol: 'label',
+      kind: 'prop',
+      found: true,
+      file: componentPath,
+    });
+    expect(foundPlan.targetDeclarations?.[0].line).toBeGreaterThan(0);
+    expect(foundPlan.targetDeclarations?.[0].sourceRef?.sha256).toMatch(/^[a-f0-9]{64}$/);
+
+    const missingPlan = await generatePatchPlan({ componentPath, refactorType: 'rename_prop', oldName: 'nonExistentProp', newName: 'other' });
+    expect(missingPlan.targetDeclarations?.[0]).toMatchObject({
+      refactorType: 'rename_prop',
+      symbol: 'nonExistentProp',
+      kind: 'prop',
+      found: false,
+      file: componentPath,
+    });
+  });
 });

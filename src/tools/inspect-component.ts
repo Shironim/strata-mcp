@@ -9,7 +9,7 @@ import { basename, extname, relative, isAbsolute, resolve } from 'node:path';
 import { collectFiles } from '../engine/collector';
 import { auditEventHandlers, formatEventHandlerAuditAsText } from '../engine/reactivity';
 import { extractComponentContract, formatContractAsText } from '../engine/contract';
-import { formatOutlineAsText } from '../engine/outline';
+import { extractComponentOutline, formatOutlineAsText } from '../engine/outline';
 import { resolveWorkspacePath, findProjectRoot, PROJECT_ROOT_MARKERS } from '../engine/path-resolver';
 import { readSourceSnapshot, readSourceFile } from '../engine/source-file';
 import { derivedRetrievalEvidence, formatRetrievalEvidence } from '../engine/retrieval-evidence';
@@ -112,6 +112,7 @@ const inspectComponentToolDefinition: McpToolDefinition = {
         const boundaryOmission = renderBoundaryOmission(contract.renderBoundary);
         if (boundaryOmission) omissions.push(boundaryOmission);
         omissions.push(...(contract.projectContext?.diagnostics ?? []));
+        omissions.push(...(contract.boundaryDiagnostics ?? []));
 
         if (contract.unresolvedTypes && contract.unresolvedTypes.length > 0) {
           for (const unres of contract.unresolvedTypes) {
@@ -233,6 +234,8 @@ const inspectComponentToolDefinition: McpToolDefinition = {
         break;
       }
 
+      const guidance = !isJson ? await formatEmptyContractGuidance(filePath, contract!, wsRoot) : '';
+
       if (auditEvents) {
         if (isJson) {
           return {
@@ -261,13 +264,13 @@ const inspectComponentToolDefinition: McpToolDefinition = {
           content: [
             {
               type: 'text',
-              text: `${contractText}\n\n${auditText}\n\n${formatRetrievalEvidence(retrieval!)}`,
+              text: [contractText, guidance, auditText, formatRetrievalEvidence(retrieval!)].filter(Boolean).join('\n\n'),
             },
           ],
         };
       }
 
-      const contractText = [formatContractAsText(contract!), contract?.propImpact ? formatPropImpactAsText(contract.propImpact) : '',
+      const contractText = [formatContractAsText(contract!), guidance, contract?.propImpact ? formatPropImpactAsText(contract.propImpact) : '',
         formatRetrievalEvidence(retrieval!)].filter(Boolean).join('\n\n');
       return {
         structuredContent: { ...contract, retrieval },
@@ -302,6 +305,36 @@ export const inspectComponentTool: McpToolDefinition = withRetrievalEvidence(ins
     if (page.path === 'propImpact.props' && Array.isArray(data.props) && data.propImpact) {
       return [formatContractAsText(data as any), formatPropImpactAsText(data.propImpact)].filter(Boolean).join('\n\n');
     }
-    return undefined;
+  return undefined;
   },
 });
+
+async function formatEmptyContractGuidance(filePath: string, contract: ComponentContract, wsRoot: string): Promise<string> {
+  const hasPublicInterface =
+    contract.props.length > 0 ||
+    contract.emits.length > 0 ||
+    contract.slots.length > 0 ||
+    (contract.models?.length ?? 0) > 0 ||
+    (contract.exposed?.length ?? 0) > 0;
+  if (hasPublicInterface) return '';
+
+  const lines: string[] = [];
+  try {
+    const outline = await extractComponentOutline(filePath, { path: filePath, workspaceRoot: wsRoot, resolveCalls: false });
+    if (outline.functions.length > 0) {
+      const preview = outline.functions
+        .slice(0, 10)
+        .map(fn => `${fn.name} (L${fn.startLine}-L${fn.endLine})`)
+        .join(', ');
+      const suffix = outline.functions.length > 10 ? `, +${outline.functions.length - 10} more` : '';
+      lines.push(`Internal symbols (${outline.functions.length}): ${preview}${suffix}`);
+    }
+  } catch {
+    // Best-effort outline summary; keep contract inspection resilient.
+  }
+
+  lines.push(
+    'Hint: No public props/emits/slots declared (typical for page/container files). Use `outline: true`, `symbol: "<name>"`, `sfc_sections: true`, or `audit_events: true` to inspect internal logic without reading the full file.'
+  );
+  return lines.join('\n');
+}

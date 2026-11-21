@@ -24,7 +24,6 @@ test('manifest declares every audit target and patch operation in the public cat
 
 test('capability identifies actual selectors and aliases instead of treating view as audit operation', () => {
   const cases: Array<[string, Record<string, unknown>, string]> = [
-    ['find_code', { code_snippet: '<div />' }, 'dump_ast'],
     ['find_code', { component_name: 'Child' }, 'component'],
     ['find_code', { component: 'Child', prop_name: 'title' }, 'component-prop'],
     ['find_code', { code: 'x', pattern: 'x', mode: 'literal', component: 'Ignored' }, 'literal'],

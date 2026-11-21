@@ -25,7 +25,7 @@ export function describeResultSelection(tool: string, args: Record<string, any>,
   switch (tool) {
     case 'find_code':
       subject = operation === 'map' ? 'inventory-files' : 'search-matches';
-      collections = operation === 'map' ? ['files'] : operation === 'dump_ast' ? [] : ['matches'];
+      collections = operation === 'map' ? ['files'] : ['matches'];
       break;
     case 'inspect_component':
       subject = operation === 'symbol' ? 'selected-symbol' : `component-${operation}`;

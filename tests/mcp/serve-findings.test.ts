@@ -141,11 +141,6 @@ describe('strata serve bug fixes (SERVE-01 to SERVE-05)', () => {
         content: [{ type: 'text', text: 'No matches found.' }],
       };
       expect(extractItemsFound('find_code', {}, noMatchesRes)).toBe(0);
-
-      const astDumpRes = {
-        content: [{ type: 'text', text: 'Program\n  FunctionDeclaration' }],
-      };
-      expect(extractItemsFound('find_code', { action: 'dump_ast' }, astDumpRes)).toBeUndefined();
     });
 
     it('records non-zero items_found in telemetry for find_code', async () => {

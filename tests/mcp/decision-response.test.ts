@@ -73,7 +73,8 @@ test('tools/list publishes annotations and valid example inputs without loading 
     const result = await handler({ method: 'tools/list', params: {} });
     expect(result.tools).toHaveLength(6);
     for (const tool of result.tools) {
-      expect(tool.annotations).toMatchObject({ readOnlyHint: true, destructiveHint: false });
+      expect(tool.annotations).toMatchObject({ readOnlyHint: true, destructiveHint: false, openWorldHint: false });
+      expect(tool.inputSchema.properties.response_detail.default).toBe('full');
       expect(tool.description).toContain('Example input:');
       expect(tool.description).toContain('Use ');
     }

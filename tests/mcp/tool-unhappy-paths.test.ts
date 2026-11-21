@@ -40,22 +40,21 @@ describe('MCP Tools Unhappy Paths & Edge Cases Suite', () => {
       expect(res.content[0].text).toContain('Pattern cannot be empty or whitespace only');
     });
 
-    it('rejects invalid mode combinations (e.g. mode: "literal" with dump_ast)', async () => {
+    it('rejects unsupported action (e.g. action: "dump_ast")', async () => {
       const res = await callTool('find_code', {
         action: 'dump_ast',
-        mode: 'literal',
         code: 'const a = 1;',
       });
       expect(res.isError).toBe(true);
-      expect(res.content[0].text).toContain('Invalid mode');
+      expect(res.content[0].text).toContain("Invalid action: must be 'search' or 'map'.");
     });
 
-    it('rejects action: "dump_ast" when code argument is missing', async () => {
+    it('rejects code snippet without pattern or rule_yaml', async () => {
       const res = await callTool('find_code', {
-        action: 'dump_ast',
+        code: 'const a = 1;',
       });
       expect(res.isError).toBe(true);
-      expect(res.content[0].text).toContain("Missing required argument 'code'");
+      expect(res.content[0].text).toContain("Missing required argument 'pattern' or 'rule_yaml'");
     });
 
     it('accepts action: "map" even when client passes default mode: "ast"', async () => {

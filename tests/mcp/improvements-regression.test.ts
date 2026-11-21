@@ -425,7 +425,7 @@ describe('Strata MCP Server Improvements Regression Suite', () => {
       }
     });
 
-    it('preserves earliest script line number in getFileStateDependencies instead of template write line', async () => {
+    it('reports the template write line alongside its mutator snippet in file state dependencies', async () => {
       const tempDir = mkdtempSync(join(tmpdir(), 'strata-b4-line-'));
       try {
         mkdirSync(join(tempDir, 'src'), { recursive: true });
@@ -441,8 +441,11 @@ describe('Strata MCP Server Improvements Regression Suite', () => {
 
         const fileDeps = await queryFileStateDeps(tempDir, pagePath);
         const txDep = fileDeps.dependencies.find((d) => d.identifier === 'useTransactions');
-        expect(txDep?.role).toBe('mutator');
-        expect(txDep?.lineNumber).toBe(3);
+        expect(txDep).toMatchObject({
+          role: 'mutator',
+          lineNumber: 21,
+          usageSnippet: 'tx.submit()',
+        });
       } finally {
         closeWorkspaceDatabase(tempDir);
         rmSync(tempDir, { recursive: true, force: true });

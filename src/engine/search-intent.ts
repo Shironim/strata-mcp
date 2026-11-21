@@ -43,7 +43,7 @@ export async function findByComponentProp(input: ComponentPropQueryInput, worksp
   if (candidates.length > 1) throw new Error(`AMBIGUOUS_PROP_COMPONENT: narrow path to select one target. Candidates: ${candidates.join(', ')}`);
   if (!candidates.length) throw new Error('PROP_COMPONENT_NOT_FOUND: no component with that exact basename was discovered in scope. Check path, spelling and ignore rules; this does not establish runtime absence.');
   const target = candidates[0]!;
-  if (!/\.(vue|tsx|jsx)$/.test(target)) throw new Error('UNSUPPORTED_PROP_SEARCH_FRAMEWORK: component prop supply search currently analyzes Vue and React/JSX templates only; use explicit search for this target.');
+  if (!/\.(vue|tsx|jsx|svelte|astro)$/.test(target)) throw new Error('UNSUPPORTED_PROP_SEARCH_FRAMEWORK: component prop supply search currently analyzes Vue, React/JSX, Svelte, and Astro templates only; use explicit search for this target.');
   const impact = await analyzePropImpact({ target, workspace: scope,
     props: [{ name: parsed.prop, required: false, type: 'unknown' }], detail: 'full' });
   const matches = [];

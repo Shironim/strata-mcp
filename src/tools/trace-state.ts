@@ -2,7 +2,8 @@ import { toolMetadata } from './catalog';
 import { withRetrievalEvidence } from './retrieval-response';
 import { indexedRetrievalEvidence } from '../engine/index-retrieval-evidence';
 import { formatRetrievalEvidence } from '../engine/retrieval-evidence';
-import { prepareIndexedAnalysis } from '../engine/prepare-index';
+import { prepareIndexedAnalysis, isWorkspaceIndexed } from '../engine/prepare-index';
+import { buildNotIndexedResponse } from './not-indexed-response';
 import fs from 'node:fs';
 import {
   queryStateImpact,
@@ -89,28 +90,8 @@ const traceStateToolDefinition: McpToolDefinition = {
       const isJson = args.output_format === 'json' || args.format === 'json';
       const role = (args.role as 'all' | 'mutators' | 'readers') || 'all';
 
-      const { isWorkspaceIndexed } = await import('../engine/storage/schema');
       if (!isWorkspaceIndexed(targetPath)) {
-        const notIndexedPayload = {
-          status: 'NOT_INDEXED',
-          workspace_root: targetPath,
-          suggested_action: {
-            cli: 'strata init',
-            tool: 'find_code',
-            params: { action: 'map' },
-          },
-          message: "Workspace has not been indexed by Strata yet. Run 'strata init' first in the terminal or call the approved initialization tool.",
-        };
-        return {
-          content: [
-            {
-              type: 'text',
-              text: isJson
-                ? JSON.stringify(notIndexedPayload, null, 2)
-                : `[strata NOT_INDEXED] ${notIndexedPayload.message}`,
-            },
-          ],
-        };
+        return buildNotIndexedResponse(targetPath, isJson);
       }
 
       const depth = parseSafePositiveInt(args.depth ?? args.max_depth ?? args.maxDepth, 1) ?? 1;

@@ -10,6 +10,8 @@ import { normalizeAuditTarget, parseStringList, resolveProjectRoot, VALID_AUDIT_
 import type { RouteFramework } from '../types';
 import type { McpToolDefinition } from './types';
 import { analyzeFrontend, formatFrontendAudit, type AuditTarget } from '../engine/frontend-audit';
+import { isWorkspaceIndexed } from '../engine/prepare-index';
+import { buildNotIndexedResponse } from './not-indexed-response';
 
 const auditFrontendToolDefinition: McpToolDefinition = {
   ...toolMetadata('audit_frontend'),
@@ -36,6 +38,9 @@ const auditFrontendToolDefinition: McpToolDefinition = {
       }
 
       const isJson = args.output_format === 'json' || args.format === 'json';
+      if ((target === 'dead-state' || target === 'all') && !isWorkspaceIndexed(targetPath)) {
+        return buildNotIndexedResponse(targetPath, isJson);
+      }
       const excludeDirs = parseStringList(args.exclude_dirs ?? args.excludeDirs);
       const ignorePatterns = parseStringList(args.ignore_patterns ?? args.ignorePatterns);
       const includePages = Boolean(args.include_pages ?? args.includePages);

@@ -3,6 +3,8 @@ import { isWorkspaceIndexed } from './storage/schema';
 import { observeRetrievalIndex, type IndexObservation } from './index-retrieval-evidence';
 import { checkAnalysisCancelled } from './analysis-context';
 
+export { isWorkspaceIndexed };
+
 /** Optional preparation preserves source-only operations on uninitialized workspaces. */
 export async function prepareIndexedAnalysis(workspace: string, optional = false): Promise<IndexObservation | null> {
   checkAnalysisCancelled();

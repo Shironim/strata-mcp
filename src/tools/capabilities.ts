@@ -11,9 +11,8 @@ const audit = (id: string, reason: string): CapabilityOperation => ({ id, source
 /** Declared implementation scope, not framework certification. No I/O or version inference. */
 export const CAPABILITY_MANIFEST: Readonly<Record<string, readonly CapabilityOperation[]>> = {
   find_code: [
-    { id: 'component-prop', source: 'src/engine/search-intent.ts', features: [feature('prop-supply', 'partial', 'Structured Vue and React/JSX component-prop usage and omission search (component + prop_name + prop_presence); target must be unambiguous in scope. Omission matches exclude indeterminate supply and candidate renders.')] },
+    { id: 'component-prop', source: 'src/engine/search-intent.ts', features: [feature('prop-supply', 'partial', 'Structured Vue, React/JSX, Svelte, and Astro component-prop usage and omission search (component + prop_name + prop_presence); target must be unambiguous in scope. Omission matches exclude indeterminate supply and candidate renders.')] },
     { id: 'map', source: 'src/engine/frontend-map.ts', features: [feature('file-inventory', 'partial', 'Bounded frontend path inventory; ignore rules and scope exclude files.')] },
-    { id: 'dump_ast', source: 'src/tools/find-code.ts', features: [feature('syntax-tree', 'partial', 'Uses the selected ast-grep language; parser acceptance is not semantic correctness.')] },
     ...['ast', 'auto', 'literal', 'yaml', 'component'].map(id => ({ id, source: 'src/engine/search.ts', features: [
       feature('matches', 'partial', id === 'literal' ? 'Exact case-sensitive substring per line, without regex or semantic interpretation.' : 'Selected structural syntax or component usages; no completeness guarantee across unsupported syntax.'),
       feature('natural-language', 'unsupported', 'Use pattern, component or rule_yaml. Arbitrary natural-language interpretation is not implemented.'),
@@ -29,7 +28,7 @@ export const CAPABILITY_MANIFEST: Readonly<Record<string, readonly CapabilityOpe
     { id: 'contract', source: 'src/engine/contract.ts', features: [
       ...['props', 'emits', 'slots', 'state'].map(id => feature(id, 'partial', 'Static extraction varies by syntax and framework; imported/dynamic definitions may remain unresolved.')),
       feature('imported-composable-api', 'partial', 'Direct calls to named or default local use-prefixed hooks are inspected within the selected function declaration or arrow/function initializer. Unused imports, shadowed names, module-level endpoints and other functions are excluded. Re-exports, helper call chains and dynamic invocation are not resolved; extracted endpoints do not prove runtime execution.'),
-      feature('consumer-count-per-prop', 'partial', 'Opt-in impact summary/full counts explicit static Vue and React/JSX usages and separates candidates; scope/runtime/config closure remains incomplete. Astro and Svelte targets are unsupported by impact analysis.'),
+      feature('consumer-count-per-prop', 'partial', 'Opt-in impact summary/full counts explicit static Vue, React/JSX, Svelte, and Astro usages and separates candidates; scope/runtime/config closure remains incomplete.'),
     ] },
   ],
   get_component_tree: ['downward', 'upward'].map(id => ({ id, source: `src/engine/graph/${id}-traversal.ts`, features: [boundedGraph] })),
@@ -57,7 +56,6 @@ export function selectCapabilityOperation(tool: string, args: Record<string, any
       const code = args.code || args.code_snippet;
       const pattern = args.pattern || args.query || args.search;
       if (args.action === 'map') return 'map';
-      if (args.action === 'dump_ast' || (!path && code && !pattern && !args.rule_yaml)) return 'dump_ast';
       if (code && args.rule_yaml) return 'yaml';
       if (code && pattern) return String(args.mode ?? 'ast');
       if (args.component || args.component_name || args.componentName) return 'component';
