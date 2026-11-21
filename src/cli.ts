@@ -1,477 +1,236 @@
 #!/usr/bin/env bun
-import { inspectFromCli } from './cli/inspect';
-import { readSourceFile } from './engine/source-file';
-import { mapFrontendScope, formatFrontendMapAsText } from './engine/frontend-map';
-import { findCodeTool } from './tools/find-code';
-import { existsSync, statSync } from 'node:fs';
-import { findCodeByRule, findComponentUsage, formatMatchesAsText } from './engine/search';
-import { getComponentTree, formatTreeAsText, formatTreeAsMermaid } from './engine/tree';
-import { scanRoutes, formatRoutesAsText } from './engine/routes';
-import { generatePatchPlan } from './engine/patch-plan';
-import { extractWorkspaceApiContracts, formatApiContractsAsText } from './engine/api-contract';
-import { formatStateImpactAsText, formatUnusedStateAsText, findUnusedState, queryStateImpact, syncWorkspace, closeAllDatabases, traceStateChain, formatStateChainAsText } from './engine/database';
+import { resolve } from 'node:path';
+import {
+  defaultSemanticPool,
+  defaultWarmDbPool,
+  syncWorkspaceV3,
+} from './engine/v2';
+import {
+  inspectFileTool,
+  mapWorkspaceTool,
+  queryGraphTool,
+  readSliceTool,
+  searchCodeTool,
+} from './tools';
 import { handleStrataInit } from './cli/commands/init';
-import { normalizeAuditTarget, parseAliasMapInput, parseSafePositiveInt, parseStringList, VALID_AUDIT_TARGETS } from './engine/path-resolver';
+import { parseSafePositiveInt, parseStringList } from './engine/path-resolver';
 import { STRATA_VERSION } from './version';
 import { StrataTelemetry, formatSummaryAsText } from './engine/telemetry';
-import type { PatchRefactorType, RouteFramework } from './types';
 import { printRootHelp, printCommandHelp } from './cli/help';
 import { parseStringFlag, parseArgs } from './cli/arguments';
-import { analyzeFrontend, formatFrontendAudit, type AuditTarget } from './engine/frontend-audit';
 
 export { printRootHelp } from './cli/help';
 export { printCommandHelp } from './cli/help';
 export { BOOLEAN_FLAGS } from './cli/arguments';
 export { parseStringFlag } from './cli/arguments';
 
-/**
- * Parses a comma-separated `--alias prefix=path` value into an alias map.
- * Example: `@/=resources/js/,@components/=src/components/`.
- */
-function parseAliasMap(raw: string | boolean | undefined): Record<string, string> | undefined {
-  return parseAliasMapInput(raw);
-}
-
-async function runFindCodeFromCli(toolArgs: Record<string, unknown>, isJson: boolean): Promise<void> {
-  const result = await findCodeTool.handler({
-    ...toolArgs,
-    format: isJson ? 'json' : 'text',
-  });
-  if (result.isError) throw new Error(result.content[0]?.text ?? 'Search failed');
-  console.log(result.content[0]?.text ?? '');
+function printToolResponse(res: { isError?: boolean; content: Array<{ text?: string }> }): void {
+  const text = res.content.map((c) => c.text ?? '').join('\n');
+  if (res.isError) {
+    console.error(text);
+    process.exit(1);
+  }
+  console.log(text);
 }
 
 export async function main(argv: string[] = process.argv.slice(2)) {
   const { flags, positional } = parseArgs(argv);
-  const command = positional[0];
 
-  if (flags.version) {
-    console.log(`strata v${STRATA_VERSION}`);
+  if (flags.version || flags.v) {
+    console.log(STRATA_VERSION);
     return;
   }
 
-  if (flags.help || !command || command === 'help') {
-    const targetCommand = command === 'help' ? positional[1] : command;
-    if (targetCommand) {
-      printCommandHelp(targetCommand);
+  const command = positional[0];
+  const isJson = Boolean(flags.json);
+
+  if (!command || command === 'help' || (command && (flags.help || flags.h))) {
+    if (command && command !== 'help') {
+      printCommandHelp(command);
     } else {
       printRootHelp();
     }
     return;
   }
 
-  const targetPath = typeof flags.path === 'string' && flags.path.trim() ? flags.path.trim() : '.';
-  const isJson = Boolean(flags.json);
+  if (command === 'serve') {
+    const { startMcpServer } = await import('./mcp');
+    await startMcpServer();
+    return;
+  }
 
   try {
-    if (command === 'serve') {
-      const { runServer } = await import('./mcp');
-      await runServer();
-      return;
-    }
-
-    if (command === 'init') {
-      if ('path' in flags && (flags.path === true || typeof flags.path !== 'string' || !flags.path.trim())) {
-        console.error("Error: Flag '--path' requires a non-empty path argument.");
-        process.exit(1);
-      }
-      if ('p' in flags && (flags.p === true || typeof flags.p !== 'string' || !flags.p.trim())) {
-        console.error("Error: Flag '-p' requires a non-empty path argument.");
-        process.exit(1);
-      }
-      if ('harness' in flags && (flags.harness === true || typeof flags.harness !== 'string' || !flags.harness.trim())) {
-        console.error("Error: Flag '--harness' requires a valid harness value.");
-        process.exit(1);
-      }
-      if ('agent' in flags && (flags.agent === true || typeof flags.agent !== 'string' || !flags.agent.trim())) {
-        console.error("Error: Flag '--agent' requires a valid harness value.");
-        process.exit(1);
-      }
-      const candidatePath = positional[1];
-      if (candidatePath !== undefined && (!candidatePath || !candidatePath.trim())) {
-        console.error("Error: Target workspace path cannot be empty.");
-        process.exit(1);
-      }
-      const initPath = (candidatePath && !candidatePath.startsWith('-')) ? candidatePath : targetPath;
-      await handleStrataInit({
-        cwd: initPath,
-        force: Boolean(flags.force || flags.f),
-        harness: flags.harness ? String(flags.harness) : (flags.agent ? String(flags.agent) : undefined),
-        yes: Boolean(flags.yes || flags.y),
-      });
-      return;
-    }
-
-    if (command === 'search' || command === 'find') {
-      if (flags.map) {
-        await runFindCodeFromCli({
-          action: 'map',
-          path: (positional[1] && !positional[1].startsWith('-')) ? positional[1] : targetPath,
-          limit: parseSafePositiveInt(flags.limit, 100),
-          offset: parseSafePositiveInt(flags.offset, 0) ?? 0,
-          exclude_dirs: parseStringList(flags['exclude-dirs'] ?? flags.excludeDirs),
-        }, isJson);
-        return;
-      }
-      const componentName = parseStringFlag(flags.component ?? flags.componentName);
-      if (componentName) {
-        const usageTarget = (positional[1] && !positional[1].startsWith('-')) ? positional[1] : targetPath;
-        const scope =
-          flags.scope === 'template' || flags.scope === 'script' || flags.scope === 'both'
-            ? flags.scope
-            : 'both';
-        await runFindCodeFromCli({
-          path: usageTarget,
-          component: componentName,
-          scope,
-          max_results: parseSafePositiveInt(flags.limit, 200),
-        }, isJson);
-        return;
+    switch (command) {
+      case 'init': {
+        const targetDir = parseStringFlag(flags.path ?? flags.p) ?? positional[1] ?? process.cwd();
+        await handleStrataInit({
+          cwd: resolve(targetDir),
+          force: Boolean(flags.force || flags.f),
+          harness: parseStringFlag(flags.harness ?? flags.agent),
+          yes: Boolean(flags.yes || flags.y),
+        });
+        break;
       }
 
-      const ruleInput = parseStringFlag(flags.rule);
-      if (ruleInput) {
-        const ruleTarget = (positional[1] && !positional[1].startsWith('-')) ? positional[1] : targetPath;
-        const ruleYaml = existsSync(ruleInput) ? await readSourceFile(ruleInput) : ruleInput;
-        await runFindCodeFromCli({
-          path: ruleTarget,
-          rule_yaml: ruleYaml,
-          max_results: parseSafePositiveInt(flags.limit, 200),
-        }, isJson);
-        return;
-      }
-
-      const pattern = positional[1] && !positional[1].startsWith('-') ? positional[1] : undefined;
-      if (!pattern) {
-        console.error('Error: Pattern is required for search command (e.g. strata find "<Button $PROPS />" or strata find --component Button).');
-        process.exit(1);
-      }
-
-      const searchTarget = (positional[2] && !positional[2].startsWith('-')) ? positional[2] : targetPath;
-      await runFindCodeFromCli({
-        path: searchTarget,
-        pattern,
-        language: parseStringFlag(flags.lang) || 'ts',
-        mode: flags.mode || 'ast',
-        max_results: parseSafePositiveInt(flags.limit, 200),
-      }, isJson);
-      return;
-    }
-
-    if (command === 'find-component-usage' || command === 'usage') {
-      const componentName = positional[1] && !positional[1].startsWith('-') ? positional[1] : undefined;
-      if (!componentName) {
-        console.error('Error: Component name is required.');
-        process.exit(1);
-      }
-
-      const usageTarget = (positional[2] && !positional[2].startsWith('-')) ? positional[2] : targetPath;
-      const scope =
-        flags.scope === 'template' || flags.scope === 'script' || flags.scope === 'both'
-          ? flags.scope
-          : 'both';
-
-      await runFindCodeFromCli({
-        path: usageTarget,
-        component: componentName,
-        scope,
-        max_results: parseSafePositiveInt(flags.limit, 200),
-      }, isJson);
-      return;
-    }
-
-    if (command === 'rule') {
-      const ruleInput = positional[1] && !positional[1].startsWith('-') ? positional[1] : undefined;
-      if (!ruleInput) {
-        console.error('Error: Rule file or inline YAML is required.');
-        process.exit(1);
-      }
-
-      const ruleTarget = (positional[2] && !positional[2].startsWith('-')) ? positional[2] : targetPath;
-      const ruleYaml = existsSync(ruleInput) ? await readSourceFile(ruleInput) : ruleInput;
-
-      await runFindCodeFromCli({
-        path: ruleTarget,
-        rule_yaml: ruleYaml,
-        max_results: parseSafePositiveInt(flags.limit, 200),
-      }, isJson);
-      return;
-    }
-
-    if (command === 'inspect' || command === 'contract' || command === 'extract-contract') {
-      const filePath = positional[1] && !positional[1].startsWith('-') ? positional[1] : undefined;
-      if (!filePath) {
-        console.error('Error: Component file path is required.');
-        process.exit(1);
-      }
-      if (!existsSync(filePath)) {
-        console.error(`Error: File not found: "${filePath}".`);
-        process.exit(1);
-      }
-      if (statSync(filePath).isDirectory()) {
-        console.error(`Error: "${filePath}" is a directory. Provide a path to a component file, or use "strata audit" / "strata tree" to inspect directories.`);
-        process.exit(1);
-      }
-
-      await inspectFromCli(filePath, flags, isJson);
-      return;
-    }
-
-    if (command === 'tree' || command === 'component-tree') {
-      const entryFile = positional[1] && !positional[1].startsWith('-') ? positional[1] : undefined;
-      const routePath = parseStringFlag(flags.route);
-
-      if (!entryFile && !routePath) {
-        console.error('Error: Either an entry file path or --route <path> is required.');
-        process.exit(1);
-      }
-      if (entryFile && !existsSync(entryFile)) {
-        console.error(`Error: Entry component file not found: "${entryFile}".`);
-        process.exit(1);
-      }
-
-      const maxDepth = parseSafePositiveInt(flags.depth ?? flags['max-depth'] ?? flags.maxDepth, 3) ?? 3;
-      const rawDir = String(flags.direction || '').toLowerCase();
-      const direction = rawDir === 'upward' || rawDir === 'up' ? 'upward' : 'downward';
-      const aliasMap = parseAliasMap(flags.alias || flags['alias-map'] || flags.aliasMap || flags.alias_map);
-      const scopeFilter = parseStringFlag(
-        flags['scope-filter'] ||
-        flags.scopeFilter ||
-        flags['scope-path'] ||
-        flags.scopePath ||
-        flags.scope_filter ||
-        flags.scope_path
-      );
-      const result = await getComponentTree({
-        entryPath: entryFile,
-        routePath,
-        targetPath: flags.path ? String(flags.path) : routePath ? targetPath : undefined,
-        scopeFilter,
-        maxDepth,
-        direction,
-        aliasMap,
-      });
-
-      const isMermaid = flags.export === 'mermaid' || Boolean(flags.mermaid) || Boolean(flags.m);
-      if (isJson) {
-        console.log(JSON.stringify(result, null, 2));
-      } else if (isMermaid) {
-        console.log(formatTreeAsMermaid(result));
-      } else {
-        console.log(formatTreeAsText(result));
-      }
-      return;
-    }
-
-    if (command === 'routes' || command === 'scan-routes') {
-      const scanPath = (positional[1] && !positional[1].startsWith('-')) ? positional[1] : targetPath;
-      const rawView = parseStringFlag(flags.view);
-      const view = rawView === 'summary' || rawView === 'full' || rawView === 'tree' ? rawView : undefined;
-      const result = await scanRoutes({
-        targetPath: scanPath,
-        frameworkHint: parseStringFlag(flags.framework) as RouteFramework | undefined,
-        prefix: parseStringFlag(flags.prefix),
-        view,
-      });
-
-      if (isJson) {
-        console.log(JSON.stringify(result, null, 2));
-      } else {
-        console.log(formatRoutesAsText(result));
-      }
-      return;
-    }
-
-    if (command === 'unused' || command === 'find-unused' || command === 'audit') {
-      const auditPath = positional[1] || targetPath;
-      const target = normalizeAuditTarget(flags.target, 'dead-components');
-      if (!VALID_AUDIT_TARGETS.has(target)) {
-        console.error(
-          `Error: Invalid audit target "${flags.target}". Supported targets: ${[...VALID_AUDIT_TARGETS].join(', ')}`
-        );
-        process.exit(1);
-      }
-      const analysis = await analyzeFrontend({
-        target: target as AuditTarget, targetPath: auditPath,
-        scopePath: parseStringFlag(flags['scope-path'] || flags.scopePath || flags.scope_path || flags['scope-filter'] || flags.scopeFilter),
-        excludeDirs: parseStringList(flags['exclude-dirs'] ?? flags.excludeDirs ?? flags.exclude_dirs),
-        ignorePatterns: flags.ignore ? String(flags.ignore).split(',') : undefined,
-        includePages: Boolean(flags['include-pages']), frameworkHint: flags.framework as RouteFramework | undefined,
-        prefix: parseStringFlag(flags.prefix), view: parseStringFlag(flags.view) as 'summary' | 'full' | 'tree' | undefined,
-      });
-      console.log(isJson ? JSON.stringify(analysis.data, null, 2) : formatFrontendAudit(analysis, auditPath));
-      return;
-    }
-
-    if (command === 'unused-state' || command === 'find-unused-state' || command === 'dead-state') {
-      const auditPath = (positional[1] && !positional[1].startsWith('-')) ? positional[1] : targetPath;
-      const result = await findUnusedState(auditPath);
-
-      if (isJson) {
-        console.log(JSON.stringify(result, null, 2));
-      } else {
-        console.log(formatUnusedStateAsText(result));
-      }
-      return;
-    }
-
-    if (command === 'trace' || command === 'impact' || command === 'state-impact') {
-      const identifier = positional[1] && !positional[1].startsWith('-') ? positional[1] : undefined;
-      if (!identifier) {
-        console.error('Error: State identifier (store, context, composable) is required.');
-        process.exit(1);
-      }
-
-      const impactTarget = (positional[2] && !positional[2].startsWith('-')) ? positional[2] : targetPath;
-      const depth = parseSafePositiveInt(flags.depth ?? flags['max-depth'] ?? flags.maxDepth, 1) ?? 1;
-      const rawDirection = parseStringFlag(flags.direction)?.toLowerCase();
-      const direction = (rawDirection as 'consumers' | 'dependencies' | 'both') || 'both';
-      const role = (flags.role as 'all' | 'mutators' | 'readers') || 'all';
-
-      if (depth > 1 || rawDirection === 'dependencies' || rawDirection === 'both') {
-        const result = await traceStateChain(impactTarget, {
-          identifier,
-          direction,
-          maxDepth: depth,
-          role,
+      case 'sync': {
+        const targetDir = resolve(parseStringFlag(flags.path ?? flags.p) ?? positional[1] ?? process.cwd());
+        const stats = await syncWorkspaceV3(targetDir, {
+          packageKey: parseStringFlag(flags.package),
+          force: Boolean(flags.force || flags.f),
         });
         if (isJson) {
-          console.log(JSON.stringify(result, null, 2));
+          console.log(JSON.stringify(stats, null, 2));
         } else {
-          console.log(formatStateChainAsText(result));
+          console.log(
+            `Synced ${stats.packagesSynced} package(s) [${stats.mode}] in ${stats.durationMs}ms — added=${stats.added}, modified=${stats.modified}, unchanged=${stats.unchanged}, deleted=${stats.deleted}, symbols=${stats.symbolsIndexed}, edges=${stats.edgesIndexed}`
+          );
         }
-        return;
+        break;
       }
 
-      const result = await queryStateImpact(impactTarget, identifier, role);
-      if (isJson) {
-        console.log(JSON.stringify(result, null, 2));
-      } else {
-        console.log(formatStateImpactAsText(result));
-      }
-      return;
-    }
-
-    if (command === 'sync') {
-      const syncPath = (positional[1] && !positional[1].startsWith('-')) ? positional[1] : targetPath;
-      const stats = await syncWorkspace(syncPath);
-      if (isJson) {
-        console.log(JSON.stringify(stats, null, 2));
-      } else {
-        console.log(
-          `Synced workspace: ${stats.total} total files (${stats.added} added, ${stats.modified} modified, ${stats.deleted} deleted, ${stats.unchanged} unchanged) in ${stats.durationMs}ms.`
-        );
-      }
-      return;
-    }
-
-    if (command === 'patch' || command === 'patch-plan') {
-      const componentPath = positional[1] && !positional[1].startsWith('-') ? positional[1] : undefined;
-      if (!componentPath) {
-        console.error('Error: Component file path is required for patch-plan (e.g. strata patch-plan src/Button.vue --refactor rename_prop --old type --new variant).');
-        process.exit(1);
-      }
-      if (!existsSync(componentPath)) {
-        console.error(`Error: Component file not found: "${componentPath}".`);
-        process.exit(1);
+      case 'map': {
+        const root = resolve(parseStringFlag(flags.path ?? flags.p) ?? positional[1] ?? process.cwd());
+        const res = await mapWorkspaceTool.handler({
+          root,
+          view: parseStringFlag(flags.view) ?? 'overview',
+          package: parseStringFlag(flags.package),
+          path_prefix: parseStringFlag(flags.prefix),
+          limit: parseSafePositiveInt(flags.limit),
+          cursor: parseStringFlag(flags.cursor),
+          format: isJson ? 'json' : 'text',
+        });
+        printToolResponse(res);
+        break;
       }
 
-      const refactorType = (flags.refactor ?? flags['refactor-type'] ?? 'rename_prop') as PatchRefactorType;
-      const oldName = parseStringFlag(flags.old ?? flags['old-name']);
-      const newName = parseStringFlag(flags.new ?? flags['new-name']);
-
-      if (!oldName) {
-        console.error('Error: --old <name> is required.');
-        process.exit(1);
-      }
-
-      if (refactorType.startsWith('rename_') && !newName) {
-        console.error(`Error: --new <name> is required when --refactor is "${refactorType}".`);
-        process.exit(1);
-      }
-
-      const result = await generatePatchPlan({
-        componentPath,
-        refactorType,
-        oldName,
-        newName,
-        targetPath: flags.path ? String(flags.path) : undefined,
-      });
-
-      if (isJson) {
-        console.log(JSON.stringify(result, null, 2));
-      } else {
-        console.log(`\nPrescriptive Patch Plan: ${refactorType.toUpperCase()} on "${componentPath}"`);
-        console.log(`Audited ${result.totalConsumersAudited} consumers, found ${result.totalPatches} patches:\n`);
-        for (const patch of result.patches) {
-          console.log(`- ${patch.file}:${patch.line}:${patch.column} (<${patch.targetTag}>)`);
-          console.log(`  Current:  ${patch.oldSnippet}`);
-          console.log(`  Replace:  ${patch.newSnippet || '(remove)'}\n`);
+      case 'inspect': {
+        const filePath = positional[1];
+        if (!filePath) {
+          console.error('Error: Please provide a target file path. Example: strata inspect src/Button.vue');
+          process.exit(1);
         }
+        const root = resolve(parseStringFlag(flags.path ?? flags.p) ?? process.cwd());
+        const sections = parseStringList(flags.sections);
+        const res = await inspectFileTool.handler({
+          root,
+          path: filePath,
+          ...(sections?.length ? { sections } : {}),
+          resolve_types: !flags['no-types'],
+          format: isJson ? 'json' : 'text',
+        });
+        printToolResponse(res);
+        break;
       }
-      return;
-    }
 
-    if (command === 'apis' || command === 'api-contracts') {
-      const scanPath = (positional[1] && !positional[1].startsWith('-')) ? positional[1] : targetPath;
-      const scopePath = parseStringFlag(flags['scope-path'] || flags.scopePath);
-      const excludeDirs = parseStringList(flags['exclude-dirs'] ?? flags.excludeDirs);
-
-      const result = await extractWorkspaceApiContracts({
-        targetPath: scanPath,
-        scopePath,
-        excludeDirs,
-      });
-
-      if (isJson) {
-        console.log(JSON.stringify(result, null, 2));
-      } else {
-        console.log(formatApiContractsAsText(result));
+      case 'graph': {
+        const query = positional[1];
+        if (!query) {
+          console.error(
+            'Error: Provide a graph query (definition | references | call_hierarchy | component_tree | state_flow | impact).'
+          );
+          process.exit(1);
+        }
+        const root = resolve(parseStringFlag(flags.path ?? flags.p) ?? process.cwd());
+        const file = parseStringFlag(flags.file) ?? positional[2];
+        const packages = parseStringList(flags.package);
+        const maxDepth = parseSafePositiveInt(flags.depth ?? flags['max-depth']);
+        const res = await queryGraphTool.handler({
+          root,
+          query,
+          target: {
+            ...(file ? { file } : {}),
+            ...(parseStringFlag(flags.symbol) ? { symbol: parseStringFlag(flags.symbol) } : {}),
+            ...(parseStringFlag(flags['symbol-id']) ? { symbol_id: parseStringFlag(flags['symbol-id']) } : {}),
+            ...(parseStringFlag(flags.member) ? { member: parseStringFlag(flags.member) } : {}),
+          },
+          direction: parseStringFlag(flags.direction),
+          ...(packages?.length || maxDepth
+            ? {
+                scope: {
+                  ...(packages?.length ? { packages } : {}),
+                  ...(maxDepth ? { max_depth: maxDepth } : {}),
+                },
+              }
+            : {}),
+          limit: parseSafePositiveInt(flags.limit),
+          cursor: parseStringFlag(flags.cursor),
+          format: isJson ? 'json' : 'text',
+        });
+        printToolResponse(res);
+        break;
       }
-      return;
-    }
 
-    if (command === 'stats' || command === 'telemetry') {
-      const scanPath = (positional[1] && !positional[1].startsWith('-')) ? positional[1] : targetPath;
-      const summary = StrataTelemetry.getSummary(scanPath);
-
-      if (isJson) {
-        console.log(JSON.stringify(summary, null, 2));
-      } else {
-        console.log(formatSummaryAsText(summary));
+      case 'read': {
+        const root = resolve(parseStringFlag(flags.path ?? flags.p) ?? process.cwd());
+        const linesRaw = parseStringFlag(flags.lines);
+        let lines: [number, number] | undefined;
+        if (linesRaw) {
+          const parts = linesRaw.split(/[:-]/).map((n) => Number.parseInt(n.trim(), 10));
+          if (parts.length === 2 && Number.isInteger(parts[0]) && Number.isInteger(parts[1])) {
+            lines = [parts[0], parts[1]];
+          }
+        }
+        const res = await readSliceTool.handler({
+          root,
+          source_ref: parseStringFlag(flags.ref ?? flags['source-ref']),
+          symbol_id: parseStringFlag(flags['symbol-id']),
+          path: positional[1],
+          symbol: parseStringFlag(flags.symbol),
+          block: parseStringFlag(flags.block),
+          ...(lines ? { lines } : {}),
+          max_lines: parseSafePositiveInt(flags['max-lines']),
+        });
+        printToolResponse(res);
+        break;
       }
-      return;
-    }
 
-    console.error(`Unknown command: "${command}". Run "strata --help" for available commands.`);
-    process.exit(1);
-  } catch (err) {
-    const errorInstance = err instanceof Error ? err : new Error(String(err));
-    if (command && !['serve', 'init', 'stats', 'telemetry', 'help'].includes(command)) {
-      StrataTelemetry.recordToolCall({
-        event: 'tool_call_failed',
-        tool: `cli:${command}`,
-        duration_ms: 0,
-        status: 'error',
-        input: { path: targetPath },
-        error: {
-          code: (errorInstance.message.match(/^([A-Z_]+):/) || [])[1] || 'CLI_ERROR',
-          message: errorInstance.message,
-          stack: errorInstance.stack,
-        },
-      }, targetPath);
+      case 'search': {
+        const query = positional[1];
+        if (!query) {
+          console.error('Error: Please provide a search query. Example: strata search formatOrderTotal');
+          process.exit(1);
+        }
+        const root = resolve(parseStringFlag(flags.path ?? flags.p) ?? process.cwd());
+        const res = await searchCodeTool.handler({
+          root,
+          query,
+          kind: parseStringFlag(flags.kind) ?? 'symbol',
+          package: parseStringFlag(flags.package),
+          path_prefix: parseStringFlag(flags.prefix),
+          limit: parseSafePositiveInt(flags.limit),
+          cursor: parseStringFlag(flags.cursor),
+          format: isJson ? 'json' : 'text',
+        });
+        printToolResponse(res);
+        break;
+      }
+
+      case 'stats':
+      case 'telemetry': {
+        const targetDir = resolve(parseStringFlag(flags.path ?? flags.p) ?? positional[1] ?? process.cwd());
+        const days = parseSafePositiveInt(flags.days) ?? 7;
+        const summary = StrataTelemetry.getSummary(targetDir, days);
+        if (isJson) {
+          console.log(JSON.stringify(summary, null, 2));
+        } else {
+          console.log(formatSummaryAsText(summary));
+        }
+        break;
+      }
+
+      default:
+        console.error(`Unknown command: "${command}". Run "strata --help" for usage.`);
+        process.exit(1);
     }
-    console.error(`Error: ${errorInstance.message}`);
-    process.exit(1);
   } finally {
-    closeAllDatabases();
+    defaultSemanticPool.disposeAll();
+    defaultWarmDbPool.closeAll();
   }
 }
 
-// Only auto-run when executed as the CLI entry (cli.js/cli.ts).
-// When bundled into mcp.js (single-binary mode, mcp.ts imports main from here),
-// this guard prevents double execution that would corrupt MCP stdio JSON-RPC.
-const cliEntry = process.argv[1] ?? '';
-if (import.meta.main && (cliEntry.endsWith('cli.js') || cliEntry.endsWith('cli.ts'))) {
-  main();
+if (import.meta.main) {
+  main().catch((err) => {
+    console.error(err instanceof Error ? err.message : String(err));
+    process.exit(1);
+  });
 }

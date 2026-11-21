@@ -107,15 +107,14 @@ test('dispatcher records each of the six tools and unknown/worker failures once,
   writeFileSync(path, '<template><div /></template>');
   const server = createMcpServer();
   const calls = [
-    ['find_code', { action: 'map' }],
-    ['inspect_component', { path, view: 'map' }],
-    ['get_component_tree', { path, direction: 'upward' }],
-    ['trace_state', { path, identifier: 'missing', direction: 'both' }],
-    ['audit_frontend', { path: root, target: 'routes' }],
-    ['generate_patch_plan', { path, refactor_type: 'rename_prop', old_name: 'label', new_name: 'title' }],
-    ['find_code', { pattern: '   ' }],
+    ['map_workspace', { view: 'overview' }],
+    ['inspect_file', { path }],
+    ['query_graph', { query: 'component_tree', target: { file: path }, direction: 'up' }],
+    ['read_slice', { path, lines: [1, 1] }],
+    ['search_code', { query: 'App', kind: 'symbol' }],
+    ['search_code', { query: '   ' }],
     ['unknown_tool', {}],
-    ['find_code', { code: 'x'.repeat(2 * 1024 * 1024 + 1) }],
+    ['search_code', { query: 'x'.repeat(2 * 1024 * 1024 + 1) }],
   ] as const;
   try {
     const handler = (server as any)._requestHandlers.get('tools/call');
@@ -130,10 +129,10 @@ test('dispatcher records each of the six tools and unknown/worker failures once,
       expect(response.metrics).toBeUndefined();
     }
     expect(entries()).toHaveLength(calls.length);
-    expect(entries().slice(0, 6).map(entry => entry.action)).toEqual(['map', 'map', 'upward', 'both', 'routes', 'rename_prop']);
+    expect(entries().slice(0, 5).map(entry => entry.status)).toEqual(['success', 'success', 'success', 'success', 'success']);
+    expect(entries().at(-3).error.code).toBe('VALIDATION_ERROR');
     expect(entries().at(-2).error.code).toBe('UNKNOWN_TOOL');
-    expect(entries().at(-3).error.code).toBe('HANDLER_ERROR');
-    expect(entries().at(-1).error.code).toBe('REQUEST_TOO_LARGE');
+    expect(entries().at(-1).error.message).toContain('REQUEST_TOO_LARGE');
   } finally { await server.close(); }
 }, 30000);
 

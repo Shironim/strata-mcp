@@ -1,36 +1,14 @@
 /**
- * strata-mcp — Multi-Framework Frontend Structural Code Search & Intelligence Library
+ * strata-mcp — Static and Semantic Code Analysis Library for Frontend & Fullstack JS/TS Projects
  */
 
 export * from './types';
-export * from './engine/search';
-export * from './engine/astgrep';
-export * from './engine/template';
-export * from './engine/remapper';
-export * from './engine/expression-batch';
-export * from './engine/splitter';
-export * from './engine/astro-sfc';
-export * from './engine/pool';
+export * from './version';
+export * from './plugins';
+export * from './engine/v2';
 export * from './engine/collector';
-export * from './engine/formatter';
-export * from './engine/contract';
-export * from './engine/tree';
-export * from './engine/audit';
-export * from './engine/resolver';
-export * from './engine/patterns';
 export * from './engine/routes';
-export * from './engine/database';
-export * from './engine/slicer';
-export * from './engine/reactivity';
-export * from './engine/patch-plan';
-export * from './engine/patch-preconditions';
-export * from './engine/api-contract';
-export * from './engine/telemetry';
-export * from './engine/layout-extractor';
 export * from './engine/path-resolver';
-export * from './engine/dynamic-imports';
+export * from './engine/telemetry';
 export * from './tools';
-export * from './adapters/factory';
-export * from './adapters/types';
 export * from './mcp';
-

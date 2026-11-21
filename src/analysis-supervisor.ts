@@ -1,5 +1,5 @@
 import { findTool } from './tools';
-import { closeAllDatabases } from './engine/storage/schema';
+import { defaultWarmDbPool, defaultSemanticPool } from './engine/v2';
 import { getLastKnownProjectRoot, setLastKnownProjectRoot } from './engine/path-resolver';
 import type { ToolCallResponse } from './tools/types';
 import { withAnalysisContext, type ProgressReporter } from './engine/analysis-context';
@@ -86,6 +86,8 @@ export class AnalysisSupervisor {
     if (this.active) {
       await new Promise<void>((resolve) => this.idleWaiters.push(resolve));
     }
+    defaultSemanticPool.disposeAll();
+    defaultWarmDbPool.closeAll();
   }
 
   private next(): void {
@@ -128,16 +130,8 @@ export class AnalysisSupervisor {
         const tool = findTool(job.name);
         if (!tool) throw new Error(`UNKNOWN_TOOL: ${job.name}`);
 
-        let response: ToolCallResponse;
-        let detectedRoot: string | undefined;
-        try {
-          response = await tool.handler(job.args);
-          if (!response.isError) {
-            detectedRoot = getLastKnownProjectRoot();
-          }
-        } finally {
-          closeAllDatabases();
-        }
+        const response = await tool.handler(job.args);
+        const detectedRoot = !response.isError ? getLastKnownProjectRoot() : undefined;
 
         return {
           ...response,

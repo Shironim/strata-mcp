@@ -1,15 +1,15 @@
-export const STRATA_INSTRUCTIONS = `# Strata MCP — Frontend AST Intelligence & Selective Context Engine
-Static AST analysis for Vue/Nuxt, React/Next, Svelte, and Astro. Read-only; never mutates source files.
+export const STRATA_INSTRUCTIONS = `# Strata MCP — Static and Semantic Code Analysis
+Static AST and TypeScript semantic analysis for Vue, Nuxt, React, Next.js, Svelte, and Astro across single-repo, monolith, fullstack JS/TS, and monorepo workspaces. Read-only; never mutates source files.
 
-## Routing & Selective Inspection (Map first, read selectively)
-- **Resources & Prompts:** Read \`strata://project/overview\`, \`strata://components/index\`, or \`strata://component/{name}\` for fast orientation; use MCP Prompts (\`trace-state-bug\`, \`safe-component-patch\`, \`audit-component-tree\`) for guided multi-step workflows.
-- **Survey & Search:** \`find_code(action: "map")\` for file inventory; \`find_code(pattern: "...")\` for AST/literal/prop searches.
-- **Contracts & Slices:** \`inspect_component(path, view: "map")\` or \`outline: true\` before reading bodies; slice via \`symbol\`, \`source_range\`, or \`view: "source"\` with \`source_ref\`. Never invent line numbers.
-- **Hierarchy & State:** \`get_component_tree\` for upward blast radius or downward props drilling; \`trace_state\` for store/context/composable readers and mutators.
-- **Topology & Refactoring:** \`audit_frontend\` for \`routes\`, \`api-contracts\`, \`dead-components\`, or \`dead-state\`; \`generate_patch_plan\` for \`rename_prop\`/\`remove_prop\`/\`rename_event\`/\`rename_model\`/\`rename_slot\` plans.
+## Recommended Workflow (Map -> Inspect -> Query Graph -> Read Slice)
+1. **Map (\`map_workspace\`)**: Start with \`view: "overview"\`, \`"packages"\`, \`"routes"\`, or \`"files"\` to inspect project structure, frameworks, and routes without reading file bodies.
+2. **Inspect (\`inspect_file\`)**: Inspect a file's symbol outline, TypeChecker-resolved props/slots contract, render boundary, and outbound HTTP boundaries (body-free).
+3. **Query Graph (\`query_graph\`)**: Use \`definition\`, \`references\`, \`call_hierarchy\`, \`component_tree\`, \`state_flow\`, or \`impact\` to trace relationships and refactor sites across files and packages.
+4. **Read Slice (\`read_slice\`)**: Read only the needed symbol or range using \`source_ref\` or \`symbol_id\` handles from previous calls. Never invent line numbers.
+5. **Search (\`search_code\`)**: When the file or symbol is unknown, search via \`kind: "symbol"\`, \`"component_usage"\`, \`"prop_usage"\`, or \`"text"\`.
 
-## Hard Boundaries
-- **Truncation & Budgets:** Follow \`source_range\` hints on slices >50 lines and \`continuation_token\` on paged lists. Default \`format: "text"\` omits redundant JSON.
-- **Index Requirement:** \`trace_state\` and \`audit_frontend\` (\`dead-state\`, \`all\`) require \`.strata/graph.db\` (\`strata init\`); do not initialize unrelated workspaces.
-- **Evidence Discipline:** Use absolute paths. Treat static diagnostics, \`backendTargetHint\`, and unused findings as candidates—verify scope, \`status\`, and \`omissions\`.
+## Boundaries & Evidence Discipline
+- **Grouped Summaries**: On large workspaces, inspect \`SUMMARY BY PACKAGE\` first and narrow with \`scope.packages\` or \`cursor\`.
+- **Evidence Transparency**: Check \`VERIFICATION: tier=graph|semantic|syntax-fallback\` and manually verify every item listed under \`OMISSIONS\` (such as dynamic spreads \`v-bind\` / \`{...props}\`).
+- **Default Format**: \`format: "text"\` is compact and token-efficient; pass \`format: "json"\` only when structured JSON is required.
 `.trim();

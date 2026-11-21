@@ -11,7 +11,7 @@ export interface WorkflowPlaybookContext {
 }
 
 export interface WorkflowPlaybook {
-  name: 'trace-state-bug' | 'safe-component-patch' | 'audit-component-tree';
+  name: 'onboard-workspace' | 'trace-bug' | 'safe-refactor';
   title: string;
   description: string;
   arguments: readonly WorkflowPlaybookArgument[];
@@ -22,76 +22,70 @@ export interface WorkflowPlaybook {
 
 export const WORKFLOW_PLAYBOOKS: readonly WorkflowPlaybook[] = [
   {
-    name: 'trace-state-bug',
-    title: 'Trace State Bug',
+    name: 'onboard-workspace',
+    title: 'Onboard Workspace',
     description:
-      'Investigate reactive state, store, or composable bugs using find_code, inspect_component, and trace_state.',
+      'Build a mental model of an unfamiliar frontend repository or monorepo using map_workspace and inspect_file.',
     arguments: [
       {
-        name: 'target',
-        description: 'Store, composable, context, or component name/path to investigate.',
-        required: true,
-      },
-    ],
-    promptDescription: 'Trace reactive state, store, or composable bugs across consumers and mutators.',
-    intro: ({ target }) => `Investigate state or reactivity bug involving '${target}' in order:`,
-    steps: ({ target, workspaceRoot }) => [
-      `1. Call \`find_code\` with \`{ pattern: "${target}", path: "${workspaceRoot}" }\` (or \`action: "map"\` if the location is unknown) to locate the store, composable, or component.`,
-      `2. Call \`inspect_component\` with \`{ path: "<resolved-file>", symbol: "<symbol-or-omit>" }\` to inspect its contract and state dependencies without reading the whole file.`,
-      `3. Call \`trace_state\` with \`{ path: "${workspaceRoot}", identifier: "${target}", direction: "both", role: "all", depth: 2 }\` to trace readers, mutators, and multi-hop ancestors.`,
-    ],
-  },
-  {
-    name: 'safe-component-patch',
-    title: 'Safe Component Patch',
-    description:
-      'Inspect component contract, upward consumer blast radius, and generate a deterministic patch plan before refactoring.',
-    arguments: [
-      {
-        name: 'component',
-        description: 'Component file path or name to refactor.',
-        required: true,
-      },
-      {
-        name: 'refactor_type',
-        description:
-          'Optional refactor type (rename_prop, remove_prop, rename_event, remove_event, rename_model, remove_model, rename_slot, remove_slot).',
+        name: 'package',
+        description: 'Optional monorepo package key (e.g. "apps/web") to focus on.',
         required: false,
       },
     ],
-    promptDescription: 'Inspect contract, evaluate upward blast radius, and build a patch plan before editing.',
-    intro: ({ target }) => `Prepare a safe refactor for '${target}' before editing source files:`,
-    steps: ({ target, workspaceRoot, refactorType }) => {
-      const type = refactorType?.trim() || 'rename_prop';
-      return [
-        `1. Call \`inspect_component\` with \`{ path: "${target}", impact: "summary" }\` to inspect props, emits, slots, models, and per-prop usage/omission risk.`,
-        `2. Call \`get_component_tree\` with \`{ path: "${target}", direction: "upward", target_path: "${workspaceRoot}" }\` to map all parent consumers and page entrypoints.`,
-        `3. Call \`generate_patch_plan\` with \`{ path: "${target}", refactor_type: "${type}", old_name: "<old_name>", new_name: "<new_name>", target_path: "${workspaceRoot}" }\` to get a deterministic, reviewable patch plan before applying edits.`,
-      ];
-    },
+    promptDescription: 'Map packages, routes, and key entrypoint contracts without reading full source files.',
+    intro: ({ target }) => `Build an architectural mental model for ${target ? `package '${target}'` : 'this workspace'}:`,
+    steps: ({ target, workspaceRoot }) => [
+      `1. Call \`map_workspace\` with \`{ root: "${workspaceRoot}", view: "overview"${target ? `, package: "${target}"` : ''} }\` to see packages, frameworks, and totals.`,
+      `2. Call \`map_workspace\` with \`{ root: "${workspaceRoot}", view: "routes"${target ? `, package: "${target}"` : ''} }\` to locate page and layout entrypoints.`,
+      `3. Call \`inspect_file\` on key entrypoint files to inspect their symbol outline, props contract, and outbound HTTP boundaries without loading bodies.`,
+    ],
   },
   {
-    name: 'audit-component-tree',
-    title: 'Audit Component Tree',
+    name: 'trace-bug',
+    title: 'Trace Bug',
     description:
-      'Analyze downward component hierarchy for props drilling, dangling context, and render boundaries.',
+      'Investigate UI, state, or API flow bugs using search_code, query_graph, and read_slice.',
     arguments: [
       {
-        name: 'entry',
-        description: 'Entry component file path or URL route (e.g. "/dashboard").',
+        name: 'target',
+        description: 'Store, composable, component, or symbol name to investigate.',
         required: true,
       },
     ],
-    promptDescription:
-      'Audit downward component hierarchy for props drilling, dangling context, and render boundaries.',
-    intro: ({ target }) => `Audit the component tree starting from '${target}':`,
-    steps: ({ target, workspaceRoot }) => {
-      const isRoute = target.startsWith('/') && !/\.(vue|tsx|jsx|svelte|astro|ts|js|mjs|cjs)$/i.test(target);
-      const entryParam = isRoute ? `route: "${target}"` : `path: "${target}"`;
+    promptDescription: 'Trace state flow, call hierarchy, and component consumers before reading targeted slices.',
+    intro: ({ target }) => `Investigate bug involving '${target}' in order:`,
+    steps: ({ target, workspaceRoot }) => [
+      `1. Call \`search_code\` with \`{ root: "${workspaceRoot}", query: "${target}", kind: "symbol" }\` to get its \`symbol_id\` and \`source_ref\`.`,
+      `2. Call \`query_graph\` with \`{ root: "${workspaceRoot}", query: "state_flow", target: { symbol: "${target}" } }\` or \`query: "call_hierarchy"\` to map readers, writers, and callers.`,
+      `3. Call \`read_slice\` with the returned \`source_ref\` or \`symbol_id\` to inspect only the relevant implementation lines.`,
+    ],
+  },
+  {
+    name: 'safe-refactor',
+    title: 'Safe Refactor',
+    description:
+      'Inspect contracts and compute semantic impact sites (plus dynamic omissions) before modifying shared components or symbols.',
+    arguments: [
+      {
+        name: 'component',
+        description: 'Component or module file path to refactor.',
+        required: true,
+      },
+      {
+        name: 'member',
+        description: 'Optional prop, event, slot, or symbol name being changed.',
+        required: false,
+      },
+    ],
+    promptDescription: 'Verify contract, upward component tree, and all impact sites + omissions before editing.',
+    intro: ({ target }) => `Prepare a safe refactor for '${target}' before editing source files:`,
+    steps: ({ target, workspaceRoot, refactorType }) => {
+      const memberPart = refactorType?.trim() ? `, member: "${refactorType.trim()}"` : '';
       return [
-        `1. Call \`get_component_tree\` with \`{ ${entryParam}, direction: "downward", target_path: "${workspaceRoot}" }\` to inspect rendered descendants, props drilling (>2 levels), dangling context, and render boundaries.`,
-        `2. For any flagged component, call \`inspect_component\` with \`{ path: "<component-file>" }\` to verify its exact props, emits, and state dependencies.`,
-        `3. If broader topology or unused-component context is needed, call \`audit_frontend\` with \`{ target: "routes", path: "${workspaceRoot}" }\` or \`{ target: "dead-components", path: "${workspaceRoot}" }\`.`,
+        `1. Call \`inspect_file\` with \`{ root: "${workspaceRoot}", path: "${target}" }\` to verify its TypeChecker-resolved contract and outline.`,
+        `2. Call \`query_graph\` with \`{ root: "${workspaceRoot}", query: "component_tree", direction: "up", target: { file: "${target}" } }\` to map upward consumers across packages.`,
+        `3. Call \`query_graph\` with \`{ root: "${workspaceRoot}", query: "impact", target: { file: "${target}"${memberPart} } }\` to list all verified edit sites and any dynamic spread omissions.`,
       ];
     },
   },
@@ -101,23 +95,19 @@ export function findWorkflowPlaybook(name: string): WorkflowPlaybook | undefined
   return WORKFLOW_PLAYBOOKS.find((p) => p.name === name);
 }
 
-/**
- * Renders the canonical workflow playbooks for SKILL.md / CLI init templates
- * so skill guidance stays synchronized with MCP Prompts.
- */
+export function renderWorkflowPlaybookText(
+  playbook: WorkflowPlaybook,
+  ctx: WorkflowPlaybookContext
+): string {
+  return [playbook.intro(ctx), ...playbook.steps(ctx)].join('\n');
+}
+
 export function renderPlaybooksForSkill(): string {
   return WORKFLOW_PLAYBOOKS.map((playbook) => {
-    const sampleTarget =
-      playbook.name === 'trace-state-bug'
-        ? '<storeOrComposable>'
-        : playbook.name === 'safe-component-patch'
-          ? '<componentFile>'
-          : '<entryComponentOrRoute>';
-    const steps = playbook.steps({
-      target: sampleTarget,
-      workspaceRoot: '<workspaceRoot>',
-      refactorType: 'rename_prop',
-    });
-    return `### ${playbook.title} (\`${playbook.name}\`)\n${playbook.description}\n${steps.join('\n')}`;
+    const ctx: WorkflowPlaybookContext = {
+      target: playbook.name === 'onboard-workspace' ? '' : '<target>',
+      workspaceRoot: '<workspace-root>',
+    };
+    return `### ${playbook.title} (\`${playbook.name}\`)\n${playbook.steps(ctx).join('\n')}`;
   }).join('\n\n');
 }

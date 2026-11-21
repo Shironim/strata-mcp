@@ -3,7 +3,7 @@ import { readFileSync, statSync } from 'node:fs';
 import { dirname, extname, relative, resolve, sep } from 'node:path';
 
 // Follow the production imports that can affect published index data.
-const INDEX_ENTRY = 'src/engine/storage/delta-sync.ts';
+const INDEX_ENTRY = 'src/engine/v2/fast-sync.ts';
 const IDENTITY_MODULE = 'src/version.ts';
 const SOURCE_EXTENSIONS = ['.ts', '.tsx', '.js', '.jsx', '.json'];
 

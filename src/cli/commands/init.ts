@@ -4,7 +4,7 @@ import { extname, join, resolve } from 'node:path';
 import * as readline from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 import { collectFiles } from '../../engine/collector';
-import { syncWorkspace } from '../../engine/database';
+import { defaultWarmDbPool, syncWorkspaceV3 } from '../../engine/v2';
 import { setupHarnessConfigs, setupHarnessArtifacts, type AgentHarness } from '../mcp-configs';
 import { STRATA_VERSION } from '../../version';
 
@@ -348,9 +348,10 @@ export async function handleStrataInit(options: StrataInitOptions = {}): Promise
   console.log(`${cyan}│${reset}`);
   console.log(`${cyan}◇${reset}  ${profile.isUiProject ? 'Indexing frontend components:' : 'Indexing workspace source files:'}`);
   try {
-    const stats = await syncWorkspace(cwd, undefined, undefined, { rebuild: true });
-    const unitLabel = profile.isUiProject ? 'components' : 'files';
-    console.log(`${cyan}│${reset}  ${green}✔${reset} Indexed ${stats.total} ${unitLabel} into .strata/graph.db in ${stats.durationMs}ms`);
+    const stats = await syncWorkspaceV3(cwd, { force: true });
+    defaultWarmDbPool.close(cwd);
+    const totalFiles = stats.added + stats.modified + stats.unchanged;
+    console.log(`${cyan}│${reset}  ${green}✔${reset} Indexed ${totalFiles} files (${stats.symbolsIndexed} symbols, ${stats.packagesSynced} package(s)) into .strata/graph.db in ${stats.durationMs}ms`);
   } catch (err: unknown) {
     const rawMessage = err instanceof Error ? err.message : String(err);
     let failurePhase = 'AST Component Indexing';
