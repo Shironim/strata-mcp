@@ -3,23 +3,26 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { promises as fs } from 'node:fs';
 import { createMcpServer } from '../../src/mcp';
-import { getWorkspaceDatabase, closeAllDatabases } from '../../src/engine/database';
+import { getWorkspaceDatabase } from '../../src/engine/database';
 import { syncWorkspace } from '../../src/engine/storage/delta-sync';
+import { createWorkspaceTracker } from '../_helpers/workspace';
 
-const FIXTURES_DIR = join(import.meta.dir, '../fixtures');
+const workspaces = createWorkspaceTracker();
+let FIXTURES_DIR = '';
 const VUE_APP_DIR = join(import.meta.dir, '../mock-projects/vue-app');
 
 describe('MCP Tools Unhappy Paths & Edge Cases Suite', () => {
   let server: ReturnType<typeof createMcpServer>;
 
   beforeAll(async () => {
+    FIXTURES_DIR = workspaces.copyFixtures('strata-unhappy-fixtures-');
     server = createMcpServer();
     getWorkspaceDatabase(FIXTURES_DIR, { create: true });
     await syncWorkspace(FIXTURES_DIR);
   });
 
   afterAll(() => {
-    closeAllDatabases();
+    workspaces.cleanupAll();
   });
 
   const callTool = async (name: string, args: Record<string, any>) => {
@@ -234,14 +237,50 @@ describe('MCP Tools Unhappy Paths & Edge Cases Suite', () => {
       expect(res.content[0].text).toContain('Invalid audit target: "security-audit-unknown"');
     });
 
-    it('rejects removed archetype-drift target', async () => {
-      const res = await callTool('audit_frontend', {
-        target_path: FIXTURES_DIR,
-        target: 'archetype-drift',
-        path: FIXTURES_DIR,
-      });
-      expect(res.isError).toBe(true);
-      expect(res.content[0].text).toContain('Invalid audit target');
+    it('rejects removed audit targets and aliases without falling through to all', async () => {
+      for (const target of [
+        'archetype-drift',
+        'archetype_drift',
+        'archetype',
+        'design-tokens',
+        'design_tokens',
+        'design',
+        'similar-templates',
+        'similar_templates',
+        'bundle-health',
+        'bundle_health',
+        'bundle',
+      ]) {
+        const res = await callTool('audit_frontend', {
+          target_path: FIXTURES_DIR,
+          target,
+          path: FIXTURES_DIR,
+        });
+        expect(res.isError).toBe(true);
+        expect(res.content[0].text).toContain('Invalid audit target');
+        expect(res.content[0].text).toContain('Supported targets:');
+      }
+    });
+
+    it('runs target "all" returning the four retained analyses without legacy audit sections', async () => {
+      const { mkdtempSync, rmSync, writeFileSync } = await import('node:fs');
+      const { tmpdir } = await import('node:os');
+      const { closeWorkspaceDatabase, getWorkspaceDatabase } = await import('../../src/engine/storage/schema');
+      const root = mkdtempSync(join(tmpdir(), 'strata-audit-all-'));
+      try {
+        writeFileSync(join(root, 'package.json'), '{"dependencies":{"vue":"3.5.13"}}');
+        writeFileSync(join(root, 'App.vue'), '<script setup>fetch("/api/items")</script><template><main>Items</main></template>');
+        getWorkspaceDatabase(root, { create: true, enableWatcher: false });
+        const res = await callTool('audit_frontend', { path: root, target: 'all', format: 'json' });
+        expect(res.isError).not.toBe(true);
+        const data = res.structuredContent!;
+        for (const key of ['routes', 'unusedComponents', 'unusedState', 'apiContracts']) expect(data).toHaveProperty(key);
+        for (const key of ['designSystemAudit', 'bundleAudit', 'clusters', 'violations']) expect(data).not.toHaveProperty(key);
+        expect((data.apiContracts as any).endpoints.some((item: any) => item.endpoint === '/api/items')).toBe(true);
+      } finally {
+        closeWorkspaceDatabase(root);
+        rmSync(root, { recursive: true, force: true });
+      }
     });
   });
 
@@ -272,15 +311,21 @@ describe('MCP Tools Unhappy Paths & Edge Cases Suite', () => {
       expect(res.content[0].text).toContain('Invalid refactor_type');
     });
 
-    it('rejects rename_prop when new_name is missing', async () => {
-      const res = await callTool('generate_patch_plan', {
-        path: join(FIXTURES_DIR, 'NewButton.vue'),
-        target_path: FIXTURES_DIR,
-        refactor_type: 'rename_prop',
-        old_name: 'title',
-      });
-      expect(res.isError).toBe(true);
-      expect(res.content[0].text).toContain('"new_name" is required');
+    it('rejects rename_prop, rename_model, and rename_slot when new_name is missing', async () => {
+      for (const [refactor_type, old_name] of [
+        ['rename_prop', 'title'],
+        ['rename_model', 'modelValue'],
+        ['rename_slot', 'header'],
+      ] as const) {
+        const res = await callTool('generate_patch_plan', {
+          path: join(FIXTURES_DIR, 'NewButton.vue'),
+          target_path: FIXTURES_DIR,
+          refactor_type,
+          old_name,
+        });
+        expect(res.isError).toBe(true);
+        expect(res.content[0].text).toContain('"new_name" is required');
+      }
     });
 
     it('handles non-existent component path returning failure diagnostic without crashing', async () => {

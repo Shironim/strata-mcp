@@ -152,3 +152,57 @@ test('explicit suggestion root needs no project marker and still rejects scope e
   const outside = await inspectComponentTool.handler({ path: join(root, '..', 'TaskRow.vue'), project_root: root, format: 'json' });
   expect(JSON.parse(outside.content[0].text).suggestions).toEqual([]);
 });
+
+test('find_code handles invalid AST pattern errors, auto fallback, and max_results truncation signaling', async () => {
+  await writeFile(
+    join(root, 'Sample.vue'),
+    `<script setup lang="ts">\nconst message = 'hello world';\nconsole.log(message);\n</script>\n<template>\n  <div class="sample"><span>{{ message }}</span></div>\n</template>`
+  );
+
+  const strictInvalid = await findCodeTool.handler({ path: root, pattern: '((', mode: 'ast' });
+  expect(strictInvalid.isError).toBe(true);
+  expect(strictInvalid.content[0].text).toContain('Invalid AST pattern');
+
+  const autoFallback = await findCodeTool.handler({ path: root, pattern: '((', mode: 'auto' });
+  expect(autoFallback.isError).toBeUndefined();
+  expect(autoFallback.structuredContent?.modeUsed).toBe('literal');
+  expect(autoFallback.structuredContent?.fallbackReason).toBe('invalid_ast_pattern');
+
+  const zeroMatchAst = await findCodeTool.handler({ path: root, pattern: 'nonExistentHelper123456789($$$)', mode: 'auto' });
+  expect(zeroMatchAst.isError).toBeUndefined();
+  expect(zeroMatchAst.structuredContent?.modeUsed).toBe('ast');
+  expect(zeroMatchAst.structuredContent?.matchCount).toBe(0);
+  expect(zeroMatchAst.structuredContent?.fallbackReason).toBeUndefined();
+
+  const truncated = await findCodeTool.handler({ path: root, pattern: 'const', mode: 'ast', max_results: 1, format: 'json' });
+  expect(truncated.structuredContent?.coverage?.truncated).toBe(true);
+  expect(truncated.structuredContent?.truncated).toBe(true);
+  expect(truncated.structuredContent?.coverage?.limit).toBe(1);
+  expect((truncated.structuredContent?.retrieval as any)?.omissions?.some((o: any) => o.code === 'MAX_RESULTS_TRUNCATED')).toBe(true);
+
+  const notTruncated = await findCodeTool.handler({ path: root, pattern: 'nonExistentVarX', mode: 'literal', max_results: 10, format: 'json' });
+  expect(notTruncated.structuredContent?.coverage?.truncated).toBe(false);
+  expect(notTruncated.structuredContent?.truncated).toBe(false);
+  expect((notTruncated.structuredContent?.retrieval as any)?.omissions?.some((o: any) => o.code === 'MAX_RESULTS_TRUNCATED')).toBe(false);
+});
+
+test('inspect_component surfaces VUE_PARSE_FAILED and VUE_TEMPLATE_UNSUPPORTED omissions', async () => {
+  await writeFile(join(root, 'Broken.vue'), '<script setup lang="ts">\ndefineProps<{ id: string }>();\n</script>\n<template>\n  <div><span>unclosed tag\n</template>');
+  await writeFile(join(root, 'Pug.vue'), '<script setup lang="ts">\ndefineProps<{ title: string }>();\n</script>\n<template lang="pug">\ndiv\n  p {{ title }}\n</template>');
+
+  const broken = await inspectComponentTool.handler({ path: join(root, 'Broken.vue'), format: 'json' });
+  const brokenRetrieval = broken.structuredContent?.retrieval as any;
+  expect(brokenRetrieval?.completeness).toBe('partial');
+  const parseFailed = brokenRetrieval?.omissions?.find((o: any) => o.code === 'VUE_PARSE_FAILED');
+  expect(parseFailed).toBeDefined();
+  expect(parseFailed?.reason).toContain('Element is missing end tag');
+
+  const pug = await inspectComponentTool.handler({ path: join(root, 'Pug.vue'), format: 'json' });
+  const pugRetrieval = pug.structuredContent?.retrieval as any;
+  expect(pugRetrieval?.completeness).toBe('partial');
+  expect(pugRetrieval?.omissions?.find((o: any) => o.code === 'VUE_TEMPLATE_UNSUPPORTED')).toBeDefined();
+
+  const brokenMap = await inspectComponentTool.handler({ path: join(root, 'Broken.vue'), view: 'map', format: 'json' });
+  expect((brokenMap.structuredContent?.diagnostics as any[])?.some((d: any) => d.code === 'VUE_PARSE_FAILED')).toBe(true);
+  expect((brokenMap.structuredContent?.retrieval as any)?.completeness).toBe('partial');
+});

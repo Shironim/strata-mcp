@@ -107,4 +107,40 @@ describe('File-Based Route Topology Engine (Phase 4)', () => {
       expect(text).toContain('/api/users [api] (handlers: GET, POST)');
     });
   });
+
+  describe('vue-router SPA detection & scan containment', () => {
+    it('does not scan entire workspace root when framework is unknown and no pages dir exists', async () => {
+      const fs = await import('node:fs');
+      const { tmpdir } = await import('node:os');
+      const tempDir = fs.mkdtempSync(join(tmpdir(), 'strata-test-routes-'));
+      try {
+        fs.writeFileSync(join(tempDir, 'random-util.ts'), 'export const x = 1;');
+        const result = await scanRoutes({ targetPath: tempDir });
+        expect(result.framework).toBe('unknown');
+        expect(result.routes.length).toBe(0);
+      } finally {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it('detects vue-router framework when src/views contains vue files', async () => {
+      const fs = await import('node:fs');
+      const { tmpdir } = await import('node:os');
+      const tempDir = fs.mkdtempSync(join(tmpdir(), 'strata-test-vue-router-'));
+      try {
+        const viewsDir = join(tempDir, 'src', 'views');
+        fs.mkdirSync(viewsDir, { recursive: true });
+        fs.writeFileSync(join(viewsDir, 'HomeView.vue'), '<template>Home</template>');
+        fs.writeFileSync(join(viewsDir, 'AboutView.vue'), '<template>About</template>');
+
+        const result = await scanRoutes({ targetPath: tempDir });
+        expect(result.framework).toBe('vue-router');
+        expect(result.routes.length).toBe(2);
+        expect(result.routes.some((r) => r.path === '/home')).toBe(true);
+        expect(result.routes.some((r) => r.path === '/about')).toBe(true);
+      } finally {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+  });
 });

@@ -7,7 +7,9 @@ import {
   resolveBarrelExport,
   extractLocalImports,
   isRenderedInContent,
+  detectPropsDrilling,
 } from '../../src/engine/tree';
+import type { ComponentTreeNode } from '../../src/types';
 import { createMcpServer } from '../../src/mcp';
 import { closeAllDatabases, getWorkspaceDatabase, syncWorkspace } from '../../src/engine/database';
 
@@ -258,5 +260,63 @@ describe('Component Hierarchy Tree & Graph Engine (Phase 3 RFC)', () => {
     expect(warnings[0].warning).toContain('Dynamic/polymorphic component');
     expect(warnings[1].component).toBe('<Dialog.Trigger asChild>');
     expect(warnings[1].warning).toContain('Polymorphic delegate component');
+  });
+
+  it('detects 2-level forwarded props drilling and avoids false positives on literal values', () => {
+    const forwardedTree: ComponentTreeNode = {
+      component: 'CatalogView.vue',
+      filePath: '/src/views/CatalogView.vue',
+      depth: 0,
+      children: [
+        {
+          component: 'ProductCard.vue',
+          filePath: '/src/components/ProductCard.vue',
+          depth: 1,
+          passedProps: [{ propName: 'status', expression: 'product.status' }],
+          children: [
+            {
+              component: 'StatusBadge.vue',
+              filePath: '/src/components/StatusBadge.vue',
+              depth: 2,
+              passedProps: [{ propName: 'status', expression: 'status' }],
+              children: [],
+            },
+          ],
+        },
+      ],
+    };
+
+    const alerts = detectPropsDrilling(forwardedTree);
+    expect(alerts.length).toBe(1);
+    expect(alerts[0].origin).toBe('CatalogView.vue');
+    expect(alerts[0].drilledThrough).toEqual(['ProductCard.vue']);
+    expect(alerts[0].target).toBe('StatusBadge.vue');
+    expect(alerts[0].depth).toBe(2);
+    expect(alerts[0].recommendation).toContain('Provide/Inject or Composable candidate');
+
+    const literalTree: ComponentTreeNode = {
+      component: 'PageAdmin',
+      filePath: 'src/pages/PageAdmin.vue',
+      depth: 0,
+      children: [
+        {
+          component: 'Button',
+          filePath: 'src/components/Button.vue',
+          depth: 1,
+          passedProps: [{ propName: 'title', expression: "'Simpan Data'" }],
+          children: [
+            {
+              component: 'Icon',
+              filePath: 'src/components/Icon.vue',
+              depth: 2,
+              passedProps: [{ propName: 'title', expression: "'Icon Tooltip'" }],
+              children: [],
+            },
+          ],
+        },
+      ],
+    };
+
+    expect(detectPropsDrilling(literalTree)).toEqual([]);
   });
 });

@@ -1,23 +1,18 @@
 import { afterEach, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { setupHarnessConfigs } from '../../src/cli/mcp-configs';
-import { detectExistingHarnesses, detectProjectProfile, handleStrataInit } from '../../src/cli/commands/init';
-import { closeAllDatabases } from '../../src/engine/storage/schema';
+import { appendTomlMcpServer, parseTomlSafe, setupHarnessConfigs } from '../../src/cli/mcp-configs';
+import { detectExistingHarnesses, detectProjectProfile, handleStrataInit, parseHarnessArg } from '../../src/cli/commands/init';
 import { TOOL_CATALOG } from '../../src/tools/catalog';
 import { STRATA_FRONTEND_RULE, STRATA_INSPECT_SKILL, STRATA_TS_RULE, STRATA_TS_SKILL } from '../../src/cli/templates';
 import { STRATA_INSTRUCTIONS } from '../../src/instructions';
+import { createWorkspaceTracker } from '../_helpers/workspace';
 
-const roots: string[] = [];
-function tempDir(): string {
-  const dir = mkdtempSync('/tmp/strata-init-test-');
-  roots.push(dir);
-  return dir;
-}
+const workspaces = createWorkspaceTracker();
+const tempDir = () => workspaces.create('strata-init-test-');
 
 afterEach(() => {
-  closeAllDatabases();
-  roots.splice(0).forEach(r => rmSync(r, { recursive: true, force: true }));
+  workspaces.cleanupAll();
 });
 
 test('setupHarnessConfigs generates Claude Code .mcp.json correctly', async () => {
@@ -295,5 +290,133 @@ test('init without --harness scopes automatically to detected workspace client f
   expect(existsSync(join(root, '.gemini'))).toBe(false);
   expect(existsSync(join(root, '.codex'))).toBe(false);
   expect(existsSync(join(root, 'opencode.json'))).toBe(false);
+});
+
+test('does not climb to parent directory containing package.json when initializing child', async () => {
+  const parent = tempDir();
+  writeFileSync(join(parent, 'package.json'), '{"name":"parent"}');
+  const child = join(parent, 'child');
+  mkdirSync(child, { recursive: true });
+  writeFileSync(join(child, 'App.vue'), '<template><div>Child</div></template>');
+
+  await handleStrataInit({ cwd: child, harness: 'skip', yes: true });
+
+  expect(existsSync(join(child, '.strata', 'graph.db'))).toBe(true);
+  expect(existsSync(join(parent, '.strata', 'graph.db'))).toBe(false);
+});
+
+test('preserves custom fields in existing strata server config without --force, overwrites with --force', async () => {
+  const root = tempDir();
+  const mcpPath = join(root, '.mcp.json');
+  const customConfig = {
+    mcpServers: {
+      strata: {
+        command: '/custom/bun',
+        args: ['/custom/strata.js', 'serve'],
+        env: { CUSTOM: 'preserve' },
+        disabled: true,
+      },
+      other: { command: 'other-cli' },
+    },
+  };
+  writeFileSync(mcpPath, JSON.stringify(customConfig, null, 2));
+
+  const resultsNoForce = await setupHarnessConfigs(root, ['claude'], false);
+  expect(resultsNoForce[0]?.action).toBe('skipped');
+  const readBack1 = JSON.parse(readFileSync(mcpPath, 'utf8'));
+  expect(readBack1.mcpServers.strata).toEqual(customConfig.mcpServers.strata);
+  expect(readBack1.mcpServers.other).toEqual(customConfig.mcpServers.other);
+
+  const resultsForce = await setupHarnessConfigs(root, ['claude'], true);
+  expect(resultsForce[0]?.action).toBe('updated');
+  const readBack2 = JSON.parse(readFileSync(mcpPath, 'utf8'));
+  expect(readBack2.mcpServers.strata).toEqual({ command: 'strata', args: ['serve'] });
+  expect(readBack2.mcpServers.other).toEqual(customConfig.mcpServers.other);
+});
+
+test('handles quoted TOML keys without duplicating table and updates existing Codex TOML on --force', () => {
+  const root1 = tempDir();
+  const tomlPath1 = join(root1, 'config.toml');
+  const initialQuoted = '[mcp_servers."strata"]\ncommand = "custom"\nargs = []\n';
+  writeFileSync(tomlPath1, initialQuoted);
+
+  const resNoForce = appendTomlMcpServer(tomlPath1, 'strata', 'strata', ['serve'], false);
+  expect(resNoForce.action).toBe('skipped');
+  const content1 = readFileSync(tomlPath1, 'utf8');
+  expect(parseTomlSafe(content1).valid).toBe(true);
+  expect(content1.trim()).toBe(initialQuoted.trim());
+
+  const root2 = tempDir();
+  const tomlPath2 = join(root2, 'config.toml');
+  writeFileSync(tomlPath2, '[mcp_servers.strata]\ncommand = "broken-launcher"\nargs = ["old"]\n');
+
+  const resForce = appendTomlMcpServer(tomlPath2, 'strata', 'strata', ['serve'], true);
+  expect(resForce.action).toBe('updated');
+  const updated = readFileSync(tomlPath2, 'utf8');
+  expect(parseTomlSafe(updated).valid).toBe(true);
+  expect(updated).toContain('command = "strata"');
+  expect(updated).toContain('args = ["serve"]');
+  expect(updated).not.toContain('broken-launcher');
+});
+
+test('--force restores 0o755 executable permissions on pre-existing non-executable hook', async () => {
+  const root = tempDir();
+  const hooksDir = join(root, '.agents', 'hooks');
+  mkdirSync(hooksDir, { recursive: true });
+  const hookFile = join(hooksDir, 'strata-post-write.sh');
+  writeFileSync(hookFile, '#!/bin/sh\nexit 0\n');
+  chmodSync(hookFile, 0o644);
+  expect(statSync(hookFile).mode & 0o777).toBe(0o644);
+
+  await handleStrataInit({ cwd: root, harness: 'skip', force: true, yes: true });
+
+  expect(statSync(hookFile).mode & 0o777).toBe(0o755);
+});
+
+test('rejects malformed JSON configuration and preserves file without corruption', async () => {
+  const root = tempDir();
+  const mcpPath = join(root, '.mcp.json');
+  const brokenContent = '{ broken: json';
+  writeFileSync(mcpPath, brokenContent);
+
+  await expect(handleStrataInit({ cwd: root, harness: 'claude', yes: true })).rejects.toThrow(
+    /Configuration failed for harness/
+  );
+  expect(readFileSync(mcpPath, 'utf8')).toBe(brokenContent);
+});
+
+test('parseHarnessArg validates aliases, numeric choices, and rejects unknown harnesses', async () => {
+  expect(() => parseHarnessArg('cluade')).toThrow(/Unknown agent harness: 'cluade'/);
+  expect(() => parseHarnessArg('invalid')).toThrow(/Unknown agent harness: 'invalid'/);
+  expect(() => parseHarnessArg('pi')).toThrow(/Unknown agent harness: 'pi'/);
+  expect(parseHarnessArg('')).toEqual(['all']);
+  expect(parseHarnessArg('all')).toEqual(['all']);
+  expect(parseHarnessArg('skip')).toEqual(['skip']);
+  expect(parseHarnessArg('antigravity')).toEqual(['antigravity']);
+  expect(parseHarnessArg('gemini')).toEqual(['antigravity']);
+  expect(parseHarnessArg('opencode')).toEqual(['opencode']);
+  expect(parseHarnessArg('agents')).toEqual(['agents']);
+  expect(parseHarnessArg('.agents')).toEqual(['agents']);
+  expect(parseHarnessArg('3')).toEqual(['codex']);
+  expect(parseHarnessArg('codex')).toEqual(['codex']);
+  expect(parseHarnessArg('openai-codex')).toEqual(['codex']);
+
+  const rootChoice3 = tempDir();
+  const results3 = await setupHarnessConfigs(rootChoice3, parseHarnessArg('3'));
+  expect(results3).toHaveLength(1);
+  expect(results3[0].harness).toBe('Codex');
+  expect(existsSync(join(rootChoice3, '.codex', 'config.toml'))).toBe(true);
+});
+
+test('ensures active .strata/ rule in .gitignore and creates .strata/.gitignore', async () => {
+  const root = tempDir();
+  const gitignorePath = join(root, '.gitignore');
+  writeFileSync(gitignorePath, '# .strata cache goes here\n');
+
+  await handleStrataInit({ cwd: root, harness: 'skip', yes: true });
+
+  expect(readFileSync(gitignorePath, 'utf8')).toContain('.strata/');
+  expect(existsSync(join(root, '.strata', '.gitignore'))).toBe(true);
+  expect(readFileSync(join(root, '.strata', '.gitignore'), 'utf8')).toBe('*\n');
 });
 

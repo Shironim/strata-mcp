@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'bun:test';
-import { coerceToolArguments } from '../../src/mcp';
+import { coerceToolArguments, parseSafePositiveInt } from '../../src/mcp';
+import { TOOL_CATALOG } from '../../src/tools/catalog';
+import { CAPABILITY_MANIFEST } from '../../src/tools/capabilities';
+import { VALID_AUDIT_TARGETS } from '../../src/engine/path-resolver';
+import * as StrataIndex from '../../src/index';
 import {
   createSuccessEnvelope,
   createNotFoundEnvelope,
@@ -146,6 +150,67 @@ describe('MCP Input Coercion & Contract Standardization', () => {
     });
     expect(rootRes.root).toBe('/custom/root');
     expect(rootRes.target_path).toBe('/custom/root');
+  });
+
+  it('normalizes framework_hint, scope_path, alias_map, exclude_dirs, ignore_patterns, and safe numeric bounds', () => {
+    expect(parseSafePositiveInt(3)).toBe(3);
+    expect(parseSafePositiveInt('5')).toBe(5);
+    expect(parseSafePositiveInt('invalid', 2)).toBe(2);
+    expect(parseSafePositiveInt(NaN, 4)).toBe(4);
+    expect(parseSafePositiveInt(0, 1)).toBe(1);
+    expect(parseSafePositiveInt(-3, 1)).toBe(1);
+    expect(parseSafePositiveInt(undefined, 3)).toBe(3);
+
+    expect(coerceToolArguments('audit_frontend', { framework_hint: 'nuxt' }).framework).toBe('nuxt');
+    expect(coerceToolArguments('audit_frontend', { frameworkHint: 'next-app' }).framework).toBe('next-app');
+
+    const s1 = coerceToolArguments('get_component_tree', { scope_path: 'apps/web' });
+    expect(s1.scope_filter).toBe('apps/web');
+    expect(s1.scope_path).toBe('apps/web');
+    const s2 = coerceToolArguments('audit_frontend', { scopeFilter: 'features/auth' });
+    expect(s2.scope_path).toBe('features/auth');
+    expect(s2.scope_filter).toBe('features/auth');
+
+    expect(coerceToolArguments('get_component_tree', { aliasMap: { '@/': 'src/' } }).alias_map).toEqual({ '@/': 'src/' });
+    expect(coerceToolArguments('get_component_tree', { alias: '@/=src/,~components/=src/components/' }).alias_map).toEqual({
+      '@/': 'src/',
+      '~components/': 'src/components/',
+    });
+    expect(coerceToolArguments('get_component_tree', { alias_map: '{"@":"resources/js"}' }).alias_map).toEqual({
+      '@': 'resources/js',
+    });
+
+    const listRes = coerceToolArguments('audit_frontend', {
+      excludeDirs: 'dist, build , coverage',
+      ignorePatterns: '*.stories.vue, *.test.vue',
+    });
+    expect(listRes.exclude_dirs).toEqual(['dist', 'build', 'coverage']);
+    expect(listRes.ignore_patterns).toEqual(['*.stories.vue', '*.test.vue']);
+
+    const bad = coerceToolArguments('get_component_tree', { depth: 'not-a-number', max_results: 0 });
+    expect(bad.depth).toBeUndefined();
+    expect(bad.max_depth).toBeUndefined();
+    expect(bad.max_results).toBeUndefined();
+
+    const validDepth = coerceToolArguments('audit_frontend', { depth: '4' });
+    expect(validDepth.depth).toBe(4);
+    expect(validDepth.max_depth).toBe(4);
+  });
+
+  it('keeps public library exports, tool catalog, and audit capabilities consistent', () => {
+    expect('findSimilarTemplates' in StrataIndex).toBe(false);
+    expect('auditBundleHealth' in StrataIndex).toBe(false);
+    expect(typeof StrataIndex.scanDynamicImportsAndGlobals).toBe('function');
+    expect(Array.isArray(StrataIndex.TOOLS)).toBe(true);
+    expect(StrataIndex.TOOLS.length).toBe(6);
+
+    const expectedTargets = ['routes', 'api-contracts', 'dead-components', 'dead-state', 'all'].sort();
+    const auditProps = TOOL_CATALOG.find((tool) => tool.name === 'audit_frontend')!.inputSchema.properties as Record<string, any>;
+    expect([...auditProps.target.enum].sort()).toEqual(expectedTargets);
+    expect([...VALID_AUDIT_TARGETS].sort()).toEqual(expectedTargets);
+    expect(CAPABILITY_MANIFEST.audit_frontend.map((operation) => operation.id).sort()).toEqual(expectedTargets);
+    expect(auditProps).not.toHaveProperty('threshold');
+    expect(auditProps).not.toHaveProperty('exemplar_path');
   });
 });
 

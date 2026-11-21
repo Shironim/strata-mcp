@@ -2,23 +2,22 @@ import { beforeAll, afterAll, describe, expect, it } from 'bun:test';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { main } from '../../src/cli';
-import { closeAllDatabases, getWorkspaceDatabase } from '../../src/engine/database';
+import { getWorkspaceDatabase } from '../../src/engine/database';
+import { captureConsoleLog, createWorkspaceTracker } from '../_helpers/workspace';
 
-const FIXTURES_DIR = join(import.meta.dir, '../fixtures');
+const workspaces = createWorkspaceTracker();
+let FIXTURES_DIR = '';
 
 describe('CLI Companion (Task 6 DoD)', () => {
-  beforeAll(() => { getWorkspaceDatabase(FIXTURES_DIR, { create: true }); });
-  afterAll(() => { closeAllDatabases(); });
+  beforeAll(() => {
+    FIXTURES_DIR = workspaces.copyFixtures('strata-cli-fixtures-');
+    getWorkspaceDatabase(FIXTURES_DIR, { create: true });
+  });
+  afterAll(() => {
+    workspaces.cleanupAll();
+  });
   it('executes find-component-usage from CLI and outputs valid JSON', async () => {
-    const logs: string[] = [];
-    const originalLog = console.log;
-    console.log = (...args) => logs.push(args.join(' '));
-
-    try {
-      await main(['find-component-usage', 'OldButton', '--path', FIXTURES_DIR, '--json']);
-    } finally {
-      console.log = originalLog;
-    }
+    const logs = await captureConsoleLog(() => main(['find-component-usage', 'OldButton', '--path', FIXTURES_DIR, '--json']));
 
     expect(logs.length).toBeGreaterThan(0);
     const parsed = JSON.parse(logs[0]);

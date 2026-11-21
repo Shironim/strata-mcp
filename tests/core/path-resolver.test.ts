@@ -79,4 +79,14 @@ describe('Sprint 1 — Path Resolver & Project Root Auto-Discovery', () => {
     const resolvedFromHint = resolveWorkspacePath('./fixtures/VueCounter.vue', mockRoot);
     expect(resolvedFromHint).toBe(join(mockRoot, 'VueCounter.vue'));
   });
+
+  it('resolves relative paths against rootHint with or without a leading slash', () => {
+    const rootHint = '/mock-workspace/vue-app';
+    expect(resolveWorkspacePath('/src/components/ProductCard.vue', rootHint).replace(/\\/g, '/')).toContain(
+      '/mock-workspace/vue-app/src/components/ProductCard.vue'
+    );
+    expect(resolveWorkspacePath('src/components/ProductCard.vue', rootHint).replace(/\\/g, '/')).toContain(
+      '/mock-workspace/vue-app/src/components/ProductCard.vue'
+    );
+  });
 });

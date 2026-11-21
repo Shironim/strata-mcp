@@ -1,8 +1,7 @@
 import { beforeAll, afterAll, describe, expect, it } from 'bun:test';
-import { existsSync, rmSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-  closeAllDatabases,
   formatStateImpactAsText,
   getWorkspaceDatabase,
   queryStateImpact,
@@ -10,24 +9,18 @@ import {
   queryUpwardBlastRadiusFromDb,
   syncWorkspace,
 } from '../../src/engine/database';
+import { createWorkspaceTracker } from '../_helpers/workspace';
 
-const FIXTURES_DIR = join(import.meta.dir, '../fixtures');
+const workspaces = createWorkspaceTracker();
+let FIXTURES_DIR = '';
 
 describe('Persistent SQLite Codebase Graph Cache Engine (bun:sqlite)', () => {
   beforeAll(() => {
-    closeAllDatabases();
-    const dbDir = join(FIXTURES_DIR, '.strata');
-    if (existsSync(dbDir)) {
-      try {
-        rmSync(dbDir, { recursive: true, force: true });
-      } catch {
-        // Ignore file lock on Windows parallel runs
-      }
-    }
+    FIXTURES_DIR = workspaces.copyFixtures('strata-db-test-');
   });
 
   afterAll(() => {
-    closeAllDatabases();
+    workspaces.cleanupAll();
   });
 
   it('initializes SQLite database in .strata with WAL mode and gitignore', () => {

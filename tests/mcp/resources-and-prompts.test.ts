@@ -1,8 +1,7 @@
 import { describe, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { USE_STRATA_SKILL_TEMPLATE } from '../../src/cli/templates';
 import { DEFAULT_RESPONSE_BUDGET_BYTES } from '../../src/engine/context-budget';
 import {
   getStrataPrompt,
@@ -120,30 +119,6 @@ describe('MCP Resources & Prompts Contract', () => {
     if (filePrompt.messages[1].content.type === 'text') {
       expect(filePrompt.messages[1].content.text).toContain('path: "src/App.vue"');
     }
-  });
-
-  test('USE_STRATA_SKILL_TEMPLATE stays synchronized with WORKFLOW_PLAYBOOKS and .agents/skills/use-strata/SKILL.md (anti template-drift)', () => {
-    const registeredToolNames = new Set(TOOLS.map((t) => t.name));
-    expect(USE_STRATA_SKILL_TEMPLATE).toContain('Canonical Workflow Playbooks');
-
-    const repoSkill = readFileSync(join(process.cwd(), '.agents', 'skills', 'use-strata', 'SKILL.md'), 'utf8');
-    expect(repoSkill).toBe(USE_STRATA_SKILL_TEMPLATE);
-
-    const callMatches = USE_STRATA_SKILL_TEMPLATE.matchAll(/Call `([a-z_]+)` with `(\{[^`]+\})`/g);
-    let matchedAny = false;
-    for (const match of callMatches) {
-      matchedAny = true;
-      const toolName = match[1];
-      const argObjectText = match[2];
-      expect(registeredToolNames.has(toolName)).toBe(true);
-      const tool = findTool(toolName)!;
-      const props = Object.keys(tool.inputSchema.properties ?? {});
-      const paramKeys = Array.from(argObjectText.matchAll(/([a-z_]+)\s*:/g)).map((m) => m[1]);
-      for (const key of paramKeys) {
-        expect(props).toContain(key);
-      }
-    }
-    expect(matchedAny).toBe(true);
   });
 
   test('smart truncation keeps strata://components/index under 16 KB and stays read-only (no .strata/)', async () => {
