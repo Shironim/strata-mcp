@@ -1,6 +1,6 @@
-# Lifecycle hooks and analysis execution
+# Lifecycle Hooks and Analysis Execution
 
-## Generated post-write hook
+## Generated Post-Write Hook
 
 `src/cli/templates.ts` owns `STRATA_POST_WRITE_HOOK`.
 `src/cli/mcp-configs.ts` generates harness-specific configuration; the init command
@@ -18,13 +18,11 @@ Septum pre-write boundary guards are a separate installation and policy owner.
 Strata does not establish their presence or enforcement by generating its own
 post-write hook. Validate those integration boundaries in the actual client.
 
-## Analysis preflight
+## Analysis Preflight
 
-Indexed tree/state operations and patch planning refresh initialized indices before
-querying them. Failed refresh is an analysis error, rather than a successful empty
-result. Source-only inspection/search and filesystem audits do not require index
-initialization. Library upward traversal and patch planning retain source fallback
-on uninitialized workspaces without creating `.strata`.
+Indexed workspace, file, and graph operations refresh `.strata/graph.db` before querying it.
+Failed refresh is an analysis error rather than a successful empty result.
+Direct `read_slice` calls inspect files on disk with hash verification and do not require index initialization.
 
 Internal prepared callers may use `skipSync` only when they own the preflight.
 A successful sync does not establish atomic freshness of every later filesystem
@@ -52,8 +50,8 @@ SQLite data persists separately across process restarts.
 
 - **Concurrency and limits (`AnalysisSupervisor`).** One tool handler runs at a time in the server process, with up to four waiting requests by default. The 2 MiB limit applies to the serialized job (name, normalized arguments, and root hint). The 120-second timer starts when execution begins. Calls beyond queue capacity receive `SERVER_BUSY`. The defaults can be overridden when constructing a supervisor.
 - **Cancellation & shutdown:** Timeout or cancellation rejects the client response and aborts the request signal while retaining the execution slot until handler and database cleanup settle. Queued cancellations remove the request; shutdown rejects queued work, aborts active work, and waits for cleanup. Parallel audit/pool work settles all started siblings before returning a failure.
-- **Cooperative abort scope:** Source reads, sync checkpoints, and `ast-grep` search subprocesses cooperate with cancellation. Cancellation cannot preempt synchronous JavaScript or enforce a hard process memory limit. No separate analysis worker is launched.
-- **Progress notifications (`_meta.progressToken`).** If a client supplies a progress token, the dispatcher forwards updates emitted by the operation through `reportAnalysisProgress`. Current emitters include workspace sync, component tree traversal, frontend audits, patch planning, and selected search branches.
+- **Cooperative abort scope:** Source reads, sync checkpoints, and in-process scans cooperate with cancellation. Cancellation cannot preempt synchronous JavaScript or enforce a hard process memory limit. No separate analysis worker is launched.
+- **Progress notifications (`_meta.progressToken`).** If a client supplies a progress token, the dispatcher forwards updates emitted by the operation through `reportAnalysisProgress`. Current emitters include workspace sync, graph traversal, and selected search branches.
 - **Per-request syntax cache:** Retains at most 32 ASTs and at most 2 MiB of source text (UTF-16 accounting), keyed by filename, script kind, and exact source hash, and is discarded after the request. AST memory overhead is additional (not a heap/RSS limit), and source/dependency freshness checks still read disk.
 
 On completion the supervisor closes registered database connections. The
@@ -64,8 +62,7 @@ for active analysis cleanup before closing the server and exiting.
 
 ## Verification
 
-- `tests/memory/supervisor.test.ts`: timeout/abort serialization, queued rejection and shutdown cleanup.
-- `tests/core/analysis-execution.test.ts`: real subprocess termination, temporary-input cleanup, bounded search/pool work and syntax-cache isolation.
-- `tests/core/analysis-consistency.test.ts`: failed preflight and cancellation publication boundaries.
-- `tests/cli/init-harness.test.ts`, `tests/cli/init-audit-fixes.test.ts`: generated harness artifacts; active client execution is outside their scope.
-- `tests/integration/mcp-server-protocol.test.ts`: stdio JSON-RPC handshake, `_meta.progressToken` notifications, and text-mode `structuredContent` omission.
+- `tests/core/tier1-v3-storage-sync.test.ts`: incremental sync and SQLite Schema v3 preflight invariants.
+- `tests/core/v2-query-services.test.ts`: v2 workspace, inspection, graph, slice, and search service behavior.
+- `tests/cli/cli-v2.test.ts`: CLI v2 command dispatch and `init` artifact generation.
+- `tests/integration/mcp-v2-protocol.test.ts`: stdio JSON-RPC handshake, `_meta.progressToken` notifications, and text-mode `structuredContent` omission.

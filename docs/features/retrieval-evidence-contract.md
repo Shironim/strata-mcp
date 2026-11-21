@@ -1,10 +1,10 @@
-# Retrieval evidence, response budgets and continuation
+# Retrieval Evidence, Response Budgets, and Continuation
 
-## Evidence ownership
+## Evidence Ownership
 
-`src/types.ts` defines `RetrievalEvidence`; `source-file.ts`,
-`retrieval-evidence.ts` and `index-retrieval-evidence.ts` capture its evidence.
-The response wrapper adds conservative fallback metadata to uninstrumented branches.
+`src/types.ts` defines `RetrievalEvidence`; `src/engine/source-file.ts` and
+`src/engine/retrieval-evidence.ts` capture its evidence.
+The response layer adds conservative fallback metadata when full provenance is unavailable.
 A hash identifies captured inputs; it does not establish semantic correctness or
 complete workspace coverage.
 
@@ -19,7 +19,7 @@ The principal fields are:
 | `index` | Optional generation, configuration fingerprint, cache version, manifest hash and observed consistency. |
 | `dependencies` | Separately reports whether dependency freshness was verified. |
 | `omissions`, `limitations` | Preserve unsupported syntax, failed reads and selection boundaries. |
-| `queryId`, `retrievalId`, `engineRevision` | Query and retrieval identities. Engine revision combines the package version with the first 16 hex characters of the analysis fingerprint. See [index identity](storage-and-delta-sync.md#b-effective-scope-and-revision). |
+| `queryId`, `retrievalId`, `engineRevision` | Query and retrieval identities. Engine revision combines the package version with the first 16 hex characters of the analysis fingerprint. See [Storage & Monorepo Sync](storage-and-monorepo-sync.md). |
 
 Source references bind `[startOffset, endOffset)` to a source SHA-256.
 Inclusive `source_range` selections can also supply `expected_hash`.
@@ -40,7 +40,7 @@ The MCP dispatcher also enforces the final serialized response limit.
 
 | Parameter | Contract |
 |---|---|
-| `format` | Text by default; JSON for structured analysis. `get_component_tree` also supports Mermaid. Alias: `output_format`. Exact source and legacy primary representations have operation-specific rendering. |
+| `format` | Text by default; JSON for structured analysis (`'text' \| 'json'`). |
 | `max_bytes` | Safe integer at least 512; MCP defaults to 16384 bytes. Applies to the serialized tool result, including text and structured metadata, excluding JSON-RPC framing. |
 | `response_detail` | `full` or `summary`; summaries are projections with explicit omitted-detail diagnostics. Exact source requires full detail. |
 | `include_structured` | False by default in text MCP transport; true retains `structuredContent`. Otherwise the dispatcher omits `structuredContent` when `content` text is present. JSON requests retain `structuredContent`. Direct handler calls do not perform this dispatcher stripping. |
@@ -79,14 +79,12 @@ Therefore an unchanged preflight does not invalidate the next tree/state page.
 
 ## Verification
 
-- `tests/core/continuation-identity.test.ts`: selection/source mutation and query identity.
-- `tests/core/analysis-consistency.test.ts`: unchanged tree continuation and changed-input rejection.
-- `tests/mcp/serialized-budget.test.ts`: serialized size limits and exact-source preservation.
-- `tests/mcp/summary-response.test.ts`: summary boundaries and full-detail recovery.
+- `tests/core/retrieval-evidence.test.ts`: evidence metadata, freshness, and omission reporting.
+- `tests/core/source-reference.test.ts`: hash-bound `source_ref` validation and stale-source detection.
+- `tests/integration/mcp-v2-protocol.test.ts`: serialized size limits, continuation, and MCP transport framing.
 
-Owners: [catalog](../../src/tools/catalog.ts),
-[normalization](../../src/tools/request.ts),
-[response wrapper](../../src/tools/retrieval-response.ts),
-[summary projection](../../src/tools/summary-response.ts),
-[decision metadata](../../src/tools/decision-response.ts),
+Owners: [catalog](../../src/tools/v2/catalog.ts),
+[handlers](../../src/tools/v2/handlers.ts),
+[formatter](../../src/tools/v2/formatter.ts),
+[response budget](../../src/engine/context-budget.ts),
 [MCP dispatcher](../../src/mcp.ts), [CLI dispatch](../../src/cli.ts).

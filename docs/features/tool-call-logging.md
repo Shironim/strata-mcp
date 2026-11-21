@@ -1,14 +1,13 @@
 # Strata Tool Call Logging
 
-Local logging contract for the six MCP tools. Implementation owner: `src/engine/telemetry.ts`;
-integration: `src/mcp.ts`; regressions: `tests/telemetry.test.ts`.
+Local logging contract for the five MCP tools (`map_workspace`, `inspect_file`, `query_graph`, `read_slice`, `search_code`). Implementation owner: `src/engine/telemetry.ts`; integration: `src/mcp.ts`; regressions: `tests/telemetry.test.ts`.
 
 ## Logged Data Evaluation
 
 | Data | Decision and Purpose |
 | --- | --- |
 | UTC Timestamp, tool, status, duration | Recorded for every invocation reaching the dispatcher, including handler errors, analysis exceptions, and unknown tools. Duration measures internal execution prior to logging, not network/client transport latency. |
-| Action/view/target/direction/refactor_type | The dispatcher uses recognized schema modes and defaults, with branch inference for `find_code` and `inspect_component`. Some calls omit `action`. |
+| Action/view/query/kind/direction | The dispatcher records normalized mode fields (`view`, `query`, `kind`, `direction`) when present in tool arguments. |
 | Trace/session ID | Stored IDs are capped at 64 characters. The dispatcher generates a 12-character trace ID when missing. Session IDs come from the caller. |
 | Input | Up to 16 normalized argument keys. Allowlisted scalar fields such as `mode` and `symbol` retain their values, with strings capped at 96 characters. Allowlisted path fields (`path`, `file_path`, `target_path`) retain up to 120 characters. Absolute paths are reduced to a workspace-relative path or basename. Other string values, including `code` and `pattern`, are recorded by UTF-8 byte count. Other values are recorded by type. |
 | `metrics.bytes_out` | Total UTF-8 bytes across all final text blocks. Excludes protocol envelope and structured content. |
@@ -49,6 +48,6 @@ New builds require restarting active client/server sessions running legacy artif
 
 Regressions verify JSONL/UTF-8 compliance, complete response metrics, exact 16 KiB bloat threshold,
 output digests and opt-in toggles, rotation replacing old backups, sink failure isolation, and dispatcher
-routing across all six tools including handler errors, unknown tools, and supervisor rejections.
+routing across all five tools including handler errors, unknown tools, and supervisor rejections.
 Compatibility tests enforce input masking and ensure `.strata/` is never auto-created on unindexed workspaces.
 Local test, build, and stdio results do not prove active MCP clients have loaded this version.
