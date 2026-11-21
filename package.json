@@ -1,7 +1,7 @@
 {
   "name": "@dimassetoid/strata-mcp",
-  "version": "0.10.1",
-  "description": "Multi-framework frontend structural AST search, component graph, and route topology engine for AI agents (Vue, React, Next, Nuxt, Astro, Svelte)",
+  "version": "0.11.0",
+  "description": "Static and semantic code analysis MCP server and CLI for AI coding agents across Vue, Nuxt, React, Next.js, Svelte, and Astro codebases.",
   "type": "module",
   "main": "dist/index.js",
   "types": "src/types.ts",
@@ -43,7 +43,8 @@
     "astro",
     "svelte",
     "ast",
-    "ast-grep",
+    "static-analysis",
+    "semantic-analysis",
     "code-search",
     "sfc",
     "component-tree",
@@ -59,12 +60,6 @@
     "@vue/compiler-sfc": "^3.5.13",
     "ignore": "^7.0.12",
     "svelte": "^5.57.2"
-  },
-  "optionalDependencies": {
-    "@ast-grep/cli-darwin-arm64": "0.45.3",
-    "@ast-grep/cli-darwin-x64": "0.45.3",
-    "@ast-grep/cli-linux-x64-gnu": "0.45.3",
-    "@ast-grep/cli-win32-x64-msvc": "0.45.3"
   },
   "devDependencies": {
     "@types/bun": "^1.4.0",
