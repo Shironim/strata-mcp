@@ -6,6 +6,31 @@ import { canonicalizePath } from '../path-resolver';
 export const SUPPORTED_EXTENSIONS = new Set(['.vue', '.astro', '.svelte', '.tsx', '.jsx', '.ts', '.js']);
 export const SCHEMA_USER_VERSION = 2;
 
+export class IndexSchemaTooNewError extends Error {
+  constructor(version: number) {
+    super(`INDEX_SCHEMA_TOO_NEW: SQLite index schema ${version} exceeds supported schema ${SCHEMA_USER_VERSION}. Use a compatible Strata build.`);
+  }
+}
+
+export function assertCompatibleSchema(db: Database): number {
+  const version = db.query<{ user_version: number }, []>('PRAGMA user_version').get()!.user_version;
+  if (version > SCHEMA_USER_VERSION) {
+    throw new IndexSchemaTooNewError(version);
+  }
+  return version;
+}
+
+export function openReadonlyIndex(dbPath: string): Database {
+  const db = new Database(dbPath, { readonly: true });
+  try {
+    assertCompatibleSchema(db);
+    return db;
+  } catch (error) {
+    db.close();
+    throw error;
+  }
+}
+
 /**
  * Checks if a file path represents a layout file.
  */
@@ -67,6 +92,7 @@ export function getWorkspaceDatabase(
     : (resolveIndexedWorkspaceRoot(requestedRoot) ?? requestedRoot);
   const existing = dbRegistry.get(absRoot);
   if (existing) {
+    assertCompatibleSchema(existing);
     return existing;
   }
 
@@ -88,15 +114,15 @@ export function getWorkspaceDatabase(
   const dbPath = join(dbDir, 'graph.db');
   const db = new Database(dbPath, { create: true });
   try {
-    // Enable WAL mode & foreign keys for high-concurrency performance
+    db.run('PRAGMA busy_timeout = 15000;');
+    initSchema(db);
+    assertCompatibleSchema(db);
     db.run('PRAGMA journal_mode = WAL;');
     db.run('PRAGMA synchronous = NORMAL;');
     db.run('PRAGMA foreign_keys = ON;');
-    db.run('PRAGMA busy_timeout = 15000;');
     db.run('PRAGMA cache_size = -8192;');
     db.run('PRAGMA temp_store = FILE;');
 
-    initSchema(db);
   } catch (err) {
     db.close();
     const code = (err as { code?: string })?.code;
@@ -145,7 +171,7 @@ export function closeAllDatabases(): void {
  * Uses PRAGMA user_version to fast-path warm connection opens without repeating DDL/ALTER statements.
  */
 export function initSchema(db: Database): void {
-  const userVersion = (db.query('PRAGMA user_version;').get() as { user_version: number } | null)?.user_version ?? 0;
+  const userVersion = assertCompatibleSchema(db);
   if (userVersion === SCHEMA_USER_VERSION) {
     const coreTables = (
       db
@@ -159,6 +185,13 @@ export function initSchema(db: Database): void {
     }
   }
 
+  db.transaction(() => {
+    assertCompatibleSchema(db);
+    migrateSchema(db);
+  }).immediate();
+}
+
+function migrateSchema(db: Database): void {
   db.run(`
     CREATE TABLE IF NOT EXISTS meta (
       key TEXT PRIMARY KEY,
@@ -237,12 +270,8 @@ export function initSchema(db: Database): void {
       tableColumnsCache.set(table, cols);
     }
     if (cols.has(colName)) return;
-    try {
-      db.run(`ALTER TABLE ${table} ADD COLUMN ${columnDef};`);
-      cols.add(colName);
-    } catch {
-      // column already exists
-    }
+    db.run(`ALTER TABLE ${table} ADD COLUMN ${columnDef};`);
+    cols.add(colName);
   }
 
   addColumnIfNotExists('files', 'render_boundary TEXT');

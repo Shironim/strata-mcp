@@ -1,5 +1,7 @@
 #!/usr/bin/env bun
 import { mkdirSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { analysisBuildDefines } from '../src/analysis-source-fingerprint';
 
 const targets = [
   { target: 'bun-linux-x64', outfile: 'dist/strata-linux-x64' },
@@ -49,16 +51,19 @@ const mockConsolidatePlugin = {
   },
 };
 
+const root = resolve(import.meta.dir, '..');
+const define = analysisBuildDefines(root);
 for (const { target, outfile } of targetsToBuild) {
   console.log(`Compiling ${target} -> ${outfile}...`);
   const result = await Bun.build({
-    entrypoints: ['./bin/strata.ts'],
+    entrypoints: [resolve(root, 'bin/strata.ts')],
     target: 'bun',
     compile: {
       target: target as any,
       outfile,
     },
     plugins: [mockConsolidatePlugin],
+    define,
   });
 
   if (!result.success) {
