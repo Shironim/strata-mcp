@@ -1,0 +1,16 @@
+{
+  "name": "@acme/ui",
+  "version": "1.0.0",
+  "type": "module",
+  "dependencies": {
+    "@acme/shared": "workspace:*",
+    "vue": "^3.5.0",
+    "react": "^19.0.0"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./BaseButton.vue": "./src/BaseButton.vue",
+    "./OrderSummaryCard.vue": "./src/OrderSummaryCard.vue",
+    "./ActionCard": "./src/ActionCard.tsx"
+  }
+}

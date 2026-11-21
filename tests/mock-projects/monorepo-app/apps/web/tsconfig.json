@@ -1,0 +1,13 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "paths": {
+      "~/*": ["./*"],
+      "@/*": ["./*"],
+      "@acme/shared": ["../../packages/shared/src/index.ts"],
+      "@acme/ui": ["../../packages/ui/src/index.ts"],
+      "@acme/ui/*": ["../../packages/ui/src/*"]
+    }
+  },
+  "include": ["./**/*", ".nuxt/imports.d.ts", ".nuxt/components.d.ts"]
+}

@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "jsx": "preserve",
+    "paths": {
+      "@/*": ["./*"],
+      "@acme/shared": ["../../packages/shared/src/index.ts"],
+      "@acme/ui": ["../../packages/ui/src/index.ts"]
+    }
+  },
+  "include": ["app/**/*"]
+}

@@ -1,0 +1,8 @@
+{
+  "name": "acme-monorepo",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ]
+}

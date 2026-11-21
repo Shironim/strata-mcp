@@ -1,0 +1,12 @@
+{
+  "name": "@acme/web",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "nuxt": "^3.15.0",
+    "vue": "^3.5.0",
+    "pinia": "^2.3.0",
+    "@acme/shared": "workspace:*",
+    "@acme/ui": "workspace:*"
+  }
+}
