@@ -1,8 +1,5 @@
 # Retrieval evidence, response budgets and continuation
 
-**Status:** Implementation contract
-**Last updated:** 2026-11-14
-
 ## Evidence ownership
 
 `src/types.ts` defines `RetrievalEvidence`; `source-file.ts`,
@@ -22,7 +19,7 @@ The principal fields are:
 | `index` | Optional generation, configuration fingerprint, cache version, manifest hash and observed consistency. |
 | `dependencies` | Separately reports whether dependency freshness was verified. |
 | `omissions`, `limitations` | Preserve unsupported syntax, failed reads and selection boundaries. |
-| `queryId`, `retrievalId`, `engineRevision` | Query/retrieval identity and package/compiler policy identity; not a signed attestation or a hash of every engine source file. |
+| `queryId`, `retrievalId`, `engineRevision` | Query and retrieval identities. Engine revision combines the package version with the first 16 hex characters of the analysis fingerprint. See [index identity](storage-and-delta-sync.md#b-effective-scope-and-revision). |
 
 Source references bind `[startOffset, endOffset)` to a source SHA-256.
 Inclusive `source_range` selections can also supply `expected_hash`.
@@ -46,7 +43,7 @@ The MCP dispatcher also enforces the final serialized response limit.
 | `format` | Text by default; JSON for structured analysis. `get_component_tree` also supports Mermaid. Alias: `output_format`. Exact source and legacy primary representations have operation-specific rendering. |
 | `max_bytes` | Safe integer at least 512; MCP defaults to 16384 bytes. Applies to the serialized tool result, including text and structured metadata, excluding JSON-RPC framing. |
 | `response_detail` | `full` or `summary`; summaries are projections with explicit omitted-detail diagnostics. Exact source requires full detail. |
-| `include_structured` | False by default in text MCP transport; true retains structured content. Otherwise the dispatcher returns `{ "summary": "omitted_for_text_format" }` instead. JSON requests retain structured content. Direct handler calls do not perform this dispatcher stripping. |
+| `include_structured` | False by default in text MCP transport; true retains `structuredContent`. Otherwise the dispatcher omits `structuredContent` when `content` text is present. JSON requests retain `structuredContent`. Direct handler calls do not perform this dispatcher stripping. |
 | `continuation_token` | Repeat the same analysis with the returned token to select the next page. Summary requests do not accept continuation. |
 
 A 512-byte minimum does not promise every metadata block or item fits. Budget
@@ -55,31 +52,12 @@ is not cut into arbitrary fragments to satisfy a budget.
 
 ### Effective detail default and transport boundaries
 
-The catalog advertises JSON Schema `default: "summary"` for `response_detail`,
-but normalization/dispatch does not insert that default. Current execution only
-projects a summary when `response_detail: "summary"` is explicitly supplied;
-omission follows the primary/full-detail path, still subject to budgeting.
-This is a schema/runtime discrepancy, not a guarantee that every client sends
-the same request. Specify `response_detail` explicitly, including `full` for
-exact source. This documentation records the discrepancy without changing it.
-
-Summary projection returns `resultSummary`, preserved `safetyDetails`,
-`isTruncated` and available evidence/diagnostics. It is not the full operation
-payload or a continuation page. Full results can also be paginated: `full` does
-not mean unlimited output. Summary plus continuation, or summary plus an exact
-source selector, is rejected.
-
-The response layer also supplies `decision` with `status`, `emptyOutcome`,
-`selection`, capability assessment and suggested `next` actions. It describes the
-observed result; it does not upgrade source correctness, freshness or coverage.
-Counts are tied to the selected operation/collection, not automatically to every
-runtime consumer. Errors, partial results and summaries require different next
-steps; a zero count alone is insufficient to establish absence.
-
-These rules describe MCP/wrapped-tool responses. CLI commands using engine
-functions can print raw analysis JSON or text without the MCP evidence/decision
-envelope or its transport omission behavior. Check the feature and CLI dispatch
-before treating their output schemas as interchangeable.
+| Aspect | Behavior |
+|---|---|
+| **`response_detail` default** | Both JSON Schema and runtime default to `"full"` (still subject to `max_bytes` pagination). Summary mode is opt-in: specify `response_detail: "summary"` explicitly when you only need counts/previews and diagnostics. |
+| **`summary` vs `full`** | Summary projection returns `resultSummary`, preserved `safetyDetails`, `isTruncated`, and available evidence/diagnostics. `full` can still be paginated when exceeding `max_bytes`. `summary` combined with `continuation_token` or an exact source selector is rejected. |
+| **`decision` metadata** | Supplies `status`, `emptyOutcome`, `selection`, capability assessment, and suggested `next` actions. It describes the observed result—a zero count alone does not establish runtime absence. |
+| **MCP vs CLI output** | These rules describe MCP/wrapped-tool responses. CLI commands calling engine functions directly can print raw analysis JSON or text without the MCP evidence/decision envelope or transport omission behavior. |
 
 ## Continuation identity
 
@@ -95,7 +73,8 @@ and the hash of the ordered selection. This detects input or selection changes;
 it does not authenticate the caller or prove a complete dependency snapshot.
 
 `sync_generation` identifies published index revisions. Unchanged sync preserves
-it; source/dependency/configuration rebuilds or route-manifest changes advance it.
+it. Published source, dependency, configuration, or analysis-fingerprint changes
+and route-manifest changes can advance it.
 Therefore an unchanged preflight does not invalidate the next tree/state page.
 
 ## Verification

@@ -1,7 +1,5 @@
 # trace_state — shared dependency impact and chains
 
-**Status:** Implementation contract. **Reviewed:** 2026-11-14, package `0.8.2`.
-
 Query indexed store, context and composable dependencies. Direct impact groups
 files as readers or mutators; chain mode follows bounded consumer/dependency
 relationships. Classification is static and framework-specific, not an execution
@@ -67,12 +65,21 @@ Access modes combine these expressions with assignment and naming heuristics:
   such as `@click="store.toggle"` are writes.
 - Ordinary `:handler="store.toggle"` binding is a read. Supported destructured
   aliases retain source coordinates; supported watch patterns use `watch`.
-- Ordinary Vue store property reads do not currently populate
-  `accessedProperties`. An absent property list does not mean no field is used.
+- Vue `v-for` aliases shadow script bindings within the loop. The iterable
+  is analyzed in its enclosing scope.
+- Nuxt tracks local refs initialized by `useState` with a literal key. Direct
+  script writes such as `count.value = 0` and template writes such as `count++`
+  can be attributed to the key.
+- Store/composable member accesses (`store.items`, `store.checkout()`) and
+  destructured bindings populate `accessedProperties`, excluding Pinia meta
+  members (`$patch`, `$reset`, `$subscribe`, `$onAction`, `$state`, `$id`, `$dispose`).
+  An absent property list means no tracked member access was statically matched on that line.
 
 React uses lexical import bindings and AST access classification for supported
 stores, contexts and custom hooks. Type-only imports and shadowed bindings are
 distinguished. Supported React dependencies can include `accessedProperties`.
+Calling an alias returned by a direct store selector such as `state => state.clear`
+can be reported as a write using action-name heuristics.
 React built-ins such as local `useState`/`useReducer` are not themselves shared
 dependency keys; invoking a local setter does not create a shared-state record.
 
@@ -80,8 +87,9 @@ Other frameworks, auto-imports and composables use supported syntax and naming
 conventions. Support for one store pattern does not establish all APIs, wrappers,
 aliases or runtime effects. `actionsCalled` may contain normalized snippets such
 as `ui.toggle()`, not bare method names or original arguments.
-`lineNumber`/`usageSnippet` are representative evidence: a reader's selected
-line can be its import/initialization rather than its template read.
+`lineNumber` and `usageSnippet` come from the same observation. Direct queries
+prefer writes, then watches, then reads. Within a mode, the earliest located
+observation is preferred. A reader's selected line can be its import or initialization.
 
 ## Requests and errors
 

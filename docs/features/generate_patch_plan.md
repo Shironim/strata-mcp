@@ -1,9 +1,5 @@
 # generate_patch_plan — static consumer edit proposals
 
-**Status:** Implementation contract
-
-**Last updated:** 2026-11-14
-
 ## Input and operation boundaries
 
 The tool accepts a component `path` (aliases include `component_path`, `file_path`
@@ -39,9 +35,11 @@ The operation does not apply edits.
 ## Output contract
 
 The result uses `component`, `refactorType`, `oldName`, `newName`, optional
-`operations`, `totalConsumersAudited`, `totalPatches`, `patches` and `coverage`.
+`operations`, `targetDeclarations`, `totalConsumersAudited`, `totalPatches`, `patches` and `coverage`.
 Each patch contains `file`, `line`, `column`, `targetTag`, `oldSnippet`,
-`newSnippet`, `description` and `sourceRef`.
+`newSnippet`, `description` and `sourceRef`. `targetDeclarations` reports hash-bound
+declaration locations in the target component contract (`found`, `file`, `line`, `snippet`, `sourceRef`)
+without rewriting the target declaration itself.
 
 `coverage` reports candidate/analyzed/failed/unsupported consumer counts,
 diagnostics and omissions. Its operation scope explicitly excludes target

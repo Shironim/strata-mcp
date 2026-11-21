@@ -1,12 +1,10 @@
-# storage-and-delta-sync — SSOT graph.db Database & Delta Sync Engine
+# storage-and-delta-sync — graph.db cache and delta sync engine
 
-**Status:** Single Source of Truth (SSOT)  
-**Feature Owner:** Storage & Synchronization Engine (`src/engine/storage/`)  
-**Last Updated:** 2026-11-14
+Implementation owner: `src/engine/storage/`
 
 ---
 
-## 1. Purpose & Business Requirements
+## 1. Purpose and design
 
 Medium to large frontend applications can easily span hundreds or thousands of component files:
 * **Indexing concerns:**
@@ -68,7 +66,7 @@ can differ; a scoped query does not imply scoped filesystem work or OS isolation
 | **`state_deps`** | `id`, `file_id`, `kind`, `identifier`, `access_mode`, `line_number`, `usage_snippet`, `accessed_properties` | Reactivity tracking (Pinia/Zustand/Composable), access mode (read/write/watch). |
 | **`routes`** | `id`, `url_path`, `file_id`, `type`, `params_json`, `layout_chain_json` | Route URL mapping, dynamic parameters, and wrapping nested layout chains. |
 | **`file_dependencies`** | `file_id`, `dependency_path`, `content_hash`, `is_external` | Shared types / barrel file dependencies for cross-file change invalidation. |
-| **`meta`** | `key`, `value` | Internal metadata: `cache_version`, `config_fingerprint`, `routes_fingerprint`, `sync_generation`, `index_invalid`. |
+| **`meta`** | `key`, `value` | Internal metadata: `analysis_fingerprint`, `config_fingerprint`, `routes_fingerprint`, `sync_generation`, `index_invalid`, and the package version at publication (`cache_version`). |
 
 ---
 
@@ -112,11 +110,36 @@ edits, additions and deletions outside the requested scope. Reverse dependencies
 are then traversed from that complete mutation set.
 
 Full rebuild and incremental publication use the same contract/state/dependency/edge
-writer. `sync_generation` advances only for changed published inputs/rebuilds or
+writer. Resolved static auto-imports are stored as graph edges. Adding, renaming,
+or removing a component candidate invalidates affected template consumers, since
+an unchanged tag can become ambiguous or resolve uniquely. Runtime registration
+and dynamic framework configuration remain outside this static lookup.
+
+`sync_generation` advances only for changed published inputs/rebuilds or
 route manifests; an unchanged preflight retains it. `routes_fingerprint` records the
-staged route identity, while `config_fingerprint` includes the engine revision and
-captured configuration hashes. Local parser changes without a policy/version bump
-still require `strata init` to rebuild.
+staged route identity. `config_fingerprint` tracks captured workspace configuration,
+including resolved tsconfig/jsconfig inheritance. `analysis_fingerprint` tracks the
+local source dependencies of index sync and the effective versions of TypeScript,
+Vue's compilers, Svelte, and the ignore parser. The package and standalone build
+scripts embed the source fingerprint. Direct execution from a checkout computes it
+once per process.
+
+The selected Next App Router directory also contributes to the workspace
+fingerprint. Creating or removing a root `app` directory can change the role of
+an unchanged file under `src/app`.
+
+A changed analysis fingerprint, changed workspace configuration, or invalid
+index causes a rebuild. An index without `analysis_fingerprint` also rebuilds
+on its first successful sync. Changing only the engine package version keeps
+the cache when analysis inputs and workspace config are unchanged. A failed
+refresh does not publish the attempted fingerprint or generation. The
+invalidation path can clear derived file data and set `index_invalid`, so the
+previous successful metadata alone does not establish that the graph is usable.
+
+SQLite's `user_version` tracks schema compatibility. Strata rejects newer
+schemas with `INDEX_SCHEMA_TOO_NEW` before schema initialization or changing
+the journal mode. The read-only opener also rejects newer schemas. Resource and
+retrieval observation callers can treat a rejected index as unavailable.
 
 ### C. Clean Deletion via `ON DELETE CASCADE`
 All child tables (`components`, `edges`, `state_deps`, `routes`, `file_dependencies`) specify foreign key constraints:

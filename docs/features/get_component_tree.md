@@ -1,7 +1,5 @@
 # get_component_tree — bounded component relationships
 
-**Status:** Implementation contract. **Reviewed:** 2026-11-14, package `0.8.2`.
-
 Traverse downstream rendered component candidates or upstream consumers from a
 file or resolved route. Downward analysis also reports supported prop forwarding
 and context relationships. A tree is a bounded static observation, not a complete
@@ -9,18 +7,13 @@ inventory of components rendered at runtime.
 
 ## Preconditions and entry points
 
-The **MCP handler requires an initialized index** in the workspace or an ancestor.
-Otherwise it returns a `NOT_INDEXED` status. Run `strata init`; inventory through
-`find_code(action: "map")` does not create that index. Initialized operations
-refresh before traversal; failed refresh is an analysis error.
-
-The library `getComponentTree` differs: downward traversal can read source without
-an index, and upward traversal retains source fallback on uninitialized workspaces.
-Library fallback does not implicitly initialize `.strata`. A successful library
-call therefore does not mean that MCP accepts an unindexed request.
+Both the **MCP handler** and the library `getComponentTree` support **source fallback**
+on uninitialized workspaces without creating `.strata`. When an initialized index exists,
+it is refreshed before traversal (`retrieval.index` is populated; otherwise `retrieval.index`
+is `null` and `retrieval.basis` is `derived`). Failed index refresh is an analysis error.
 
 CLI `strata tree` calls the library path and prints analysis data directly;
-it does not have the MCP handler's index-admission or response-envelope contract.
+it does not use the MCP response envelope.
 
 ## Parameters
 
@@ -42,42 +35,12 @@ Traversal diagnostics and response-budget truncation are separate limits.
 
 ## Execution and limits
 
-Route resolution uses supported Next.js, Nuxt, SvelteKit, Astro, Inertia and Vue
-Router scanners. Ownership/configuration evidence determines the scanner and
-metadata. Not every runtime registration or expression can be resolved; inspect
-the route manifest/diagnostics when selection fails.
-
-Downward traversal reads source, extracts supported rendered tags and resolves
-imports, aliases and framework auto-import candidates. Static dictionary/dynamic
-expressions can contribute candidates; unsupported selectors produce diagnostics
-or warning nodes. This does not enumerate all runtime selector values.
-Unresolved imports, failed reads, malformed Vue input, scope and depth boundaries
-are not equivalent to a component with no children.
-
-Upward traversal prefers indexed reverse edges, with source fallback at the
-library boundary. It can retain import-only and rendered relationships; inspect
-relation evidence. Circular branches stop instead of expanding forever.
-Depth 3 and the default 20-consumer cap prevent an unqualified workspace-wide
-blast-radius claim. Execution includes index preflight and filesystem reads in
-addition to graph queries.
-
-Prop-drilling detection follows supported prop-name/identifier forwarding chains.
-Its computed depth threshold is at least 2. This is a forwarding heuristic; it
-does not prove that intermediate components never use the prop locally.
-
-Context extraction recognizes Vue provide/inject, Svelte setContext/getContext,
-and React provider/useContext patterns. React wrappers such as `useTheme()` are
-followed through supported local functions, relative/alias imports and named/default
-re-exports. Derived consumers are attributed to the component's hook call line,
-with method `react-hook-wrapper` and candidate evidence.
-
-Context keys are source syntax, not verified runtime object identity or JSX
-provider lifetime. A matching provider in the analyzed branch establishes only
-`isCoveredInTree` within that static model. Hook module data is request-local
-and reread on a later query. Traversal stops at cycles, 12 resolution steps,
-256 modules or 4096 resolution operations. Unresolved/external package hooks and
-dynamic factories remain outside coverage; an absent relation does not establish
-no context dependency.
+- **Route resolution:** Uses supported Next.js, Nuxt, SvelteKit, Astro, Inertia, and Vue Router scanners based on ownership/configuration evidence. Not every runtime registration or expression can be resolved; inspect the route manifest/diagnostics when selection fails.
+- **Downward traversal:** Reads source and resolves supported rendered tags, imports, aliases, and static auto-import candidates. Literal JSX tags are attributed using their lexical binding. Ambiguous auto-imports, unresolved imports, failed reads, malformed Vue input, and traversal boundaries have diagnostics.
+- **Upward traversal:** Prefers reverse edges from an index for the requested workspace, including import-only, rendered, and resolved auto-import relationships. Requests with an explicit alias map use source resolution. Circular branches terminate cleanly. Depth 3 and the default 20-consumer cap bound traversal.
+- **Next App Router page role:** The route scanner, source traversal, and SQLite use the same supported page filenames under the application's selected `app` or `src/app` directory.
+- **Prop-drilling detection:** Follows supported prop-name/identifier forwarding chains with a computed depth threshold of at least 2. This forwarding heuristic does not prove that intermediate components never use the prop locally.
+- **Context extraction & bounds:** Recognizes Vue `provide`/`inject`, Svelte `setContext`/`getContext`, and React provider/`useContext` patterns (including local/re-exported React hook wrappers such as `useTheme()`, attributed as `react-hook-wrapper` with candidate evidence). Context keys are source syntax rather than verified runtime object identity or JSX provider lifetime. Traversal stops at cycles, 12 resolution steps, 256 modules, or 4096 resolution operations; external package hooks and dynamic factories remain outside coverage.
 
 ## Results and requests
 

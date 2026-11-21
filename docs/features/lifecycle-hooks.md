@@ -1,8 +1,5 @@
 # Lifecycle hooks and analysis execution
 
-**Status:** Implementation contract
-**Last updated:** 2026-11-14
-
 ## Generated post-write hook
 
 `src/cli/templates.ts` owns `STRATA_POST_WRITE_HOOK`.
@@ -35,26 +32,35 @@ read; retrieval evidence describes this boundary separately.
 
 ## MCP execution lifecycle
 
-`AnalysisSupervisor` runs one analysis at a time in the server process and admits
-up to four waiting requests by default. Requests are limited to 2 MiB and the
-default response deadline is 120 seconds. These limits are configurable through
-`SupervisorOptions.limits`.
+The host launches the [MCP entrypoint](../../src/mcp.ts) as a local process. With
+no arguments and non-interactive stdin, it receives JSON-RPC on stdin and sends
+replies on stdout. With CLI arguments it delegates to CLI dispatch. Interactive
+execution without arguments prints CLI help.
 
-Timeout/cancellation rejects the client response and aborts the request signal.
-The execution slot is retained until the handler and database cleanup settle.
-Queued cancellation removes that request. Shutdown rejects queued work, aborts
-active work and waits for its cleanup. Parallel audit/pool work also settles all
-started siblings before returning a failure.
+The MCP SDK handles `initialize` and `notifications/initialized`. The server
+advertises tools, resources, prompts, and usage instructions. `tools/list`
+returns the catalog and input schemas. The client chooses when to send
+`tools/call`. Resource and prompt requests have their own handlers outside the
+tool queue.
 
-Source reads, sync checkpoints and ast-grep search/CST subprocesses cooperate with
-cancellation. It cannot preempt synchronous JavaScript or guarantee a hard process
-memory limit. No separate analysis worker is launched; `workerPath` is retained as
-a deprecated compatibility option with no effect.
+For `tools/call`, Strata normalizes arguments and chooses a workspace hint
+from explicit `root`, the remembered root for the supplied `session_id`, or
+the last known project root, in that order. Handlers resolve their target paths
+using that context. Successful calls can update the remembered root. The
+session ID is a tool argument and the root map lives in that server instance.
+SQLite data persists separately across process restarts.
 
-The per-request syntax cache retains at most 32 ASTs and at most 2 MiB of source
-text (UTF-16 accounting), keyed by filename, script kind and exact source hash.
-AST overhead is additional; this is not a heap/RSS limit. Source and dependency
-freshness checks still read disk. The cache is discarded with the request.
+- **Concurrency and limits (`AnalysisSupervisor`).** One tool handler runs at a time in the server process, with up to four waiting requests by default. The 2 MiB limit applies to the serialized job (name, normalized arguments, and root hint). The 120-second timer starts when execution begins. Calls beyond queue capacity receive `SERVER_BUSY`. The defaults can be overridden when constructing a supervisor.
+- **Cancellation & shutdown:** Timeout or cancellation rejects the client response and aborts the request signal while retaining the execution slot until handler and database cleanup settle. Queued cancellations remove the request; shutdown rejects queued work, aborts active work, and waits for cleanup. Parallel audit/pool work settles all started siblings before returning a failure.
+- **Cooperative abort scope:** Source reads, sync checkpoints, and `ast-grep` search subprocesses cooperate with cancellation. Cancellation cannot preempt synchronous JavaScript or enforce a hard process memory limit. No separate analysis worker is launched.
+- **Progress notifications (`_meta.progressToken`).** If a client supplies a progress token, the dispatcher forwards updates emitted by the operation through `reportAnalysisProgress`. Current emitters include workspace sync, component tree traversal, frontend audits, patch planning, and selected search branches.
+- **Per-request syntax cache:** Retains at most 32 ASTs and at most 2 MiB of source text (UTF-16 accounting), keyed by filename, script kind, and exact source hash, and is discarded after the request. AST memory overhead is additional (not a heap/RSS limit), and source/dependency freshness checks still read disk.
+
+On completion the supervisor closes registered database connections. The
+dispatcher applies the [final response budget](retrieval-evidence-contract.md)
+and records [tool telemetry](tool-call-logging.md). Shutdown can start on
+`SIGINT`, `SIGTERM`, or stream or connection closure. The shutdown path waits
+for active analysis cleanup before closing the server and exiting.
 
 ## Verification
 
@@ -62,3 +68,4 @@ freshness checks still read disk. The cache is discarded with the request.
 - `tests/core/analysis-execution.test.ts`: real subprocess termination, temporary-input cleanup, bounded search/pool work and syntax-cache isolation.
 - `tests/core/analysis-consistency.test.ts`: failed preflight and cancellation publication boundaries.
 - `tests/cli/init-harness.test.ts`, `tests/cli/init-audit-fixes.test.ts`: generated harness artifacts; active client execution is outside their scope.
+- `tests/integration/mcp-server-protocol.test.ts`: stdio JSON-RPC handshake, `_meta.progressToken` notifications, and text-mode `structuredContent` omission.

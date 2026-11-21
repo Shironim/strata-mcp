@@ -8,9 +8,9 @@ integration: `src/mcp.ts`; regressions: `tests/telemetry.test.ts`.
 | Data | Decision and Purpose |
 | --- | --- |
 | UTC Timestamp, tool, status, duration | Recorded for every invocation reaching the dispatcher, including handler errors, analysis exceptions, and unknown tools. Duration measures internal execution prior to logging, not network/client transport latency. |
-| Action/view/target/direction/refactor_type | Normalized to `action` only if the value belongs to the tool schema's enum. Unspecified modes without schema defaults may be absent. |
-| Trace/session ID | Preserves caller-supplied IDs up to 64 characters. Never invents synthetic session IDs or guesses user identities. |
-| Input | Maximum 16 parameter names; strings logged as `{bytes: N}`, other values as `{type: ...}`. Source code, search patterns, paths, and raw values are never copied raw. |
+| Action/view/target/direction/refactor_type | The dispatcher uses recognized schema modes and defaults, with branch inference for `find_code` and `inspect_component`. Some calls omit `action`. |
+| Trace/session ID | Stored IDs are capped at 64 characters. The dispatcher generates a 12-character trace ID when missing. Session IDs come from the caller. |
+| Input | Up to 16 normalized argument keys. Allowlisted scalar fields such as `mode` and `symbol` retain their values, with strings capped at 96 characters. Allowlisted path fields (`path`, `file_path`, `target_path`) retain up to 120 characters. Absolute paths are reduced to a workspace-relative path or basename. Other string values, including `code` and `pattern`, are recorded by UTF-8 byte count. Other values are recorded by type. |
 | `metrics.bytes_out` | Total UTF-8 bytes across all final text blocks. Excludes protocol envelope and structured content. |
 | `metrics.lines_out` | Total line count across all text blocks combined. Empty text yields zero; trailing newlines produce a blank line. |
 | `metrics.estimated_tokens` | `Math.round(bytes_out / 4)`. Rough text estimate only, not exact tokenizer/model usage or structured content volume. |
@@ -18,8 +18,8 @@ integration: `src/mcp.ts`; regressions: `tests/telemetry.test.ts`.
 | `bloat_alert` | `true` once `response_bytes` exceeds 16 KiB; may trigger even with brief text if structured content is large. |
 | `metrics.items_found` | Preserves tool-specific item extraction where available. May be absent; item count does not imply total nodes, full coverage, or relevance. |
 | Output digest | Defaults to `preview_disabled`, or `empty_output` if there is no non-whitespace text. `STRATA_LOG_PREVIEW=1` enables a sanitized head/omission/tail snippet of at most 300 characters. |
-| Error | Error code up to 64 characters and message up to 384 characters (128 characters during fallback budget logging). Stack traces are excluded. Error messages may retain paths or upstream input snippets. |
-| Full source/AST/output, stack, environment, credentials | Never added to logs. Opt-in previews and error messages must be treated as potentially sensitive project data. |
+| Error | Error code up to 64 characters and message up to 384 characters (128 characters during fallback budget logging). Thrown errors can include up to six filtered stack frames, capped at 160 characters each. Frames are removed if the serialized event exceeds 4095 bytes. Error messages and frame text can retain project details. |
+| Project data in logs | Allowlisted inputs, error messages, filtered stack frames, and opt-in output previews may contain project details. |
 
 ## Sink and Lifecycle
 
@@ -52,14 +52,3 @@ output digests and opt-in toggles, rotation replacing old backups, sink failure 
 routing across all six tools including handler errors, unknown tools, and supervisor rejections.
 Compatibility tests enforce input masking and ensure `.strata/` is never auto-created on unindexed workspaces.
 Local test, build, and stdio results do not prove active MCP clients have loaded this version.
-
-Local results 2026-11-04:
-
-- **59 pass, 0 fail** on `tests/telemetry.test.ts`, `tests/memory/telemetry.test.ts`,
-  `tests/observability-stats.test.ts`, `tests/integration/mcp-server-protocol.test.ts`,
-  `tests/mcp/root-boundaries.test.ts`, `tests/cli/init.test.ts`, and `tests/cli/init-audit-fixes.test.ts`.
-- `bun run typecheck` and `bun run build` pass.
-- Smoke MCP stdio tested via SDK client and `dist/mcp.js` on temporary workspaces:
-  one successful `find_code(action: map)` and one unknown tool produced two events;
-  `response_bytes` matched data received by client. Temporary workspaces removed following inspection.
-- `git diff --check` passes. Full suite, overhead benchmarks, and concurrent cross-process rotations not yet tested.

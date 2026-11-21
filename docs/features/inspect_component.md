@@ -1,7 +1,5 @@
 # inspect_component — contracts, source and symbols
 
-**Status:** Implementation contract. **Reviewed:** 2026-11-14, package `0.8.2`.
-
 Inspect one component/module, map its source regions, retrieve exact source or
 inspect symbols. Adapters include Vue, JSX/TSX, Svelte, Astro and scripts.
 No initialized index is required. Contract extraction and caller discovery are
@@ -22,12 +20,12 @@ static analyses with reported limitations, separate from exact source retrieval.
 | `symbol` | Symbol to slice with discovered callers/test references; aliases include `symbol_name`, `name`. |
 | `outline` | Symbol outline; aliases include `include_outline`, `outline_symbols`. |
 | `audit_events` | Vue event-handler audit; alias `auditEvents`. |
-| `impact` | Contract-only prop impact: `none` (default), `summary`, `full`. Supported static consumer coverage is reported by the analyzer. |
+| `impact` | Contract-only prop impact: `none` (default), `summary`, `full`. Supported static consumer coverage (Vue, React/JSX, Svelte, Astro) is reported by the analyzer. |
 
 `format`, `include_structured`, `response_detail`, `max_bytes` and
 `continuation_token` follow the [shared contract](retrieval-evidence-contract.md).
-The schema advertises a summary default while execution projects a summary only
-when requested explicitly. Specify the detail level.
+The default detail level is `full`; pass `response_detail: "summary"` explicitly
+for counts/previews only.
 
 ## Operation selection
 
@@ -44,30 +42,12 @@ substitutions of a different target.
 
 ## Contract and symbol boundaries
 
-Contracts can include props, emits, slots/details, models, exposed members,
-variants, state/data dependencies, render boundaries, layout/form information,
-outbound boundary contracts, unresolved types, captured dependencies and
-`projectContext`. Fields vary by adapter and syntax. Ownership/manifest evidence
-and heuristic boundaries do not prove the application's runtime behavior.
-
-React has bounded local/imported prop-type resolution and supported component
-wrappers. Its type module graph stops at 64 modules or depth greater than 24;
-symbol lookup is capped at 4096 visits. Local type expansion has its own depth
-bound of 32. These are distinct bounds, not universal 32-level cross-file
-resolution across frameworks. Bare package type specifiers are not resolved by
-this module graph; review unresolved types and dependencies.
-
-Outbound boundary extraction recognizes supported literal/route/action syntax
-and can enrich contracts from one hop of supported local composables. Fields
-include `boundaryType`, `method`, `targetEndpoint`, `endpointSource`, optional
-`payloadKeys`, `loc`, `source`, `viaComposable` and `backendTargetHint`.
-Hints are objects containing candidate symbols, not verified backend targets.
-
-Symbol/outline operations report supported declarations and callee/caller links.
-Confirmed static calls and passive importer candidates are distinct evidence;
-neither establishes exhaustive runtime reachability. The text symbol formatter
-previews long bodies above its 50-line threshold and suggests `source_range`.
-Use exact source operations to retrieve original text.
+- **Contract fields:** Can include props, emits, slots/details, models, exposed members, variants, state/data dependencies, render boundaries, layout/form information, outbound boundary contracts, unresolved types, captured dependencies, and `projectContext`. Fields vary by adapter and syntax; ownership/manifest evidence and heuristic boundaries do not prove runtime behavior.
+- **Svelte slots:** Public slot evidence includes static legacy slot nodes and typed `Snippet` props. Local snippet declarations appear in the source map.
+- **React prop-type resolution bounds:** Covers bounded local/imported prop-type resolution and supported component wrappers. Its type module graph stops at 64 modules or depth > 24, symbol lookup is capped at 4096 visits, and local type expansion has a depth bound of 32. Bare package type specifiers are not resolved by this module graph—review unresolved types and dependencies.
+- **Outbound boundary extraction:** Recognizes supported literal/route/action syntax and can enrich contracts from one hop of supported local composables. Fields include `boundaryType`, `method`, `targetEndpoint`, `endpointSource`, optional `payloadKeys`, `loc`, `source`, `viaComposable`, and `backendTargetHint` (candidate symbols, not verified backend targets).
+  Supported `fetch`, `$fetch`, `useFetch`, and Axios calls share an AST extractor with the API audit. Boundaries keep the source endpoint form and report call coordinates. Both outputs preserve `HEAD` and `OPTIONS`. Dynamic methods are reported as `UNKNOWN`. A TanStack mutation with an unresolved callback endpoint retains its action symbol when available. For `mutationFn: () => save()`, full text marks the endpoint unresolved. The compact `apiCalls` entry includes `method: "UNKNOWN"`, `endpoint: "save"`, `endpointSource: "action-symbol"`, and the mutation location. For a direct identifier callback or a simple arrow calling an identifier in the inspected script, an optional `callbackDefinition` records the declared symbol, file, and one-based line and column. Supported targets are local functions, const function expressions, and direct named function exports from relative script modules in the workspace. Import aliases and lexical shadowing are respected. Re-exports, dynamic dispatch, and the endpoint behind the callback remain unresolved.
+- **Symbol & outline operations:** Report supported declarations and callee/caller links, distinguishing confirmed static calls from passive importer candidates (neither establishes exhaustive runtime reachability). The text symbol formatter previews bodies above its 50-line threshold and suggests `source_range` for retrieving original text.
 
 ## Requests and observed output excerpt
 

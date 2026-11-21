@@ -1,7 +1,5 @@
 # audit_frontend — routes, calls and unused-code candidates
 
-**Status:** Implementation contract. **Reviewed:** 2026-11-14, package `0.8.2`.
-
 Run one of four static audits or aggregate all four. Output is evidence within
 the collected scope and supported syntax, not a complete runtime architecture
 inventory or permission to delete reported code.

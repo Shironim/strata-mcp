@@ -1,7 +1,5 @@
 # find_code — inventory and static search
 
-**Status:** Implementation contract. **Reviewed:** 2026-11-14, package `0.8.2`.
-
 Search source with ast-grep patterns, relational YAML, literal lines or component
 usage selectors. Inventory mode lists files without ingesting source bodies.
 No initialized index is required. Traversal obeys collector ignore rules and
@@ -19,7 +17,7 @@ the selected scope; zero matches do not prove runtime absence.
 | `prop_name` | With `component`, selects prop supply/omission analysis. Aliases: `prop`, `propName`. |
 | `prop_presence` | `present` by default, or `omitted`; alias `propPresence`. |
 | `rule_yaml` | Complete ast-grep YAML rule; the rule specifies its language. |
-| `code` | Inline snippet; alias `code_snippet`. Used for pattern/rule matching or a syntax-tree dump. |
+| `code` | Inline snippet; alias `code_snippet`. Used with `pattern` or `rule_yaml` for in-memory matching. |
 | `language` | `auto`, `vue`, `astro`, `ts`, `js`, `tsx`, `jsx`, `html`, `css`. Snippets default to `ts`; explicit `auto` uses a tag heuristic. Disk searches infer languages from files/blocks. |
 | `scope` | Component usage only: `template`, `script`, `both` (default). |
 | `max_results` | Match cap, default 200; alias `maxResults`. Also accepted as an inventory limit alias. |
@@ -39,19 +37,21 @@ All modes also accept `format`, `include_structured`, `response_detail`,
 - **Prop supply:** `component` + `prop_name` (+ `prop_presence`) accepts path and
   response controls. Pattern/code/YAML, mode, language, scope, limit, offset,
   max-results and exclusion selectors conflict with this operation.
-- **Inline input:** code plus pattern/YAML matches a snippet. Code alone without
-  a target path dumps its syntax tree. `action: "dump_ast"` remains an implemented
-  compatibility path absent from the advertised action enum; clients enforcing
-  that enum can reject it.
+- **Inline input:** `code` requires `pattern` or `rule_yaml` to match an in-memory snippet.
 - **Other searches:** component usage takes precedence over YAML, then pattern
   search. Prefer one selector to make the operation unambiguous.
+
+## Framework expressions in structural search
+
+On disk, JS/TS patterns and equivalent YAML rules search Svelte instance/module scripts and expression ranges from the Svelte compiler fragment, including interpolation, block conditions and inline event handlers. Astro searches frontmatter, supported local JS/TS script blocks, and balanced child/attribute expressions. Its source scanner handles nested object literals, quoted strings, comments and template literals. It does not run the Astro compiler or resolve external scripts. A rule's declared grammar applies to each region; use TSX for a rule that also targets JSX.
+
+Results use one-based source lines and UTF-16 columns with an exclusive end. Expression regions are batched per file. Plain markup text, quoted HTML attributes, and script data such as JSON are outside JS expression search.
 
 ## Prop supply boundaries
 
 The component must have one exact matching basename inside the selected directory.
-Ambiguous names require a narrower scope. Supported targets are Vue and React/JSX;
-Astro/Svelte targets are rejected for this selector, even though other search modes
-can inspect their source. A result distinguishes resolved usages, resolved static
+Ambiguous names require a narrower scope. Supported targets are Vue, React/JSX,
+Svelte, and Astro. A result distinguishes resolved usages, resolved static
 omissions, candidate usages and indeterminate supply such as forwarding/spreads.
 An omitted render does not establish a missing required prop at runtime.
 
