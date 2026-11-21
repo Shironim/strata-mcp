@@ -174,4 +174,49 @@ describe('Strata Observability & Performance Telemetry', () => {
 
     cleanup();
   });
+
+  it('aggregates agent usefulness metrics (empty rate, fallbacks, context savings, action breakdown)', () => {
+    cleanup();
+    mkdirSync(strataDir, { recursive: true });
+
+    const events = [
+      {
+        event: 'tool_call_completed',
+        tool: 'inspect_component',
+        action: 'symbol',
+        duration_ms: 15,
+        input: { path: 'src/Page.vue' },
+        metrics: { bytes_out: 1000, source_bytes: 10000, items_found: 1 },
+        status: 'success',
+      },
+      {
+        event: 'tool_call_completed',
+        tool: 'find_code',
+        action: 'search',
+        duration_ms: 20,
+        fallback_used: 'invalid_ast_pattern',
+        incomplete_evidence: true,
+        metrics: { bytes_out: 500, items_found: 0 },
+        input: { mode: 'auto' },
+        status: 'success',
+      },
+    ];
+    writeFileSync(logFile, events.map(e => JSON.stringify(e)).join('\n') + '\n', 'utf8');
+
+    const summary = StrataTelemetry.getSummary(testWorkspace);
+    expect(summary.emptyResultsCount).toBe(1);
+    expect(summary.emptyResultRatePercent).toBe(50);
+    expect(summary.fallbackCallsCount).toBe(1);
+    expect(summary.incompleteEvidenceCount).toBe(1);
+    expect(summary.contextSavingsPercent).toBe(90);
+    expect(summary.actionBreakdown['inspect_component:symbol']).toEqual({ calls: 1, errors: 0, emptyResults: 0 });
+    expect(summary.actionBreakdown['find_code:search']).toEqual({ calls: 1, errors: 0, emptyResults: 1 });
+
+    const text = formatSummaryAsText(summary);
+    expect(text).toContain('Empty-Result Rate:** 50%');
+    expect(text).toContain('Context Savings (Slicing vs Full Source):** 90%');
+    expect(text).toContain('inspect_component:symbol');
+
+    cleanup();
+  });
 });

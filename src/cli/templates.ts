@@ -2,6 +2,7 @@
  * Agent harness templates for Strata-MCP.
  * Generated into .agents/ during `strata init`.
  */
+import { renderPlaybooksForSkill } from '../workflow-playbooks';
 
 export const STRATA_FRONTEND_RULE = `# RULE: Strata-MCP Frontend Structural Intelligence Engine
 
@@ -119,6 +120,9 @@ Follow this sequence during frontend development tasks:
   Apply targeted, minimal source edits.
   └── Execute inspect_component(path: "...", audit_events: true) to confirm template bindings and emits remain intact.
 \`\`\`
+
+### Canonical Workflow Playbooks
+${renderPlaybooksForSkill()}
 
 ---
 

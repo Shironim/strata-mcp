@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import ts from 'typescript';
 import { withAnalysisContext, analysisSyntaxCache } from '../../src/engine/analysis-context';
 import { parseTypeScript } from '../../src/engine/source-parser';
-import { executeAstGrep, dumpSyntaxTree } from '../../src/engine/astgrep';
+import { executeAstGrep } from '../../src/engine/astgrep';
 import { findCode } from '../../src/engine/search';
 import { runConcurrent, collectConcurrentMatches } from '../../src/engine/pool';
 
@@ -72,8 +72,7 @@ test('AST search stops before reading files beyond the requested match limit', a
   await expect(findCode({ targetPath: root, pattern: 'ref($$$)', maxResults: 2 })).rejects.toThrow('SOURCE_TOO_LARGE');
 });
 
-for (const action of ['search', 'dump'] as const) {
-test.skipIf(process.platform === 'win32')(`${action} cancellation terminates the running AST subprocess and cleans its input directory`, async () => {
+test.skipIf(process.platform === 'win32')('search cancellation terminates the running AST subprocess and cleans its input directory', async () => {
   root = await mkdtemp('/tmp/strata-cancel-process-');
   const pidPath = join(root, 'pid'), binary = join(root, 'fake-ast-grep');
   await writeFile(binary, `#!/bin/sh\necho $$ > '${pidPath}'\nexec sleep 60\n`, { mode: 0o700 });
@@ -81,9 +80,10 @@ test.skipIf(process.platform === 'win32')(`${action} cancellation terminates the
   const controller = new AbortController();
   const before = new Set((await readdir(tmpdir())).filter(name => name.startsWith('strata-ast-input-')));
   process.env.AST_GREP_BIN = binary;
-  const operation = withAnalysisContext(() => action === 'search'
-    ? executeAstGrep({ code: 'ref(1)', pattern: 'ref($$$)' })
-    : dumpSyntaxTree('ref(1)'), controller.signal).catch(error => error as Error);
+  const operation = withAnalysisContext(
+    () => executeAstGrep({ code: 'ref(1)', pattern: 'ref($$$)' }),
+    controller.signal
+  ).catch(error => error as Error);
   try {
     for (let i = 0; i < 100 && !existsSync(pidPath); i++) await Bun.sleep(10);
     expect(existsSync(pidPath)).toBe(true);
@@ -99,4 +99,3 @@ test.skipIf(process.platform === 'win32')(`${action} cancellation terminates the
     else process.env.AST_GREP_BIN = oldBinary;
   }
 });
-}

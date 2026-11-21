@@ -2,7 +2,6 @@
 import { inspectFromCli } from './cli/inspect';
 import { readSourceFile } from './engine/source-file';
 import { mapFrontendScope, formatFrontendMapAsText } from './engine/frontend-map';
-import { dumpSyntaxTree } from './engine/astgrep';
 import { findCodeTool } from './tools/find-code';
 import { existsSync, statSync } from 'node:fs';
 import { findCodeByRule, findComponentUsage, formatMatchesAsText } from './engine/search';
@@ -31,6 +30,15 @@ export { parseStringFlag } from './cli/arguments';
  */
 function parseAliasMap(raw: string | boolean | undefined): Record<string, string> | undefined {
   return parseAliasMapInput(raw);
+}
+
+async function runFindCodeFromCli(toolArgs: Record<string, unknown>, isJson: boolean): Promise<void> {
+  const result = await findCodeTool.handler({
+    ...toolArgs,
+    format: isJson ? 'json' : 'text',
+  });
+  if (result.isError) throw new Error(result.content[0]?.text ?? 'Search failed');
+  console.log(result.content[0]?.text ?? '');
 }
 
 export async function main(argv: string[] = process.argv.slice(2)) {
@@ -95,23 +103,14 @@ export async function main(argv: string[] = process.argv.slice(2)) {
     }
 
     if (command === 'search' || command === 'find') {
-      if (flags['dump-ast'] || flags.dumpAst) {
-        const snippet = positional[1];
-        if (!snippet) {
-          console.error('Error: Code snippet is required with --dump-ast (e.g. strata find "const a = 1" --dump-ast).');
-          process.exit(1);
-        }
-        const tree = await dumpSyntaxTree(snippet, parseStringFlag(flags.lang) || 'ts');
-        console.log(isJson ? JSON.stringify({ tree }, null, 2) : tree);
-        return;
-      }
       if (flags.map) {
-        const map = await mapFrontendScope((positional[1] && !positional[1].startsWith('-')) ? positional[1] : targetPath, {
+        await runFindCodeFromCli({
+          action: 'map',
+          path: (positional[1] && !positional[1].startsWith('-')) ? positional[1] : targetPath,
           limit: parseSafePositiveInt(flags.limit, 100),
           offset: parseSafePositiveInt(flags.offset, 0) ?? 0,
-          excludeDirs: parseStringList(flags['exclude-dirs'] ?? flags.excludeDirs),
-        });
-        console.log(isJson ? JSON.stringify(map, null, 2) : formatFrontendMapAsText(map));
+          exclude_dirs: parseStringList(flags['exclude-dirs'] ?? flags.excludeDirs),
+        }, isJson);
         return;
       }
       const componentName = parseStringFlag(flags.component ?? flags.componentName);
@@ -121,35 +120,24 @@ export async function main(argv: string[] = process.argv.slice(2)) {
           flags.scope === 'template' || flags.scope === 'script' || flags.scope === 'both'
             ? flags.scope
             : 'both';
-        const matches = await findComponentUsage({
-          componentName,
-          targetPath: usageTarget,
+        await runFindCodeFromCli({
+          path: usageTarget,
+          component: componentName,
           scope,
-        });
-        if (isJson) {
-          console.log(JSON.stringify(matches, null, 2));
-        } else {
-          console.log(formatMatchesAsText(matches));
-        }
+          max_results: parseSafePositiveInt(flags.limit, 200),
+        }, isJson);
         return;
       }
 
       const ruleInput = parseStringFlag(flags.rule);
       if (ruleInput) {
         const ruleTarget = (positional[1] && !positional[1].startsWith('-')) ? positional[1] : targetPath;
-        let ruleYaml = ruleInput;
-        if (existsSync(ruleInput)) {
-          ruleYaml = await readSourceFile(ruleInput);
-        }
-        const matches = await findCodeByRule({
-          rule: ruleYaml,
-          targetPath: ruleTarget,
-        });
-        if (isJson) {
-          console.log(JSON.stringify(matches, null, 2));
-        } else {
-          console.log(formatMatchesAsText(matches));
-        }
+        const ruleYaml = existsSync(ruleInput) ? await readSourceFile(ruleInput) : ruleInput;
+        await runFindCodeFromCli({
+          path: ruleTarget,
+          rule_yaml: ruleYaml,
+          max_results: parseSafePositiveInt(flags.limit, 200),
+        }, isJson);
         return;
       }
 
@@ -160,16 +148,13 @@ export async function main(argv: string[] = process.argv.slice(2)) {
       }
 
       const searchTarget = (positional[2] && !positional[2].startsWith('-')) ? positional[2] : targetPath;
-      const result = await findCodeTool.handler({
+      await runFindCodeFromCli({
         path: searchTarget,
         pattern,
         language: parseStringFlag(flags.lang) || 'ts',
         mode: flags.mode || 'ast',
         max_results: parseSafePositiveInt(flags.limit, 200),
-        format: isJson ? 'json' : 'text',
-      });
-      if (result.isError) throw new Error(result.content[0]?.text ?? 'Search failed');
-      console.log(result.content[0]?.text ?? '');
+      }, isJson);
       return;
     }
 
@@ -186,17 +171,12 @@ export async function main(argv: string[] = process.argv.slice(2)) {
           ? flags.scope
           : 'both';
 
-      const matches = await findComponentUsage({
-        componentName,
-        targetPath: usageTarget,
+      await runFindCodeFromCli({
+        path: usageTarget,
+        component: componentName,
         scope,
-      });
-
-      if (isJson) {
-        console.log(JSON.stringify(matches, null, 2));
-      } else {
-        console.log(formatMatchesAsText(matches));
-      }
+        max_results: parseSafePositiveInt(flags.limit, 200),
+      }, isJson);
       return;
     }
 
@@ -208,21 +188,13 @@ export async function main(argv: string[] = process.argv.slice(2)) {
       }
 
       const ruleTarget = (positional[2] && !positional[2].startsWith('-')) ? positional[2] : targetPath;
-      let ruleYaml = ruleInput;
-      if (existsSync(ruleInput)) {
-        ruleYaml = await readSourceFile(ruleInput);
-      }
+      const ruleYaml = existsSync(ruleInput) ? await readSourceFile(ruleInput) : ruleInput;
 
-      const matches = await findCodeByRule({
-        rule: ruleYaml,
-        targetPath: ruleTarget,
-      });
-
-      if (isJson) {
-        console.log(JSON.stringify(matches, null, 2));
-      } else {
-        console.log(formatMatchesAsText(matches));
-      }
+      await runFindCodeFromCli({
+        path: ruleTarget,
+        rule_yaml: ruleYaml,
+        max_results: parseSafePositiveInt(flags.limit, 200),
+      }, isJson);
       return;
     }
 
@@ -474,7 +446,22 @@ export async function main(argv: string[] = process.argv.slice(2)) {
     console.error(`Unknown command: "${command}". Run "strata --help" for available commands.`);
     process.exit(1);
   } catch (err) {
-    console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+    const errorInstance = err instanceof Error ? err : new Error(String(err));
+    if (command && !['serve', 'init', 'stats', 'telemetry', 'help'].includes(command)) {
+      StrataTelemetry.recordToolCall({
+        event: 'tool_call_failed',
+        tool: `cli:${command}`,
+        duration_ms: 0,
+        status: 'error',
+        input: { path: targetPath },
+        error: {
+          code: (errorInstance.message.match(/^([A-Z_]+):/) || [])[1] || 'CLI_ERROR',
+          message: errorInstance.message,
+          stack: errorInstance.stack,
+        },
+      }, targetPath);
+    }
+    console.error(`Error: ${errorInstance.message}`);
     process.exit(1);
   } finally {
     closeAllDatabases();

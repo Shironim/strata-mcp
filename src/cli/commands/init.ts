@@ -356,7 +356,10 @@ export async function handleStrataInit(options: StrataInitOptions = {}): Promise
     let failurePhase = 'AST Component Indexing';
     let recoveryInstruction = "Inspect error trace, verify component syntax, then run 'strata sync' to rebuild graph cache.";
 
-    if (rawMessage.includes('database') || rawMessage.includes('SQLite') || rawMessage.includes('locked') || rawMessage.includes('busy')) {
+    if (rawMessage.startsWith('INDEX_SCHEMA_TOO_NEW:')) {
+      failurePhase = 'Index Compatibility';
+      recoveryInstruction = "Use a Strata build that supports the existing SQLite index schema.";
+    } else if (rawMessage.includes('database') || rawMessage.includes('SQLite') || rawMessage.includes('locked') || rawMessage.includes('busy')) {
       failurePhase = 'Database Access';
       recoveryInstruction = "Ensure no other process is locking '.strata/graph.db', then run 'strata sync'.";
     } else if (rawMessage.includes('parse') || rawMessage.includes('SyntaxError')) {

@@ -2,7 +2,7 @@ import { findTool } from './tools';
 import { closeAllDatabases } from './engine/storage/schema';
 import { getLastKnownProjectRoot, setLastKnownProjectRoot } from './engine/path-resolver';
 import type { ToolCallResponse } from './tools/types';
-import { withAnalysisContext } from './engine/analysis-context';
+import { withAnalysisContext, type ProgressReporter } from './engine/analysis-context';
 
 export interface AnalysisResponse extends ToolCallResponse {
   projectRoot?: string;
@@ -19,14 +19,13 @@ interface Job {
   args: Record<string, unknown>;
   rootHint?: string;
   signal?: AbortSignal;
+  onProgress?: ProgressReporter;
   resolve: (response: AnalysisResponse) => void;
   reject: (error: Error) => void;
   removeAbort?: () => void;
 }
 
 export interface SupervisorOptions {
-  /** @deprecated Analysis runs in-process; this option has no effect. */
-  workerPath?: string;
   limits?: Partial<typeof ANALYSIS_LIMITS>;
 }
 
@@ -46,7 +45,8 @@ export class AnalysisSupervisor {
     name: string,
     args: Record<string, unknown>,
     rootHint?: string,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    onProgress?: ProgressReporter
   ): Promise<AnalysisResponse> {
     if (this.closed) return Promise.reject(new Error('SERVER_CLOSED: analysis supervisor is closed'));
     if (signal?.aborted) return Promise.reject(new Error('REQUEST_CANCELLED: analysis cancelled'));
@@ -60,7 +60,7 @@ export class AnalysisSupervisor {
     }
 
     return new Promise((resolve, reject) => {
-      const job: Job = { name, args, rootHint, signal, resolve, reject };
+      const job: Job = { name, args, rootHint, signal, onProgress, resolve, reject };
       const abort = () => {
         const index = this.queue.indexOf(job);
         if (index >= 0) {
@@ -143,7 +143,7 @@ export class AnalysisSupervisor {
           ...response,
           ...(detectedRoot ? { projectRoot: detectedRoot } : {}),
         };
-      }, controller.signal);
+      }, controller.signal, job.onProgress);
       if (!controller.signal.aborted) job.resolve(response);
     } finally {
       // The queue slot belongs to execution, even after its client response timed out.

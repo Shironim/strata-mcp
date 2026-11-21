@@ -136,3 +136,34 @@ test('dispatcher records each of the six tools and unknown/worker failures once,
     expect(entries().at(-1).error.code).toBe('REQUEST_TOO_LARGE');
   } finally { await server.close(); }
 }, 30000);
+
+test('preserves allowlisted non-sensitive inputs, stage, and sanitized stack_frames while redacting code/pattern', () => {
+  const err = new Error('boom');
+  err.stack = `Error: boom\n    at executeAstGrep (${join(root, 'src/engine/astgrep.ts')}:300:11)\n    at handler (${join(root, 'src/tools/find-code.ts')}:193:5)`;
+  StrataTelemetry.recordToolResponse({
+    event: 'tool_call_failed',
+    tool: 'find_code',
+    action: 'search',
+    stage: 'ast-grep',
+    duration_ms: 12,
+    status: 'error',
+    input: {
+      path: join(root, 'src/App.vue'),
+      mode: 'ast',
+      code: 'secret source',
+      pattern: 'secretPattern($$$)',
+    },
+    error: { code: 'EXECUTION_ERROR', message: 'boom', stack: err.stack },
+  }, { content: [{ text: 'error' }] }, root);
+
+  const [entry] = entries();
+  expect(entry.stage).toBe('ast-grep');
+  expect(entry.input.path).toBe('src/App.vue');
+  expect(entry.input.mode).toBe('ast');
+  expect(entry.input.code).toEqual({ bytes: 13 });
+  expect(entry.input.pattern).toEqual({ bytes: 18 });
+  expect(entry.stack_frames).toEqual([
+    'at executeAstGrep (src/engine/astgrep.ts:300:11)',
+    'at handler (src/tools/find-code.ts:193:5)',
+  ]);
+});

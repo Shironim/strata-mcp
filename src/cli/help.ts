@@ -65,7 +65,6 @@ Options:
   --scope <scope>            Scope: template | script | both (default: both)
   --mode <mode>              Pattern mode: ast | auto | literal
   --map                      Return bounded frontend inventory (no source bodies)
-  --dump-ast                 Dump CST syntax tree for a code snippet (CLI developer debug)
   --limit <n>                Result/page size (default: 100 for map, 200 for search)
   --offset <n>               Zero-based inventory offset
   -p, --path <path>          Target directory or file (default: .)

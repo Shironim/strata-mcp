@@ -19,8 +19,6 @@ export const BOOLEAN_FLAGS = new Set([
   'include-pages',
   'includePages',
   'map',
-  'dump-ast',
-  'dumpAst',
   'outline',
 ]);
 

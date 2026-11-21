@@ -1,19 +1,32 @@
 #!/usr/bin/env bun
+import { randomUUID } from 'node:crypto';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import {
   CallToolRequestSchema,
+  GetPromptRequestSchema,
+  ListPromptsRequestSchema,
+  ListResourcesRequestSchema,
+  ListResourceTemplatesRequestSchema,
   ListToolsRequestSchema,
+  ReadResourceRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { TOOLS, findTool } from './tools';
+import {
+  getStrataPrompt,
+  listStrataPrompts,
+  listStrataResources,
+  listStrataResourceTemplates,
+  readStrataResource,
+} from './resources-and-prompts';
 import { toolActionKey } from './tools/catalog';
 import { AnalysisSupervisor } from './analysis-supervisor';
 import { STRATA_INSTRUCTIONS } from './instructions';
 import { STRATA_VERSION } from './version';
 import { describeResultSelection } from './tools/result-selection';
-import { StrataTelemetry } from './engine/telemetry';
+import { StrataTelemetry, runWithTelemetryStage } from './engine/telemetry';
 import { enforceResponseLimit } from './engine/context-budget';
-import { getLastKnownProjectRoot, setLastKnownProjectRoot } from './engine/path-resolver';
+import { getLastKnownProjectRoot, runWithRequestProjectRoot, setLastKnownProjectRoot } from './engine/path-resolver';
 
 export { TOOLS, findTool } from './tools';
 
@@ -82,9 +95,6 @@ export function extractItemsFound(
 
   switch (toolName) {
     case 'find_code': {
-      if (args.action === 'dump_ast') {
-        return undefined;
-      }
       if (firstText.includes('No matches found.')) {
         return 0;
       }
@@ -150,10 +160,32 @@ export function createMcpServer(): Server {
     {
       capabilities: {
         tools: {},
+        resources: {},
+        prompts: {},
       },
       instructions: STRATA_INSTRUCTIONS,
     }
   );
+
+  server.setRequestHandler(ListResourcesRequestSchema, async () => {
+    return listStrataResources();
+  });
+
+  server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => {
+    return listStrataResourceTemplates();
+  });
+
+  server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+    return readStrataResource(request.params.uri);
+  });
+
+  server.setRequestHandler(ListPromptsRequestSchema, async () => {
+    return listStrataPrompts();
+  });
+
+  server.setRequestHandler(GetPromptRequestSchema, async (request) => {
+    return getStrataPrompt(request.params.name, request.params.arguments);
+  });
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     return {
@@ -166,6 +198,8 @@ export function createMcpServer(): Server {
     };
   });
 
+  const sessionRoots = new Map<string, string>();
+
   server.setRequestHandler(CallToolRequestSchema, async (request, extra): Promise<any> => {
     const name = request.params.name;
     const rawArgs = request.params.arguments;
@@ -175,14 +209,18 @@ export function createMcpServer(): Server {
     const actionKey = toolActionKey(name);
     const actionSchema = tool?.inputSchema.properties?.[actionKey] as { enum?: unknown[]; default?: unknown } | undefined;
     const requestedAction = args[actionKey] ?? actionSchema?.default;
-    const action = typeof requestedAction === 'string' && actionSchema?.enum?.includes(requestedAction) ? requestedAction : undefined;
+    let action = typeof requestedAction === 'string' && actionSchema?.enum?.includes(requestedAction) ? requestedAction : undefined;
+    if (!action && name === 'inspect_component') {
+      action = args.outline ? 'outline' : args.symbol ? 'symbol' : args.view ? String(args.view) : args.sfc_sections ? 'sfc_sections' : args.audit_events ? 'audit_events' : args.source_range !== undefined ? 'source_range' : 'contract';
+    } else if (!action && name === 'find_code') {
+      action = args.prop_name || args.prop ? 'prop' : args.component || args.component_name ? 'component' : args.rule_yaml ? 'rule' : 'search';
+    }
 
     // Capture explicit per-request root and determine request root hint without polluting global state early
-    const explicitRoot = typeof args.root === 'string' && args.root.trim() ? args.root.trim() : undefined;
-    const requestRootHint = explicitRoot ?? getLastKnownProjectRoot();
-
-    const traceId = args.trace_id || args.traceId ? String(args.trace_id || args.traceId) : undefined;
+    const traceId = args.trace_id || args.traceId ? String(args.trace_id || args.traceId) : randomUUID().slice(0, 12);
     const sessionId = args.session_id || args.sessionId ? String(args.session_id || args.sessionId) : undefined;
+    const explicitRoot = typeof args.root === 'string' && args.root.trim() ? args.root.trim() : undefined;
+    const requestRootHint = explicitRoot ?? (sessionId ? sessionRoots.get(sessionId) : undefined) ?? getLastKnownProjectRoot();
 
     if (!tool) {
       const errorMsg = `Unknown tool name: ${name}. Available tools: ${TOOLS.map((t) => t.name).join(', ')}.`;
@@ -206,17 +244,41 @@ export function createMcpServer(): Server {
       args.output_format === 'json' ||
       Boolean(args.include_structured || args.includeStructured);
 
+    const progressToken = (request.params as { _meta?: { progressToken?: string | number } } | undefined)?._meta?.progressToken;
+    const onProgress =
+      progressToken !== undefined && typeof extra?.sendNotification === 'function'
+        ? (progress: number, total?: number, message?: string) => {
+            void extra
+              .sendNotification({
+                method: 'notifications/progress',
+                params: {
+                  progressToken,
+                  progress,
+                  ...(total !== undefined ? { total } : {}),
+                  ...(message ? { message } : {}),
+                },
+              })
+              .catch(() => {});
+          }
+        : undefined;
+
+    return await runWithTelemetryStage(async () => {
     try {
       const runnerArgs = wantsStructured ? args : { ...args, _omitStructuredForText: true };
-      const response = await runner.run(name, runnerArgs, requestRootHint, extra?.signal);
+      const response = await runWithRequestProjectRoot(requestRootHint, () =>
+        runner.run(name, runnerArgs, requestRootHint, extra?.signal, onProgress)
+      );
       const durationMs = Math.round(performance.now() - startTime);
 
-      // Session continuity: maintain last known root on successful execution
+      // Session continuity: maintain last known root per session (or global fallback when session_id is omitted)
       if (!response?.isError) {
-        if (explicitRoot) {
-          setLastKnownProjectRoot(explicitRoot);
-        } else if (response?.projectRoot) {
-          setLastKnownProjectRoot(response.projectRoot);
+        const resolvedRoot = explicitRoot ?? response?.projectRoot;
+        if (resolvedRoot) {
+          if (sessionId) {
+            sessionRoots.set(sessionId, resolvedRoot);
+          } else {
+            setLastKnownProjectRoot(resolvedRoot);
+          }
         }
       }
 
@@ -242,16 +304,18 @@ export function createMcpServer(): Server {
       }
 
       // Strip redundant structuredContent for text transport before applying the final transport limit
-      const transportResponse =
-        !wantsStructured &&
-        cleanResponse.structuredContent &&
-        Array.isArray(cleanResponse.content) &&
-        cleanResponse.content.length > 0
-          ? {
-              ...cleanResponse,
-              structuredContent: { summary: 'omitted_for_text_format' },
-            }
-          : cleanResponse;
+      const transportResponse = (() => {
+        if (
+          !wantsStructured &&
+          cleanResponse.structuredContent &&
+          Array.isArray(cleanResponse.content) &&
+          cleanResponse.content.length > 0
+        ) {
+          const { structuredContent: _omitted, ...withoutStructured } = cleanResponse;
+          return withoutStructured;
+        }
+        return cleanResponse;
+      })();
       const finalResponse = enforceResponseLimit(transportResponse, args.max_bytes ?? args.maxBytes);
       const isFinalError = isHandlerError || Boolean(finalResponse?.isError);
       if (isFinalError && !handlerErrorDiagnosis) {
@@ -265,6 +329,13 @@ export function createMcpServer(): Server {
         };
       }
 
+      const structured = cleanResponse.structuredContent as Record<string, any> | undefined;
+      const retrievalObj = structured?.retrieval as { complete?: boolean; omissions?: unknown[] } | undefined;
+      const omissionsCount = Array.isArray(retrievalObj?.omissions) ? retrievalObj.omissions.length : undefined;
+      const incompleteEvidence = retrievalObj && typeof retrievalObj.complete === 'boolean' ? !retrievalObj.complete : undefined;
+      const fallbackUsed = typeof structured?.fallbackReason === 'string' ? structured.fallbackReason : undefined;
+      const sourceBytes = typeof structured?.snapshot?.bytes === 'number' ? structured.snapshot.bytes : undefined;
+
       StrataTelemetry.recordToolResponse({
         event: isFinalError ? 'tool_call_failed' : 'tool_call_completed',
         tool: name,
@@ -272,9 +343,13 @@ export function createMcpServer(): Server {
         trace_id: traceId,
         session_id: sessionId,
         duration_ms: durationMs,
+        ...(fallbackUsed ? { fallback_used: fallbackUsed } : {}),
+        ...(incompleteEvidence !== undefined ? { incomplete_evidence: incompleteEvidence } : {}),
+        ...(omissionsCount !== undefined ? { omissions_count: omissionsCount } : {}),
         input: args,
         metrics: {
           ...(itemsFound !== undefined ? { items_found: itemsFound } : {}),
+          ...(sourceBytes !== undefined ? { source_bytes: sourceBytes } : {}),
         },
         status: isFinalError ? 'error' : 'success',
         error: handlerErrorDiagnosis,
@@ -308,6 +383,7 @@ export function createMcpServer(): Server {
       }, publicResponse, effectiveRoot);
       return publicResponse;
     }
+    });
   });
 
   const originalClose = server.close.bind(server);

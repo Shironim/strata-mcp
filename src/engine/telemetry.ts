@@ -1,5 +1,61 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { appendFileSync, existsSync, readFileSync, renameSync, statSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative } from 'node:path';
+
+const telemetryStageStorage = new AsyncLocalStorage<{ stage?: string }>();
+
+export function runWithTelemetryStage<T>(fn: () => T): T {
+  return telemetryStageStorage.run({}, fn);
+}
+
+export function setTelemetryStage(stage: string): void {
+  const store = telemetryStageStorage.getStore();
+  if (store) store.stage = stage;
+}
+
+export function getTelemetryStage(): string | undefined {
+  return telemetryStageStorage.getStore()?.stage;
+}
+
+const SAFE_INPUT_SCALAR_KEYS = new Set([
+  'action', 'mode', 'target', 'direction', 'refactor_type', 'format', 'output_format',
+  'depth', 'view', 'outline', 'sfc_sections', 'audit_events', 'language', 'scope',
+  'response_detail', 'symbol',
+]);
+
+const SAFE_INPUT_PATH_KEYS = new Set(['path', 'file_path', 'target_path']);
+
+function sanitizePathValue(raw: string, workspaceRoot: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) return '';
+  if (isAbsolute(trimmed)) {
+    const rel = relative(workspaceRoot, trimmed);
+    if (rel && !rel.startsWith('..') && !isAbsolute(rel)) {
+      return rel.slice(0, 120);
+    }
+    return basename(trimmed).slice(0, 120);
+  }
+  return trimmed.slice(0, 120);
+}
+
+function sanitizeStackFrames(stack: string | undefined, workspaceRoot: string): string[] | undefined {
+  if (!stack || typeof stack !== 'string') return undefined;
+  const frames = stack
+    .split('\n')
+    .map(line => line.trim())
+    .filter(line => line.startsWith('at '))
+    .slice(0, 6)
+    .map(line => {
+      const normalized = line.replace(/\(([^)]+)\)/g, (_m, loc: string) => {
+        const match = loc.match(/^(.*):(\d+:\d+)$/);
+        if (!match) return `(${basename(loc)})`;
+        const rel = isAbsolute(match[1]) ? sanitizePathValue(match[1], workspaceRoot) : match[1];
+        return `(${rel}:${match[2]})`;
+      });
+      return normalized.slice(0, 160);
+    });
+  return frames.length > 0 ? frames : undefined;
+}
 
 export interface StrataToolCallEvent {
   timestamp?: string;
@@ -8,8 +64,13 @@ export interface StrataToolCallEvent {
   event: 'tool_call_completed' | 'tool_call_failed';
   tool: string;
   action?: string;
+  stage?: string;
   duration_ms: number;
   cache_hit?: boolean;
+  empty_result?: boolean;
+  fallback_used?: string;
+  incomplete_evidence?: boolean;
+  omissions_count?: number;
   input: Record<string, any>;
   metrics?: {
     bytes_out?: number;
@@ -17,6 +78,7 @@ export interface StrataToolCallEvent {
     items_found?: number;
     estimated_tokens?: number;
     response_bytes?: number;
+    source_bytes?: number;
   };
   bloat_alert?: boolean;
   output_digest?: { summary?: string; sample_preview?: string };
@@ -26,6 +88,7 @@ export interface StrataToolCallEvent {
     message: string;
     stack?: string;
   };
+  stack_frames?: string[];
 }
 
 export interface ToolMetricSummary {
@@ -36,6 +99,7 @@ export interface ToolMetricSummary {
   p95DurationMs: number;
   totalItemsFound: number;
   totalBytesOut: number;
+  emptyResults?: number;
 }
 
 export interface ObservabilitySummary {
@@ -49,12 +113,23 @@ export interface ObservabilitySummary {
   slowCallsCount: number;
   totalBytesOut: number;
   totalItemsFound: number;
+  emptyResultsCount: number;
+  emptyResultRatePercent: number;
+  fallbackCallsCount: number;
+  incompleteEvidenceCount: number;
+  bloatAlertsCount: number;
+  cacheHitsCount: number;
+  totalSourceBytes: number;
+  contextSavingsPercent: number | null;
   toolBreakdown: Record<string, ToolMetricSummary>;
+  actionBreakdown: Record<string, { calls: number; errors: number; emptyResults: number }>;
   recentErrors: Array<{
     timestamp: string;
     tool: string;
     message: string;
     code?: string;
+    stage?: string;
+    stack_frames?: string[];
   }>;
 }
 
@@ -91,8 +166,11 @@ export class StrataTelemetry {
       const texts = (response.content ?? []).flatMap(item => typeof item.text === 'string' ? [item.text] : []);
       const bytes = texts.reduce((sum, value) => sum + Buffer.byteLength(value, 'utf8'), 0);
       const responseBytes = Buffer.byteLength(JSON.stringify(response), 'utf8');
+      const isEmptyResult = event.status === 'success' && event.metrics?.items_found === 0 ? true : undefined;
       this.recordToolCall({
         ...event,
+        stage: event.stage ?? getTelemetryStage(),
+        ...(isEmptyResult ? { empty_result: true } : {}),
         metrics: {
           ...event.metrics,
           bytes_out: bytes,
@@ -128,20 +206,39 @@ export class StrataTelemetry {
       const input: Record<string, any> = {};
       for (const key of Object.keys(event.input).slice(0, 16)) {
         const value = event.input[key];
-        input[key.slice(0, 32)] = typeof value === 'string' ? { bytes: Buffer.byteLength(value) } : { type: typeof value };
+        const safeKey = key.slice(0, 32);
+        if (SAFE_INPUT_PATH_KEYS.has(key) && typeof value === 'string') {
+          input[safeKey] = sanitizePathValue(value, workspaceRoot);
+        } else if (SAFE_INPUT_SCALAR_KEYS.has(key) && (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean')) {
+          input[safeKey] = typeof value === 'string' ? value.slice(0, 96) : value;
+        } else {
+          input[safeKey] = typeof value === 'string' ? { bytes: Buffer.byteLength(value) } : { type: typeof value };
+        }
       }
+      const stackFrames = event.status === 'error' ? sanitizeStackFrames(event.error?.stack, workspaceRoot) : undefined;
       const payload: StrataToolCallEvent = {
         timestamp: (event.timestamp || new Date().toISOString()).slice(0, 64),
         event: event.event, tool: event.tool.slice(0, 64), duration_ms: event.duration_ms,
         trace_id: event.trace_id?.slice(0, 64), session_id: event.session_id?.slice(0, 64),
         status: event.status, input, metrics: event.metrics,
         action: event.action?.slice(0, 64),
+        ...(event.stage ? { stage: event.stage.slice(0, 64) } : {}),
+        ...(event.cache_hit !== undefined ? { cache_hit: event.cache_hit } : {}),
+        ...(event.empty_result ? { empty_result: true } : {}),
+        ...(event.fallback_used ? { fallback_used: event.fallback_used.slice(0, 64) } : {}),
+        ...(event.incomplete_evidence !== undefined ? { incomplete_evidence: event.incomplete_evidence } : {}),
+        ...(event.omissions_count !== undefined ? { omissions_count: event.omissions_count } : {}),
         bloat_alert: event.bloat_alert,
         output_digest: event.output_digest,
-        error: event.error ? {code: event.error.code?.slice(0, 64), message: event.error.message.slice(0, 384)} : undefined,
+        error: event.error ? { code: event.error.code?.slice(0, 64), message: event.error.message.slice(0, 384) } : undefined,
+        ...(stackFrames ? { stack_frames: stackFrames } : {}),
       };
 
       let jsonLine = JSON.stringify(payload);
+      if (Buffer.byteLength(jsonLine) > 4095) {
+        delete payload.stack_frames;
+        jsonLine = JSON.stringify(payload);
+      }
       if (Buffer.byteLength(jsonLine) > 4095) {
         payload.input = {}; payload.output_digest = { summary: 'log_entry_budget' };
         if (payload.error) payload.error.message = payload.error.message.slice(0, 128);
@@ -189,6 +286,32 @@ export class StrataTelemetry {
     }
   }
 
+  private static emptySummary(): ObservabilitySummary {
+    return {
+      totalCalls: 0,
+      successCount: 0,
+      errorCount: 0,
+      errorRatePercent: 0,
+      avgDurationMs: 0,
+      p50DurationMs: 0,
+      p95DurationMs: 0,
+      slowCallsCount: 0,
+      totalBytesOut: 0,
+      totalItemsFound: 0,
+      emptyResultsCount: 0,
+      emptyResultRatePercent: 0,
+      fallbackCallsCount: 0,
+      incompleteEvidenceCount: 0,
+      bloatAlertsCount: 0,
+      cacheHitsCount: 0,
+      totalSourceBytes: 0,
+      contextSavingsPercent: null,
+      toolBreakdown: {},
+      actionBreakdown: {},
+      recentErrors: [],
+    };
+  }
+
   /**
    * Aggregates telemetry records from .strata/strata.log into an ObservabilitySummary.
    */
@@ -199,20 +322,7 @@ export class StrataTelemetry {
   ): ObservabilitySummary {
     const logPath = this.getLogPath(workspaceRoot);
     if (!existsSync(logPath)) {
-      return {
-        totalCalls: 0,
-        successCount: 0,
-        errorCount: 0,
-        errorRatePercent: 0,
-        avgDurationMs: 0,
-        p50DurationMs: 0,
-        p95DurationMs: 0,
-        slowCallsCount: 0,
-        totalBytesOut: 0,
-        totalItemsFound: 0,
-        toolBreakdown: {},
-        recentErrors: [],
-      };
+      return this.emptySummary();
     }
 
     let lines: string[] = [];
@@ -220,20 +330,7 @@ export class StrataTelemetry {
       const content = readFileSync(logPath, 'utf8');
       lines = content.split('\n').filter((l) => l.trim().length > 0);
     } catch {
-      return {
-        totalCalls: 0,
-        successCount: 0,
-        errorCount: 0,
-        errorRatePercent: 0,
-        avgDurationMs: 0,
-        p50DurationMs: 0,
-        p95DurationMs: 0,
-        slowCallsCount: 0,
-        totalBytesOut: 0,
-        totalItemsFound: 0,
-        toolBreakdown: {},
-        recentErrors: [],
-      };
+      return this.emptySummary();
     }
 
     const events: StrataToolCallEvent[] = [];
@@ -249,20 +346,7 @@ export class StrataTelemetry {
     }
 
     if (events.length === 0) {
-      return {
-        totalCalls: 0,
-        successCount: 0,
-        errorCount: 0,
-        errorRatePercent: 0,
-        avgDurationMs: 0,
-        p50DurationMs: 0,
-        p95DurationMs: 0,
-        slowCallsCount: 0,
-        totalBytesOut: 0,
-        totalItemsFound: 0,
-        toolBreakdown: {},
-        recentErrors: [],
-      };
+      return this.emptySummary();
     }
 
     let successCount = 0;
@@ -270,8 +354,16 @@ export class StrataTelemetry {
     let slowCallsCount = 0;
     let totalBytesOut = 0;
     let totalItemsFound = 0;
+    let emptyResultsCount = 0;
+    let fallbackCallsCount = 0;
+    let incompleteEvidenceCount = 0;
+    let bloatAlertsCount = 0;
+    let cacheHitsCount = 0;
+    let totalSourceBytes = 0;
+    let sourceOutputBytes = 0;
     const durations: number[] = [];
     const recentErrors: ObservabilitySummary['recentErrors'] = [];
+    const actionBreakdown: ObservabilitySummary['actionBreakdown'] = {};
 
     const toolStatsMap: Record<
       string,
@@ -281,6 +373,7 @@ export class StrataTelemetry {
         durations: number[];
         itemsFound: number;
         bytesOut: number;
+        emptyResults: number;
       }
     > = {};
 
@@ -293,6 +386,7 @@ export class StrataTelemetry {
           durations: [],
           itemsFound: 0,
           bytesOut: 0,
+          emptyResults: 0,
         };
       }
 
@@ -304,12 +398,35 @@ export class StrataTelemetry {
       totalBytesOut += bytes;
       toolStatsMap[tool].bytesOut += bytes;
 
+      if (typeof ev.metrics?.source_bytes === 'number' && ev.metrics.source_bytes > 0) {
+        totalSourceBytes += ev.metrics.source_bytes;
+        sourceOutputBytes += bytes;
+      }
+
       const items = ev.metrics?.items_found || 0;
       totalItemsFound += items;
       toolStatsMap[tool].itemsFound += items;
 
-      if (ev.duration_ms >= this.SLOW_EXECUTION_THRESHOLD_MS) {
-        slowCallsCount++;
+      if (ev.duration_ms >= this.SLOW_EXECUTION_THRESHOLD_MS) slowCallsCount++;
+      if (ev.bloat_alert) bloatAlertsCount++;
+      if (ev.cache_hit) cacheHitsCount++;
+      if (ev.fallback_used) fallbackCallsCount++;
+      if (ev.incomplete_evidence) incompleteEvidenceCount++;
+
+      const isEmpty = Boolean(ev.empty_result) || (ev.status === 'success' && ev.metrics?.items_found === 0);
+      if (isEmpty) {
+        emptyResultsCount++;
+        toolStatsMap[tool].emptyResults++;
+      }
+
+      if (ev.action) {
+        const actionKey = `${tool}:${ev.action}`;
+        if (!actionBreakdown[actionKey]) {
+          actionBreakdown[actionKey] = { calls: 0, errors: 0, emptyResults: 0 };
+        }
+        actionBreakdown[actionKey].calls++;
+        if (ev.status === 'error') actionBreakdown[actionKey].errors++;
+        if (isEmpty) actionBreakdown[actionKey].emptyResults++;
       }
 
       if (ev.status === 'error') {
@@ -320,6 +437,8 @@ export class StrataTelemetry {
           tool,
           message: ev.error?.message || 'Unknown error',
           code: ev.error?.code,
+          ...(ev.stage ? { stage: ev.stage } : {}),
+          ...(ev.stack_frames ? { stack_frames: ev.stack_frames } : {}),
         });
       } else {
         successCount++;
@@ -351,8 +470,13 @@ export class StrataTelemetry {
         p95DurationMs: calcPercentile(st.durations, 95),
         totalItemsFound: st.itemsFound,
         totalBytesOut: st.bytesOut,
+        emptyResults: st.emptyResults,
       };
     }
+
+    const contextSavingsPercent = totalSourceBytes > 0
+      ? Math.round(((totalSourceBytes - sourceOutputBytes) / totalSourceBytes) * 1000) / 10
+      : null;
 
     return {
       totalCalls: events.length,
@@ -365,7 +489,16 @@ export class StrataTelemetry {
       slowCallsCount,
       totalBytesOut,
       totalItemsFound,
+      emptyResultsCount,
+      emptyResultRatePercent: Math.round((emptyResultsCount / events.length) * 1000) / 10,
+      fallbackCallsCount,
+      incompleteEvidenceCount,
+      bloatAlertsCount,
+      cacheHitsCount,
+      totalSourceBytes,
+      contextSavingsPercent,
       toolBreakdown,
+      actionBreakdown,
       recentErrors: recentErrors.slice(-10).reverse(),
     };
   }
@@ -381,8 +514,11 @@ export function formatSummaryAsText(summary: ObservabilitySummary): string {
     `- **Success Rate:** ${summary.totalCalls > 0 ? (100 - summary.errorRatePercent).toFixed(1) : 0}% (${summary.successCount} succeeded, ${summary.errorCount} failed)`,
     `- **Latency (p50 / p95 / avg):** ${summary.p50DurationMs}ms / ${summary.p95DurationMs}ms / ${summary.avgDurationMs}ms`,
     `- **Slow Execution Warnings (>=250ms):** ${summary.slowCallsCount}`,
+    `- **Empty-Result Rate:** ${summary.emptyResultRatePercent}% (${summary.emptyResultsCount} calls returned 0 items)`,
+    `- **Fallback / Incomplete Evidence / Bloat:** ${summary.fallbackCallsCount} fallbacks, ${summary.incompleteEvidenceCount} partial, ${summary.bloatAlertsCount} bloat alerts`,
     `- **Total Payload Streamed:** ${(summary.totalBytesOut / 1024).toFixed(1)} KB`,
     `- **Total Domain Items Found:** ${summary.totalItemsFound}`,
+    ...(summary.contextSavingsPercent !== null ? [`- **Context Savings (Slicing vs Full Source):** ${summary.contextSavingsPercent}% (${(summary.totalSourceBytes / 1024).toFixed(1)} KB raw)`] : []),
     '',
     `### Per-Tool Performance Breakdown:`,
     `| Tool Name | Calls | Errors | Latency (p50 / p95) | Items Found | Payload (KB) |`,
@@ -397,12 +533,23 @@ export function formatSummaryAsText(summary: ObservabilitySummary): string {
     );
   }
 
+  const sortedActions = Object.keys(summary.actionBreakdown).sort();
+  if (sortedActions.length > 0) {
+    lines.push('');
+    lines.push(`### Per-Action Breakdown:`);
+    for (const actionKey of sortedActions) {
+      const a = summary.actionBreakdown[actionKey];
+      lines.push(`- \`${actionKey}\`: ${a.calls} calls (${a.errors} errors, ${a.emptyResults} empty)`);
+    }
+  }
+
   if (summary.recentErrors.length > 0) {
     lines.push('');
     lines.push(`### Recent Failures & Diagnostics:`);
     for (const err of summary.recentErrors) {
       const codeStr = err.code ? ` [${err.code}]` : '';
-      lines.push(`- **\`${err.tool}\`** at \`${err.timestamp}\`${codeStr}: ${err.message}`);
+      const stageStr = err.stage ? ` (stage: ${err.stage})` : '';
+      lines.push(`- **\`${err.tool}\`** at \`${err.timestamp}\`${codeStr}${stageStr}: ${err.message}`);
     }
   }
 

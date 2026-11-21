@@ -85,7 +85,7 @@ describe('MCP Server & Core Tools', () => {
       expect(response.content[0].text).toContain('ref');
     });
 
-    it('dumps CST syntax tree when action is dump_ast', async () => {
+    it('rejects deprecated action dump_ast explicitly', async () => {
       const server = createMcpServer();
       const callHandler = (server as any)._requestHandlers?.get('tools/call');
 
@@ -101,8 +101,8 @@ describe('MCP Server & Core Tools', () => {
         },
       });
 
-      expect(response.isError).toBeFalsy();
-      expect(response.content[0].text).toContain('Debug CST');
+      expect(response.isError).toBe(true);
+      expect(response.content[0].text).toContain("Invalid action: must be 'search' or 'map'.");
     });
 
     it('returns JSON matches for an explicitly requested snippet JSON response', async () => {
@@ -125,26 +125,6 @@ describe('MCP Server & Core Tools', () => {
       const parsed = JSON.parse(response.content[0].text);
       expect(parsed.matchCount).toBe(1);
     });
-
-    it('returns error when dump_ast is called with unsupported language', async () => {
-      const server = createMcpServer();
-      const callHandler = (server as any)._requestHandlers?.get('tools/call');
-
-      const response = await callHandler({
-        method: 'tools/call',
-        params: {
-          name: 'find_code',
-          arguments: {
-            action: 'dump_ast',
-            code: 'const a = 1;',
-            language: 'unsupported_lang_xyz',
-          },
-        },
-      });
-
-      expect(response.isError).toBe(true);
-      expect(response.content[0].text).toContain('ast-grep dump failed');
-    });
   });
 
   describe('Core Tool 2: inspect_component', () => {
@@ -165,6 +145,26 @@ describe('MCP Server & Core Tools', () => {
       expect(response.isError).toBeFalsy();
       expect(response.content[0].text).toContain('Component: TemplateEmit');
       expect(response.content[0].text).toContain('add-laptop');
+      expect(response.content[0].text).not.toContain('Hint: No public props/emits/slots declared');
+    });
+
+    it('includes outline/symbol guidance when component has no public props/emits/slots', async () => {
+      const server = createMcpServer();
+      const callHandler = (server as any)._requestHandlers?.get('tools/call');
+
+      const response = await callHandler({
+        method: 'tools/call',
+        params: {
+          name: 'inspect_component',
+          arguments: {
+            path: join(FIXTURES_DIR, 'PageOne.vue'),
+          },
+        },
+      });
+
+      expect(response.isError).toBeFalsy();
+      expect(response.content[0].text).toContain('Hint: No public props/emits/slots declared');
+      expect(response.content[0].text).toContain('outline: true');
     });
 
     it('slices a specific symbol body with line numbers and blast radius', async () => {
