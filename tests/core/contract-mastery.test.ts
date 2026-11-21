@@ -5,6 +5,34 @@ import type { ContextDependencyNode, ContextDependencyRelation } from '../../src
 
 describe('Strata MCP — The Frontend Contract Master (4 Pillars)', () => {
   describe('Pillar 1: Universal Data Fetching & Boundary Contract', () => {
+    it('keeps unresolved and multi-call mutations separate from their neighbors', () => {
+      const code = 'useMutation({mutationFn: () => save()}); useMutation({mutationFn: () => {fetch("/a"); axios.put("/b")}}); fetch("/other", {method:"DELETE"})';
+      const rows = extractBoundaryContracts(code, 'react');
+      expect(rows.map(row => [row.boundaryType, row.method, row.targetEndpoint])).toEqual([
+        ['tanstack-query', 'UNKNOWN', 'save'], ['tanstack-query', 'GET', '/a'],
+        ['tanstack-query', 'PUT', '/b'], ['native-fetch', 'DELETE', '/other'],
+      ]);
+      expect(new Set(rows.map(row => row.loc?.column)).size).toBe(4);
+    });
+
+    it('reads visit options and form fields at their own object level', () => {
+      const code = `const draft = useForm("remember", {key, body:"", "x-id": 1, profile:{name:""}, method:""});
+        const other = useForm({separate: true}); draft.post("/draft"); other.post("/other");
+        router.visit("/orders", {method:"post", data:{total}});`;
+      const rows = extractBoundaryContracts(code, 'react');
+      const keys = ['key', 'body', 'x-id', 'profile', 'method'];
+      expect(rows[0].payloadKeys).toEqual(keys);
+      expect(rows[1].payloadKeys).toEqual(['separate']);
+      expect(rows[2]).toMatchObject({method:'POST', payloadKeys:['total']});
+      expect(extractFormContracts(code)[0].fields.map(field => field.key)).toEqual([...keys, 'separate']);
+    });
+
+    it('distinguishes absent, overridden and dynamic methods', () => {
+      const code = `router.visit("/a"); router.visit("/b", opts); router.visit("/c", {method:"post", ...opts});
+        fetch("/d", {...opts, method:"OPTIONS"}); fetch("/e", {method: selected}); fetch("/f", {method:"HEAD"})`;
+      expect(extractBoundaryContracts(code, 'react').map(row => row.method))
+        .toEqual(['GET', 'UNKNOWN', 'UNKNOWN', 'OPTIONS', 'UNKNOWN', 'HEAD']);
+    });
     it('extracts Inertia.js useForm and form.post boundary with payload keys', () => {
       const code = `
         <script setup>

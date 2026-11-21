@@ -2,6 +2,7 @@ import { afterEach, expect, test } from 'bun:test';
 import { mkdtempSync, mkdirSync, truncateSync, writeFileSync, rmSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { auditFrontendTool } from '../../src/tools/audit-frontend';
+import { inspectComponentTool } from '../../src/tools/inspect-component';
 import { traceStateTool } from '../../src/tools/trace-state';
 import { getDownwardComponentTree } from '../../src/engine/graph/downward-traversal';
 import { closeAllDatabases, getWorkspaceDatabase } from '../../src/engine/storage/schema';
@@ -49,13 +50,91 @@ test('component boundaries and API audit associate options with each outbound HT
   ]);
   expect(boundaries.map(item => [item.method, item.targetEndpoint])).toEqual([
     ['GET', '/api/template'], ['GET', '/api/read'], ['POST', '/api/write'],
-    ['PATCH', '/api/items/${id}'], ['UNKNOWN', '/api/headers'],
+    ['PATCH', '/api/items/${id}'], ['HEAD', '/api/headers'],
   ]);
   expect(boundaries.map(item => item.loc)).toEqual(audit.map(({ line, column }) => ({ line, column })));
   expect(audit[1].line).toBe(audit[2].line);
   expect(audit[1].column).toBeLessThan(audit[2].column);
   expect(boundaries[2].payloadKeys).toEqual(['title']);
   expect(boundaries[3]).toMatchObject({ endpointSource: 'template-literal', payloadKeys: ['enabled'] });
+});
+
+test('inspection and API audit report source-local methods and coordinates through their public handlers', async () => {
+  const root = workspace();
+  const code = [
+    '<script setup>',
+    'useMutation({mutationFn: () => save()});',
+    'router.visit("/orders", {method:"post", data:{total}});',
+    'fetch("/probe", {method:"OPTIONS"});',
+    '</script>',
+  ].join('\n');
+  const path = put(root, 'Checkout.vue', code);
+  const inspect = await inspectComponentTool.handler({ path, output_format: 'json' });
+  const audit = await auditFrontendTool.handler({ target_path: root, target: 'api-contracts', format: 'json' });
+  expect(inspect.isError).toBeFalsy();
+  expect(audit.isError).toBeFalsy();
+  const contract = JSON.parse(inspect.content[0].text);
+  const report = JSON.parse(audit.content[0].text);
+  expect(contract.boundaryContracts).toMatchObject([
+    { method: 'UNKNOWN', targetEndpoint: 'save', endpointSource: 'action-symbol', loc: { line: 2, column: 1 } },
+    { method: 'POST', targetEndpoint: '/orders', payloadKeys: ['total'], loc: { line: 3, column: 1 } },
+    { method: 'OPTIONS', targetEndpoint: '/probe', loc: { line: 4, column: 1 } },
+  ]);
+  expect(report.endpoints).toMatchObject([
+    { method: 'POST', endpoint: '/orders', payloadParams: ['total'], line: 3, column: 1 },
+    { method: 'OPTIONS', endpoint: '/probe', line: 4, column: 1 },
+  ]);
+  const text = await inspectComponentTool.handler({ path });
+  expect(text.content[0].text).toContain('save (endpoint unresolved)');
+  const summary = await inspectComponentTool.handler({ path, response_detail: 'summary' });
+  expect(summary.structuredContent?.resultSummary.contract.apiCalls).toEqual([
+    { method: 'UNKNOWN', endpoint: 'save', endpointSource: 'action-symbol', loc: { line: 2, column: 1 } },
+    { method: 'POST', endpoint: '/orders' },
+    { method: 'OPTIONS', endpoint: '/probe' },
+  ]);
+});
+
+test('callback navigation follows one lexical binding and refreshes independently of the mutation location', async () => {
+  const root = workspace();
+  const implementation = 'export const saveOrder = () => fetch("/orders");';
+  const module = put(root, 'useOrders.ts', implementation);
+  put(root, 'barrel.ts', 'export { saveOrder } from "./useOrders"');
+  const path = put(root, 'Orders.vue', [
+    '<script setup lang="ts">',
+    'import { saveOrder as save } from "./useOrders";',
+    'import { saveOrder as indirect } from "./barrel";',
+    'useMutation({mutationFn: () => save()});',
+    '{ const save = () => 1; useMutation({mutationFn: save}); }',
+    'function render(save: Function) { useMutation({mutationFn: save}); }',
+    'useMutation({mutationFn: indirect});',
+    'useMutation({mutationFn: save()});',
+    '</script>',
+  ].join('\n'));
+  const inspect = async () => {
+    const result = await inspectComponentTool.handler({ path, output_format: 'json' });
+    expect(result.isError).toBeFalsy();
+    return JSON.parse(result.content[0].text).boundaryContracts;
+  };
+  const rows = await inspect();
+  expect(rows).toHaveLength(5);
+  expect(rows[0]).toMatchObject({ method: 'UNKNOWN', targetEndpoint: 'save', loc: { line: 4, column: 1 },
+    callbackDefinition: { symbol: 'saveOrder', file: module, line: 1, column: 14 } });
+  expect(rows[1].callbackDefinition).toEqual({ symbol: 'save', file: path, line: 5, column: 9 });
+  expect(rows[2].callbackDefinition).toBeUndefined();
+  expect(rows[3].callbackDefinition).toBeUndefined();
+  expect(rows[4].callbackDefinition).toBeUndefined();
+  writeFileSync(module, '\n\n' + implementation);
+  const refreshed = await inspect();
+  expect(refreshed[0].loc).toEqual(rows[0].loc);
+  expect(refreshed[0].callbackDefinition).toEqual({ ...rows[0].callbackDefinition, line: 3 });
+  const summary = await inspectComponentTool.handler({ path, response_detail: 'summary' });
+  expect(summary.structuredContent?.resultSummary.contract.apiCalls[0]).toMatchObject({
+    method: 'UNKNOWN', endpointSource: 'action-symbol', callbackDefinition: refreshed[0].callbackDefinition,
+  });
+  const audit = await auditFrontendTool.handler({ target_path: root, target: 'api-contracts', format: 'json' });
+  const endpoints = JSON.parse(audit.content[0].text).endpoints;
+  expect(endpoints).toHaveLength(1);
+  expect(endpoints[0]).toMatchObject({ endpoint: '/orders', line: 3, file: module });
 });
 
 test('TanStack mutation only consumes the call in its own mutation function', async () => {

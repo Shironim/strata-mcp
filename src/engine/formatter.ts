@@ -195,7 +195,10 @@ function appendDiagnosticsAndForms(contract: ComponentContract, lines: string[])
       const hintStr = b.backendTargetHint
         ? ` -> [Backend Target (Heuristic): ${b.backendTargetHint.targetIntent} | ${b.backendTargetHint.suggestedSymbols[0]} (verify actual routes)]`
         : '';
-      lines.push(`  - ${lineStr}[${b.boundaryType}] ${b.method} ${b.targetEndpoint}${payloadStr}${hintStr}`);
+      const unresolved = b.boundaryType === 'tanstack-query' && b.endpointSource === 'action-symbol' ? ' (endpoint unresolved)' : '';
+      const def = b.callbackDefinition;
+      const definition = def ? ` -> ${def.symbol} (${def.file}:${def.line}:${def.column})` : '';
+      lines.push(`  - ${lineStr}[${b.boundaryType}] ${b.method} ${b.targetEndpoint}${unresolved}${definition}${payloadStr}${hintStr}`);
     }
   }
 

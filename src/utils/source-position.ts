@@ -28,7 +28,10 @@ export function assertSafeOffset(content: string, offset: number): void {
 
 export function getSourcePosition(content: string, offset: number): SourcePosition {
   assertSafeOffset(content, offset);
-  const starts = lineStarts(content);
+  return positionFromLineStarts(lineStarts(content), offset);
+}
+
+export function positionFromLineStarts(starts: number[], offset: number): SourcePosition {
   let low = 0;
   let high = starts.length;
   while (low + 1 < high) {

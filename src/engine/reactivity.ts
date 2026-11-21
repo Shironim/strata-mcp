@@ -295,15 +295,14 @@ export async function auditEventHandlers(
             referencedIdentifiersInTemplate.add(ident);
           }
 
-          const outboundApi = fnOutboundApis.get(ident) ?? (extractBoundaryContracts(expContent, 'vue')[0] || undefined);
+          const outboundApi = (analysis.isInline ? undefined : fnOutboundApis.get(ident)) ?? extractBoundaryContracts(expContent, 'vue')[0];
           if (analysis.isInline) {
-            const inlineApis = extractBoundaryContracts(expContent, 'vue');
             inlineExpressions.push({
               event: fullEvent,
               handlerName: expContent,
               line: absPos.line,
               status: 'inline-expression',
-              ...(inlineApis.length > 0 ? { outboundApi: inlineApis[0] } : {}),
+              ...(outboundApi ? { outboundApi } : {}),
             });
           } else if (definedIdentifiers.has(ident)) {
             validHandlers.push({

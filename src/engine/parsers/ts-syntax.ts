@@ -30,3 +30,10 @@ export function staticPropertyName(name: ts.PropertyName): string | undefined {
   }
   return undefined;
 }
+
+export function callableName(node: ts.Node): ts.Identifier | undefined {
+  if (ts.isFunctionDeclaration(node) && node.body) return node.name;
+  if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer &&
+    (node.parent.flags & ts.NodeFlags.Const) &&
+    (ts.isArrowFunction(node.initializer) || ts.isFunctionExpression(node.initializer))) return node.name;
+}

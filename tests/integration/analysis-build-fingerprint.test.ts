@@ -84,6 +84,7 @@ test('builds with the same semver refresh changed edges once and keep failed fin
     expect(refreshed.syncGeneration).toBe(first.syncGeneration + 1);
     expect(refreshed.parserInvocations).toBe(2);
     const upgraded = inspect();
+    expect(upgraded.meta.analysis_fingerprint).toBe(refreshed.analysisFingerprint);
     expect(upgraded.meta.cache_version).toBe(original.meta.cache_version);
     expect(upgraded.edges).toEqual([{ import_type: 'auto' }]);
     const assertWarm = (stats: SyncStats) => {

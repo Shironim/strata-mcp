@@ -940,9 +940,17 @@ export type BoundaryContractType =
   | 'native-fetch'
   | 'axios';
 
-export type BoundaryMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'UNKNOWN';
+export type BoundaryMethod = ApiMethod;
+
+export interface CallbackDefinition {
+  symbol: string;
+  file: string;
+  line: number;
+  column: number;
+}
 
 export interface BoundaryContract {
+  callbackDefinition?: CallbackDefinition;
   boundaryType: BoundaryContractType;
   method: BoundaryMethod;
   targetEndpoint: string;

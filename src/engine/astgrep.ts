@@ -311,6 +311,20 @@ export async function executeAstGrep(options: AstGrepQueryOptions): Promise<RawM
       lang = 'ts';
     }
   }
+  // ast-grep columns count Unicode code points; source ranges use UTF-16 offsets.
+  const astralLines = options.code && /[\u{10000}-\u{10ffff}]/u.test(options.code)
+    ? options.code.split('\n') : undefined;
+  const columnMaps = new Map<number, number[]>();
+  const sourceColumn = ({ line, column }: { line: number; column: number }) => {
+    if (!astralLines) return column + 1;
+    let columns = columnMaps.get(line);
+    if (!columns) {
+      columns = [1];
+      for (const character of astralLines[line] ?? '') columns.push(columns[columns.length - 1] + character.length);
+      columnMaps.set(line, columns);
+    }
+    return columns[column] ?? column + 1;
+  };
   const isRule = Boolean(options.rule);
 
   const args: string[] = isRule ? ['scan'] : ['run'];
@@ -402,9 +416,9 @@ export async function executeAstGrep(options: AstGrepQueryOptions): Promise<RawM
             if (parsed.range) {
               matches.push({
                 line: parsed.range.start.line + 1,
-                column: parsed.range.start.column + 1,
+                column: sourceColumn(parsed.range.start),
                 endLine: parsed.range.end.line + 1,
-                endColumn: parsed.range.end.column + 1,
+                endColumn: sourceColumn(parsed.range.end),
                 text: parsed.text || parsed.lines || '',
               });
               if (matches.length >= maxResults) {
@@ -500,9 +514,9 @@ export async function executeAstGrep(options: AstGrepQueryOptions): Promise<RawM
               if (item.range) {
                 matches.push({
                   line: item.range.start.line + 1,
-                  column: item.range.start.column + 1,
+                  column: sourceColumn(item.range.start),
                   endLine: item.range.end.line + 1,
-                  endColumn: item.range.end.column + 1,
+                  endColumn: sourceColumn(item.range.end),
                   text: item.text || item.lines || '',
                 });
                 if (matches.length >= maxResults) break;

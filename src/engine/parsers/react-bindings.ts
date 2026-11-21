@@ -6,6 +6,7 @@ interface Binding {
   imported?: string;
   declaration: ts.Node;
   typeOnly?: boolean;
+  ambiguous?: boolean;
 }
 interface Scope {
   parent?: Scope;
@@ -18,23 +19,27 @@ interface Scope {
 export function reactBindings(sf: ts.SourceFile) {
   const scopes = new WeakMap<ts.Node, Scope>();
   const root: Scope = { functionScope: true, bindings: new Map() };
+  function register(scope: Scope, name: string, value: Binding) {
+    if (scope.bindings.has(name)) value.ambiguous = true;
+    scope.bindings.set(name, value);
+  }
   function bind(name: ts.BindingName, scope: Scope, declaration: ts.Node): void {
-    if (ts.isIdentifier(name)) scope.bindings.set(name.text, { declaration });
+    if (ts.isIdentifier(name)) register(scope, name.text, { declaration });
     else for (const element of name.elements) if (ts.isBindingElement(element)) bind(element.name, scope, declaration);
   }
   function visit(node: ts.Node, parent: Scope): void {
     let scope = parent;
     if (ts.isFunctionLike(node)) {
-      if (ts.isFunctionDeclaration(node) && node.name) parent.bindings.set(node.name.text, { declaration: node });
+      if (ts.isFunctionDeclaration(node) && node.name) register(parent, node.name.text, { declaration: node });
       scope = { parent, functionScope: true, bindings: new Map() };
-      if (ts.isFunctionExpression(node) && node.name) scope.bindings.set(node.name.text, { declaration: node });
+      if (ts.isFunctionExpression(node) && node.name) register(scope, node.name.text, { declaration: node });
       for (const parameter of node.parameters) bind(parameter.name, scope, parameter);
     } else if (ts.isBlock(node) || ts.isForStatement(node) || ts.isForInStatement(node) || ts.isForOfStatement(node)
       || ts.isCatchClause(node) || ts.isCaseBlock(node) || ts.isClassLike(node) || ts.isWithStatement(node) || ts.isClassStaticBlockDeclaration(node)) {
-      if (ts.isClassDeclaration(node) && node.name) parent.bindings.set(node.name.text, { declaration: node });
+      if (ts.isClassDeclaration(node) && node.name) register(parent, node.name.text, { declaration: node });
       const bodyScope = ts.isBlock(node) && ts.isFunctionLike(node.parent) && 'body' in node.parent && node.parent.body === node;
       scope = { parent, functionScope: bodyScope || ts.isClassStaticBlockDeclaration(node), bindings: new Map(), ...(ts.isWithStatement(node) ? { dynamic: true } : {}) };
-      if (ts.isClassLike(node) && node.name) scope.bindings.set(node.name.text, { declaration: node });
+      if (ts.isClassLike(node) && node.name) register(scope, node.name.text, { declaration: node });
     }
     scopes.set(node, scope);
     if (ts.isVariableDeclaration(node)) {
@@ -47,7 +52,7 @@ export function reactBindings(sf: ts.SourceFile) {
     if (ts.isImportDeclaration(node) && node.importClause && ts.isStringLiteral(node.moduleSpecifier)) {
       const clause = node.importClause;
       const add = (local: string, imported: string, declaration: ts.Node, typeOnly = clause.isTypeOnly) =>
-        scope.bindings.set(local, { source: (node.moduleSpecifier as ts.StringLiteral).text, imported, declaration, typeOnly });
+        register(scope, local, { source: (node.moduleSpecifier as ts.StringLiteral).text, imported, declaration, typeOnly });
       if (clause.name) add(clause.name.text, 'default', clause);
       if (clause.namedBindings && ts.isNamespaceImport(clause.namedBindings)) add(clause.namedBindings.name.text, '*', clause.namedBindings);
       if (clause.namedBindings && ts.isNamedImports(clause.namedBindings)) for (const binding of clause.namedBindings.elements)

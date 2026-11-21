@@ -13,7 +13,7 @@ import type { RawMatch, ResolvedMatch, SfcBlock } from '../types';
  * so matches can be remapped to their original file positions.
  */
 
-const EXPRESSION_SEPARATOR = '\n';
+const EXPRESSION_SEPARATOR = '\n;\n';
 
 interface BatchSegment {
   expressionIndex: number;
@@ -46,7 +46,7 @@ function buildExpressionBatch(expressions: TemplateExpression[]): ExpressionBatc
     });
 
     lines.push(expression.content);
-    currentLine += lineCount; // Expressions are joined by a single newline separator.
+    currentLine += lineCount + 1; // The standalone semicolon prevents calls spanning two expressions.
   }
 
   return { code: lines.join(EXPRESSION_SEPARATOR), segments };
@@ -94,7 +94,7 @@ function routeBatchMatches(
 
   for (const match of rawMatches) {
     const segment = locateSegment(segments, match.line);
-    if (!segment) continue;
+    if (!segment || (match.endLine !== undefined && match.endLine > segment.endLine)) continue;
 
     const expression = expressions[segment.expressionIndex];
     results.push(

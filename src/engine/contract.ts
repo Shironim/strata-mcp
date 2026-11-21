@@ -13,6 +13,8 @@ import { extractLayoutStructure } from './layout-extractor';
 import { extractRenderBoundary } from './contracts/render-boundary';
 import { extractComponentVariants } from './contracts/variants';
 import { extractBoundaryContracts, extractFormContracts } from './contracts/boundaries';
+import { attachCallbackDefinitions } from './contracts/callback-definition';
+import { observeHttpDocument } from './contracts/outbound-http';
 import { extractImportedComposableBoundaries } from './contracts/imported-composable-boundaries';
 
 export { extractRenderBoundary } from './contracts/render-boundary';
@@ -108,7 +110,8 @@ export async function extractComponentContract(
   const dataDependencies = extractDataDependencies(content, framework);
   const variants = extractComponentVariants(content, baseContract.props);
 
-  const boundaryContracts = extractBoundaryContracts(content, framework, resolvedPath);
+  const observations = observeHttpDocument(content, resolvedPath);
+  const boundaryContracts = extractBoundaryContracts(content, framework, resolvedPath, observations);
   for (const b of boundaryContracts) {
     if (!b.source) b.source = 'inline';
   }
@@ -120,7 +123,9 @@ export async function extractComponentContract(
   boundaryContracts.push(...imported.boundaries);
   for (const input of imported.dependencies) dependencies.set(input.path, input);
 
-  const formContracts = extractFormContracts(content);
+  await attachCallbackDefinitions(resolvedPath, workspaceRoot, boundaryContracts.filter(b => b.source === 'inline'), observations, dependencies);
+
+  const formContracts = extractFormContracts(content, undefined, observations.forms);
   const layoutStructure = extractLayoutStructure(resolvedPath, content, framework);
 
   const nuxtPageMeta = (framework === 'nuxt' || content.includes('definePageMeta'))

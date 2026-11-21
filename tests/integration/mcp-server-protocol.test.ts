@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test';
 import { join } from 'node:path';
+import { DEFAULT_RESPONSE_BUDGET_BYTES } from '../../src/engine/context-budget';
 
 test('MCP server loaded runtime - JSON-RPC protocol handshake, tool enumeration and execution', async () => {
   const mcpEntrypoint = process.env.STRATA_MCP_ENTRYPOINT || join(import.meta.dir, '../../src/mcp.ts');
@@ -190,7 +191,7 @@ test('MCP server loaded runtime - JSON-RPC protocol handshake, tool enumeration 
       expect(readRes.result.contents.length).toBe(1);
       expect(readRes.result.contents[0].mimeType).toBe('application/json');
       const text = readRes.result.contents[0].text;
-      expect(Buffer.byteLength(text, 'utf8')).toBeLessThanOrEqual(16000);
+      expect(Buffer.byteLength(text, 'utf8')).toBeLessThanOrEqual(DEFAULT_RESPONSE_BUDGET_BYTES);
       const parsed = JSON.parse(text);
       if (uri === 'strata://component/PageOne') {
         expect(parsed.found).toBe(true);

@@ -246,7 +246,7 @@ export async function findCode(options: SearchOptions): Promise<ResolvedMatch[]>
           ? options.language
           : undefined;
 
-      for (const block of adapter.getScriptBlocks()) {
+      for (const block of adapter.getSearchScriptBlocks?.() ?? adapter.getScriptBlocks()) {
         if (matches.length >= limit) return matches;
         try {
           const rawMatches = await executeAstGrep({
@@ -286,14 +286,14 @@ export async function findCode(options: SearchOptions): Promise<ResolvedMatch[]>
           }
         } else if (options.language !== 'html') {
           // Scan JS expressions inside template directives and interpolations (batched).
-          const expressions = extractTemplateExpressions(templateBlock.content);
+          const expressions = adapter.getSearchExpressions?.() ?? extractTemplateExpressions(templateBlock.content);
           matches.push(
             ...(await queryTemplateExpressions({
               expressions,
               templateBlock,
               filePath: file,
               pattern: options.pattern,
-              language: effectiveScriptLang || 'ts',
+              language: effectiveScriptLang || (adapter.type === 'astro' ? 'tsx' : 'ts'),
               maxResults: limit - matches.length,
             }))
           );
@@ -340,7 +340,7 @@ export async function findCodeByRule(options: SearchOptions): Promise<ResolvedMa
           ? options.language
           : undefined;
 
-      for (const block of adapter.getScriptBlocks()) {
+      for (const block of adapter.getSearchScriptBlocks?.() ?? adapter.getScriptBlocks()) {
         if (matches.length >= limit) return matches;
         const rawMatches = await executeAstGrep({
           code: block.content,
@@ -372,7 +372,7 @@ export async function findCodeByRule(options: SearchOptions): Promise<ResolvedMa
             // Non-fatal fallback
           }
         } else {
-          const expressions = extractTemplateExpressions(templateBlock.content);
+          const expressions = adapter.getSearchExpressions?.() ?? extractTemplateExpressions(templateBlock.content);
           matches.push(
             ...(await queryTemplateExpressions({
               expressions,

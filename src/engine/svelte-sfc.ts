@@ -61,7 +61,8 @@ function extractAttributeMap(attributes: any[] | undefined): Record<string, stri
  * Parses a Svelte component SFC into structured blocks and descriptor.
  * Gracefully handles syntax/compiler errors with diagnostics and regex fallback.
  */
-export function parseSvelte(content: string, filename = 'component.svelte'): SvelteDescriptor {
+export function parseSvelte(content: string, filename = 'component.svelte', captureFragment?: (fragment: ReturnType<typeof parse>['fragment']) => void): SvelteDescriptor {
+  const bom = content.charCodeAt(0) === 0xFEFF ? 1 : 0;
   const diagnostics: Array<{ code: string; message: string }> = [];
   let instanceBlock: SfcBlock | null = null;
   let moduleBlock: SfcBlock | null = null;
@@ -80,8 +81,8 @@ export function parseSvelte(content: string, filename = 'component.svelte'): Sve
     // 1. Module script (<script module> or <script context="module">)
     if (ast.module) {
       const mod = ast.module;
-      const start = mod.content?.start ?? mod.start;
-      const end = mod.content?.end ?? mod.end;
+      const start = (mod.content?.start ?? mod.start) + bom;
+      const end = (mod.content?.end ?? mod.end) + bom;
       const scriptContent = content.slice(start, end);
       const attrs = extractAttributeMap(mod.attributes);
       const lang = typeof attrs.lang === 'string' ? attrs.lang : 'js';
@@ -102,8 +103,8 @@ export function parseSvelte(content: string, filename = 'component.svelte'): Sve
     // 2. Instance script (<script>)
     if (ast.instance) {
       const inst = ast.instance;
-      const start = inst.content?.start ?? inst.start;
-      const end = inst.content?.end ?? inst.end;
+      const start = (inst.content?.start ?? inst.start) + bom;
+      const end = (inst.content?.end ?? inst.end) + bom;
       const scriptContent = content.slice(start, end);
       const attrs = extractAttributeMap(inst.attributes);
       const lang = typeof attrs.lang === 'string' ? attrs.lang : 'js';
@@ -122,11 +123,12 @@ export function parseSvelte(content: string, filename = 'component.svelte'): Sve
 
     // 3. Fragment / Template
     if (ast.fragment && ast.fragment.nodes && ast.fragment.nodes.length > 0) {
+      captureFragment?.(ast.fragment);
       const nodes = ast.fragment.nodes;
       const first = nodes[0];
       const last = nodes[nodes.length - 1];
-      const start = first.start;
-      const end = last.end;
+      const start = first.start + bom;
+      const end = last.end + bom;
 
       templateBlock = {
         type: 'template',
@@ -154,8 +156,8 @@ export function parseSvelte(content: string, filename = 'component.svelte'): Sve
     // 4. CSS / Style
     if (ast.css) {
       const css = ast.css;
-      const start = css.content?.start ?? css.start;
-      const end = css.content?.end ?? css.end;
+      const start = (css.content?.start ?? css.start) + bom;
+      const end = (css.content?.end ?? css.end) + bom;
       const styleContent = content.slice(start, end);
       const attrs = extractAttributeMap(css.attributes);
       const lang = typeof attrs.lang === 'string' ? attrs.lang : 'css';

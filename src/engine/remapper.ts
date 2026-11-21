@@ -6,7 +6,7 @@ import type { Position, RawMatch, ResolvedMatch, SfcBlock } from '../types';
 export function remapPosition(
   relativeLine: number,
   relativeColumn: number,
-  blockStart: Position
+  blockStart: Pick<Position, 'line' | 'column'>
 ): { line: number; column: number } {
   if (relativeLine <= 1) {
     return {

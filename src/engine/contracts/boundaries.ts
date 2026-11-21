@@ -1,6 +1,6 @@
 import type { BoundaryContract, BoundaryMethod, FormContract, FormFieldContract } from '../../types';
 import { synthesizeBackendTargetHint } from './backend-target-hint';
-import { extractOutboundHttpCalls } from './outbound-http';
+import { observeHttpDocument } from './outbound-http';
 
 /**
  * Computes 1-based line number from a character offset.
@@ -13,32 +13,11 @@ export function getLineFromOffset(content: string, offset: number): number {
   return line;
 }
 
-/**
- * Extracts payload object property keys from a JS object literal snippet.
- */
-export function extractObjectLiteralKeys(objSnippet: string): string[] {
-  const keys: string[] = [];
-  const keyRegex = /(?:^|[{,\n])\s*([A-Za-z0-9_$]+)\s*:/g;
-  for (const m of objSnippet.matchAll(keyRegex)) {
-    if (m[1] && m[1] !== 'method' && m[1] !== 'headers' && m[1] !== 'params' && m[1] !== 'body' && m[1] !== 'key') {
-      keys.push(m[1]);
-    }
-  }
-  return keys;
-}
-
 function boundaryDocumentPath(content: string, framework: string): string {
   if (/^\s*---(?:\r?\n)/.test(content)) return 'component.astro';
   if (framework === 'svelte' && /<script\b/.test(content)) return 'component.svelte';
   if (/<(?:script|template)(?:\s|>)/.test(content)) return 'component.vue';
   return framework === 'react' || framework === 'next' ? 'component.tsx' : 'component.ts';
-}
-
-function boundaryMethod(method: string): BoundaryMethod {
-  switch (method) {
-    case 'GET': case 'POST': case 'PUT': case 'PATCH': case 'DELETE': return method;
-    default: return 'UNKNOWN';
-  }
 }
 
 /**
@@ -48,23 +27,12 @@ export function extractBoundaryContracts(
   content: string,
   framework: string,
   filePath?: string,
+  observations: ReturnType<typeof observeHttpDocument> = observeHttpDocument(content, filePath ?? boundaryDocumentPath(content, framework)),
 ): BoundaryContract[] {
-  const boundaries: BoundaryContract[] = [];
-  const documentPath = filePath ?? boundaryDocumentPath(content, framework);
-  const outbound = extractOutboundHttpCalls(content, documentPath).filter(call =>
-    call.clientKind === 'fetch' || call.clientKind === 'axios' || call.clientKind === '$fetch' || call.clientKind === 'useFetch');
-  const consumed = new Set<typeof outbound[number]>();
+  const boundaries: (BoundaryContract & { loc: NonNullable<BoundaryContract['loc']> })[] = [];
+  const formVarFields = new Map(observations.forms.map(form => [form.name, form.fields.map(field => field.key)]));
 
-  // 1. Inertia useForm: const form = useForm({ ... })
-  const formVarFields = new Map<string, string[]>();
-  const inertiaUseFormRegex = /(?:const|let|var)\s+([A-Za-z0-9_$]+)\s*=\s*useForm\s*(?:<[^>]+>)?\s*\(\s*(?:['"][^'"]*['"]\s*,\s*)?(\{[\s\S]*?\})\s*\)/g;
-  for (const m of content.matchAll(inertiaUseFormRegex)) {
-    const varName = m[1];
-    const fields = extractObjectLiteralKeys(m[2]);
-    formVarFields.set(varName, fields);
-  }
-
-  // 1b. Inertia form submissions: form.post(...), form.put(...), etc.
+  // Inertia form submissions: form.post(...), form.put(...), etc.
   const formSubmitRegex = /\b([A-Za-z0-9_$]+)\.(post|put|patch|delete|get)\s*\(\s*(?:route\s*\(\s*['"]([^'"]+)['"]|['"`]([^'"`]+)['"`]|([A-Za-z0-9_$]+))/g;
   for (const m of content.matchAll(formSubmitRegex)) {
     const varName = m[1];
@@ -112,61 +80,7 @@ export function extractBoundaryContracts(
     }
   }
 
-  // 1c. Inertia router calls: router.post(...), router.visit(...)
-  const inertiaRouterRegex = /\brouter\.(post|put|patch|delete|get|visit)\s*\(\s*(?:route\s*\(\s*['"]([^'"]+)['"]|['"`]([^'"`]+)['"`])/g;
-  for (const m of content.matchAll(inertiaRouterRegex)) {
-    const rawMethod = m[1].toUpperCase();
-    const method = (rawMethod === 'VISIT' ? 'GET' : rawMethod) as BoundaryMethod;
-    const isZiggy = Boolean(m[2]);
-    const targetEndpoint = isZiggy ? `route('${m[2]}')` : (m[3]?.trim() || '');
-    const endpointSource = isZiggy ? 'ziggy-route' : (targetEndpoint.includes('${') ? 'template-literal' : 'literal');
-    const line = getLineFromOffset(content, m.index || 0);
-
-    const afterCall = content.substring((m.index || 0) + m[0].length);
-    let payloadKeys: string[] | undefined;
-    const secondArgMatch = afterCall.match(/^\s*,\s*(\{[\s\S]*?\})/);
-    if (secondArgMatch) {
-      payloadKeys = extractObjectLiteralKeys(secondArgMatch[1]);
-    }
-
-    boundaries.push({
-      boundaryType: 'inertia-router',
-      method,
-      targetEndpoint,
-      endpointSource,
-      payloadKeys: payloadKeys && payloadKeys.length > 0 ? payloadKeys : undefined,
-      optimisticUpdate: false,
-      backendTargetHint: synthesizeBackendTargetHint(method, targetEndpoint),
-      loc: { line }
-    });
-  }
-
-  // 3. TanStack Query: useMutation / useQuery
-  const tanstackMutationRegex = /useMutation\s*\(\s*\{[\s\S]*?mutationFn\s*:\s*(?:async\s*)?(?:\([^)]*\)\s*=>|function)/g;
-  for (const m of content.matchAll(tanstackMutationRegex)) {
-    const offset = m.index ?? 0;
-    const line = getLineFromOffset(content, offset);
-    const column = offset - content.lastIndexOf('\n', offset - 1);
-    const call = outbound.find(item => item.mutation?.line === line && item.mutation.column === column);
-    if (call) consumed.add(call);
-    const mutationBlock = content.substring(m.index || 0, (m.index || 0) + 400);
-    const urlMatch = mutationBlock.match(/['"`](\/(?:api\/)?[^'"`]+)['"`]/);
-    const targetEndpoint = call?.rawEndpoint ?? urlMatch?.[1] ?? 'mutationFn';
-    const methodMatch = mutationBlock.match(/method\s*:\s*['"]([A-Z]+)['"]/i) || mutationBlock.match(/\.(post|put|patch|delete)\b/i);
-    const method = boundaryMethod(call?.method ?? (methodMatch ? (methodMatch[1] || methodMatch[2]).toUpperCase() : 'POST'));
-
-    boundaries.push({
-      boundaryType: 'tanstack-query',
-      method,
-      targetEndpoint,
-      endpointSource: call?.endpointSource ?? (urlMatch ? (targetEndpoint.includes('${') ? 'template-literal' : 'literal') : 'action-symbol'),
-      payloadKeys: call?.payloadKeys,
-      optimisticUpdate: call?.mutation?.optimisticUpdate ?? /onMutate\s*:/.test(mutationBlock),
-      loc: { line }
-    });
-  }
-
-  // 4. Server Actions (Next.js / Astro actions)
+  // Server Actions (Next.js / Astro actions)
   const serverActionRegex = /(?:action\s*=\s*\{([A-Za-z0-9_$]+)\}|async\s+function\s+([A-Za-z0-9_$]+)\s*\([^)]*\)\s*\{\s*['"]use server['"])/g;
   for (const m of content.matchAll(serverActionRegex)) {
     const actionName = m[1] || m[2];
@@ -181,12 +95,28 @@ export function extractBoundaryContracts(
     });
   }
 
-  for (const call of outbound) {
-    if (consumed.has(call)) continue;
+  const resolvedMutations = new Set<(typeof observations.mutations)[number]>();
+  for (const call of observations.items) {
+    const loc = { line: call.line, column: call.column };
+    if (call.inertiaRouter) {
+      boundaries.push({ boundaryType: 'inertia-router', method: call.method, targetEndpoint: call.rawEndpoint,
+        endpointSource: call.inertiaRouter.ziggy ? 'ziggy-route' : call.endpointSource,
+        payloadKeys: call.payloadKeys, optimisticUpdate: false, loc,
+        backendTargetHint: synthesizeBackendTargetHint(call.method, call.rawEndpoint) });
+      continue;
+    }
+    if (call.clientKind === 'custom' || call.clientKind === 'useQuery') continue;
+    if (call.mutation) {
+      resolvedMutations.add(call.mutation);
+      boundaries.push({ boundaryType: 'tanstack-query', method: call.method, targetEndpoint: call.rawEndpoint,
+        endpointSource: call.endpointSource, payloadKeys: call.payloadKeys,
+        optimisticUpdate: call.mutation.optimisticUpdate, loc });
+      continue;
+    }
     const boundaryType = call.clientKind === 'axios' ? 'axios' : call.clientKind === 'fetch' ? 'native-fetch' : 'nuxt-fetch';
     boundaries.push({
       boundaryType,
-      method: boundaryMethod(call.method),
+      method: call.method,
       targetEndpoint: call.rawEndpoint,
       endpointSource: call.endpointSource,
       payloadKeys: call.payloadKeys,
@@ -196,7 +126,13 @@ export function extractBoundaryContracts(
     });
   }
 
-  return boundaries;
+  for (const mutation of observations.mutations) {
+    if (resolvedMutations.has(mutation)) continue;
+    boundaries.push({ boundaryType: 'tanstack-query', method: 'UNKNOWN', targetEndpoint: mutation.symbol,
+      endpointSource: 'action-symbol', optimisticUpdate: mutation.optimisticUpdate,
+      loc: { line: mutation.line, column: mutation.column } });
+  }
+  return boundaries.sort((a, b) => (a.loc.line - b.loc.line) || ((a.loc.column ?? 1) - (b.loc.column ?? 1)));
 }
 
 /**
@@ -204,7 +140,8 @@ export function extractBoundaryContracts(
  */
 export function extractFormContracts(
   content: string,
-  templateContent?: string
+  templateContent?: string,
+  declarations: ReturnType<typeof observeHttpDocument>['forms'] = observeHttpDocument(content, boundaryDocumentPath(content, 'react')).forms
 ): FormContract[] {
   const forms: FormContract[] = [];
   const fields: FormFieldContract[] = [];
@@ -255,20 +192,15 @@ export function extractFormContracts(
   }
 
   // 2. Scan script for useForm({ ... }) initial keys
-  const inertiaUseFormRegex = /(?:const|let|var)\s+([A-Za-z0-9_$]+)\s*=\s*useForm\s*(?:<[^>]+>)?\s*\(\s*(?:['"][^'"]*['"]\s*,\s*)?(\{[\s\S]*?\})\s*\)/g;
-  for (const m of content.matchAll(inertiaUseFormRegex)) {
-    const bindingName = m[1];
-    const declaredKeys = extractObjectLiteralKeys(m[2]);
-
-    for (const k of declaredKeys) {
+  for (const declaration of declarations) {
+    for (const { key: k, isFile: isFileField } of declaration.fields) {
       if (!fieldKeySet.has(k)) {
         fieldKeySet.add(k);
-        const isFileField = new RegExp(`${k}\\s*:\\s*(?:null|new File)`).test(m[2]);
         fields.push({
           key: k,
           type: isFileField ? 'file' : 'unknown',
           required: false,
-          binding: `${bindingName}.${k}`
+          binding: `${declaration.name}.${k}`
         });
         if (isFileField) isMultipart = true;
       }

@@ -30,9 +30,15 @@ export function astroExpressionEnd(text: string, start: number): number {
 }
 
 /** Static opening tags with source offsets; not an Astro compiler or runtime render graph. */
-export function astroOpeningTags(template: string): AstroOpeningTag[] {
+export function astroOpeningTags(template: string, onExpression?: (start: number, end: number) => void): AstroOpeningTag[] {
   const tags: AstroOpeningTag[] = [];
   let expressionDepth = 0;
+  let expressionStart = 0;
+  const skipExpression = (start: number) => {
+    const end = astroExpressionEnd(template, start);
+    if (expressionDepth === 0 && template[end - 1] === '}') onExpression?.(start + 1, end - 1);
+    return end;
+  };
   for (let i = 0; i < template.length;) {
     if (template.startsWith('<!--', i)) {
       const end = template.indexOf('-->', i + 4); i = end < 0 ? template.length : end + 3; continue;
@@ -45,8 +51,14 @@ export function astroOpeningTags(template: string): AstroOpeningTag[] {
     if (expressionDepth && template.startsWith('/*', i)) {
       const end = template.indexOf('*/', i + 2); i = end < 0 ? template.length : end + 2; continue;
     }
-    if (c === '{') { expressionDepth++; i++; continue; }
-    if (c === '}') { expressionDepth = Math.max(0, expressionDepth - 1); i++; continue; }
+    if (c === '{') {
+      if (expressionDepth++ === 0) expressionStart = i + 1;
+      i++; continue;
+    }
+    if (c === '}' && expressionDepth > 0) {
+      if (--expressionDepth === 0) onExpression?.(expressionStart, i);
+      i++; continue;
+    }
     if (c !== '<') { i++; continue; }
     const name = /^<([A-Za-z][\w.:-]*)(?=[\s/>])/.exec(template.slice(i));
     if (!name) { i++; continue; }
@@ -55,7 +67,7 @@ export function astroOpeningTags(template: string): AstroOpeningTag[] {
     let end = attrsStart;
     while (end < template.length && template[end] !== '>') {
       if (template[end] === '"' || template[end] === "'") end = quotedEnd(template, end);
-      else if (template[end] === '{') end = astroExpressionEnd(template, end);
+      else if (template[end] === '{') end = skipExpression(end);
       else end++;
     }
     if (end >= template.length) break;

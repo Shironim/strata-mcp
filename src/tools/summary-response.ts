@@ -65,6 +65,8 @@ export function summarizeToolResponse(result: ToolCallResponse, tool: string, ar
     ? data.boundaryContracts.slice(0, 10).map((b: any) => ({
         method: b.method,
         endpoint: b.targetEndpoint,
+        ...(b.boundaryType === 'tanstack-query' && b.endpointSource === 'action-symbol'
+          ? { endpointSource: b.endpointSource, loc: b.loc, ...(b.callbackDefinition && { callbackDefinition: b.callbackDefinition }) } : {}),
         ...(b.source === 'imported-composable' ? { source: b.source, viaComposable: b.viaComposable } : {}),
       }))
     : undefined;
