@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { USE_STRATA_SKILL_TEMPLATE } from '../../src/cli/templates';
@@ -108,11 +108,26 @@ describe('MCP Resources & Prompts Contract', () => {
     }
 
     await expect(getStrataPrompt('unknown-prompt', {}, fixturesDir)).rejects.toThrow('Unknown prompt');
+
+    const routePrompt = await getStrataPrompt('audit-component-tree', { entry: '/dashboard' }, fixturesDir);
+    expect(routePrompt.messages[1].content.type).toBe('text');
+    if (routePrompt.messages[1].content.type === 'text') {
+      expect(routePrompt.messages[1].content.text).toContain('route: "/dashboard"');
+    }
+
+    const filePrompt = await getStrataPrompt('audit-component-tree', { entry: 'src/App.vue' }, fixturesDir);
+    expect(filePrompt.messages[1].content.type).toBe('text');
+    if (filePrompt.messages[1].content.type === 'text') {
+      expect(filePrompt.messages[1].content.text).toContain('path: "src/App.vue"');
+    }
   });
 
-  test('USE_STRATA_SKILL_TEMPLATE stays synchronized with WORKFLOW_PLAYBOOKS (anti template-drift)', () => {
+  test('USE_STRATA_SKILL_TEMPLATE stays synchronized with WORKFLOW_PLAYBOOKS and .agents/skills/use-strata/SKILL.md (anti template-drift)', () => {
     const registeredToolNames = new Set(TOOLS.map((t) => t.name));
     expect(USE_STRATA_SKILL_TEMPLATE).toContain('Canonical Workflow Playbooks');
+
+    const repoSkill = readFileSync(join(process.cwd(), '.agents', 'skills', 'use-strata', 'SKILL.md'), 'utf8');
+    expect(repoSkill).toBe(USE_STRATA_SKILL_TEMPLATE);
 
     const callMatches = USE_STRATA_SKILL_TEMPLATE.matchAll(/Call `([a-z_]+)` with `(\{[^`]+\})`/g);
     let matchedAny = false;

@@ -75,17 +75,17 @@ Frontend Single File Components (SFCs) and JSX files combine presentational mark
 | Engineering Intent | Strata Tool Call | Primary Arguments | Operational Output & Scope |
 |---|---|---|---|
 | **Survey feature directory or component inventory** | \`find_code\` | \`action: "map"\`, \`path?: "..."\` | Bounded file inventory and component catalog without template bodies. |
-| **Search code structurally across components** | \`find_code\` | \`pattern: "..."\`, \`component?: "..."\`, \`prop_name?: "..."\` | Matches component usages, prop bindings, and structural AST patterns. |
-| **Inspect component public interface** | \`inspect_component\` | \`path: "..."\` | Public contract summary: props, emits, slots, models, and outbound API calls. |
-| **Inspect component structural outline** | \`inspect_component\` | \`path: "..."\`, \`outline: true\` (or \`view: "map"\`) | High-level outline of functions, classes, types, constants, computed properties, and hooks. |
-| **Extract targeted method or handler slice** | \`inspect_component\` | \`path: "..."\`, \`symbol: "<methodName>"\` | AST slice of the target function with verified caller references; bounded by \`source_range\`. |
+| **Search code structurally across components** | \`find_code\` | \`pattern: "..."\`, \`mode?: "ast" \| "literal" \| "auto"\`, \`component?: "..."\`, \`prop_name?: "..."\` | Matches component usages, prop bindings, and structural AST or literal patterns. |
+| **Inspect component public interface** | \`inspect_component\` | \`path: "..."\`, \`impact?: "summary" \| "full"\`, \`response_detail?: "summary" \| "full"\` | Public contract summary: props, emits, slots, models, outbound APIs, and per-prop impact risk. |
+| **Map source regions or structural outline** | \`inspect_component\` | \`path: "..."\`, \`view: "map"\` or \`outline: true\` (\`sfc_sections?: true\`) | Hash-bound region map (\`source_ref\`), SFC block bounds, and symbol/callee outline without bodies. |
+| **Extract targeted method or source slice** | \`inspect_component\` | \`path: "..."\`, \`symbol: "..."\` or \`source_range\` or \`view: "source", source_ref\` (\`expected_hash?\`) | Exact hash-verified slice or function AST slice with caller references. |
 | **Analyze parent consumer hierarchy (Blast Radius)** | \`get_component_tree\` | \`path: "..."\`, \`direction: "upward"\` | Maps all parent views, pages, and components consuming this component. |
-| **Inspect child component tree & prop drilling** | \`get_component_tree\` | \`path: "..."\`, \`direction: "downward"\`, \`depth?: 3\` | Hierarchical descendant tree showing component nesting and deeply passed props. |
-| **Trace reactive state flow & store mutations** | \`trace_state\` | \`identifier: "<storeOrState>"\`, \`direction: "both"\` | Multi-hop readers (subscribers) and mutators (writers) across store/context boundaries. |
+| **Inspect child component tree & prop drilling** | \`get_component_tree\` | \`path: "..."\` or \`route: "/..."\`, \`direction: "downward"\`, \`max_depth?: 3\` | Hierarchical descendant tree showing component nesting and deeply passed props. |
+| **Trace reactive state flow & store mutations** | \`trace_state\` | \`identifier: "<storeOrState>"\`, \`direction: "both"\`, \`depth?: 2\` | Multi-hop readers (subscribers) and mutators (writers) across store/context boundaries. |
 | **Audit URL routes & nested layout hierarchy** | \`audit_frontend\` | \`target: "routes"\` | Next.js, Nuxt, SvelteKit, and Astro route parameters, nested layouts, and page entrypoints. |
 | **Audit outbound API calls & backend hints** | \`audit_frontend\` | \`target: "api-contracts"\` | Client-side HTTP/API calls mapped to backend controller endpoint hints. |
 | **Audit unused components and state** | \`audit_frontend\` | \`target: "dead-components"\` or \`"dead-state"\` | Static candidates with scope and limitations; no automatic deletion. |
-| **Generate deterministic refactoring patch plan** | \`generate_patch_plan\` | \`path: "..."\`, \`refactor_type: "rename_prop|rename_event|rename_model|rename_slot"\`, \`old_name: "..."\`, \`new_name?: "..."\` | Deterministic multi-file patch plan for renaming/removing props, events, models, or slots (\`rename_model\`, \`rename_slot\`). |
+| **Generate deterministic refactoring patch plan** | \`generate_patch_plan\` | \`path: "..."\`, \`refactor_type: "rename_*\|remove_*"\`, \`old_name: "..."\`, \`new_name?: "..."\`, \`operations?: [...]\` | Deterministic multi-file patch plan for renaming/removing props, events, models, or slots. |
 
 ---
 
@@ -102,6 +102,7 @@ Follow this sequence during frontend development tasks:
   Need to check component props, emits, or API calls?
   └── ALWAYS ──► Execute inspect_component(path: "...")
                  Do not read full template markup to inspect interface parameters.
+                 (Note: For page/container files without props/emits, default contract output is minimal—use outline: true or view: "map" next.)
 
 [2. State Flow & Method Slicing]
   Need to inspect a specific method, computed property, or event handler?
@@ -139,6 +140,8 @@ ${renderPlaybooksForSkill()}
    - Use \`format: "json"\` primarily for automated patch planning (\`generate_patch_plan\`). JSON responses include \`structuredContent\`.
 5. **Fullstack Bridge (Strata &rarr; Septum):**
    - When outbound APIs disclose \`backendTargetHint\`, hand off the hint directly to Septum (\`septum_slice\` or \`septum_symbol\`) as candidate symbols for independent backend inspection; verify actual routes and declarations.
+6. **E2E Selectors & Exact DOM Markup:**
+   - Default \`inspect_component\` contract mode abstracts away raw HTML attributes (\`#id\`, exact validation strings, full DOM structure). For Playwright E2E selectors or exact template copy, use \`find_code(mode: "literal", ...)\` or targeted \`inspect_component(view: "source", source_ref: ...)\` / \`source_range\` slices.
 `;
 
 export const STRATA_INSPECT_SKILL = USE_STRATA_SKILL_TEMPLATE;

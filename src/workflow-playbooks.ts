@@ -85,11 +85,15 @@ export const WORKFLOW_PLAYBOOKS: readonly WorkflowPlaybook[] = [
     promptDescription:
       'Audit downward component hierarchy for props drilling, dangling context, and render boundaries.',
     intro: ({ target }) => `Audit the component tree starting from '${target}':`,
-    steps: ({ target, workspaceRoot }) => [
-      `1. Call \`get_component_tree\` with \`{ path: "${target}", direction: "downward", target_path: "${workspaceRoot}" }\` to inspect rendered descendants, props drilling (>2 levels), dangling context, and render boundaries.`,
-      `2. For any flagged component, call \`inspect_component\` with \`{ path: "<component-file>" }\` to verify its exact props, emits, and state dependencies.`,
-      `3. If broader topology or unused-component context is needed, call \`audit_frontend\` with \`{ target: "routes", path: "${workspaceRoot}" }\` or \`{ target: "dead-components", path: "${workspaceRoot}" }\`.`,
-    ],
+    steps: ({ target, workspaceRoot }) => {
+      const isRoute = target.startsWith('/') && !/\.(vue|tsx|jsx|svelte|astro|ts|js|mjs|cjs)$/i.test(target);
+      const entryParam = isRoute ? `route: "${target}"` : `path: "${target}"`;
+      return [
+        `1. Call \`get_component_tree\` with \`{ ${entryParam}, direction: "downward", target_path: "${workspaceRoot}" }\` to inspect rendered descendants, props drilling (>2 levels), dangling context, and render boundaries.`,
+        `2. For any flagged component, call \`inspect_component\` with \`{ path: "<component-file>" }\` to verify its exact props, emits, and state dependencies.`,
+        `3. If broader topology or unused-component context is needed, call \`audit_frontend\` with \`{ target: "routes", path: "${workspaceRoot}" }\` or \`{ target: "dead-components", path: "${workspaceRoot}" }\`.`,
+      ];
+    },
   },
 ] as const;
 
