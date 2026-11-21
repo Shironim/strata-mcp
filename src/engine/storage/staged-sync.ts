@@ -1,3 +1,4 @@
+import { isSqliteBusy } from './sqlite-errors';
 import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { basename, dirname, extname, join, normalize, sep, resolve } from 'node:path';
@@ -434,9 +435,7 @@ export async function stagedSync(root: string, scopePath: string | undefined, db
   } catch (err) {
     if (analysisSignal()?.aborted || err instanceof IndexSchemaTooNewError) throw err;
     // Derived data cannot be trusted after an unreadable file or an unsuccessful refresh.
-    const isBusy =
-      (err as { code?: string })?.code === 'SQLITE_BUSY' ||
-      (err instanceof Error && (err.message.includes('locked') || err.message.includes('busy') || err.message.includes('SQLITE_BUSY')));
+    const isBusy = isSqliteBusy(err);
     if (!isBusy && !(err instanceof Error && err.message.startsWith('WORKSPACE_CHANGED'))) {
       try {
         db.transaction(() => {

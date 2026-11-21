@@ -1,3 +1,4 @@
+import { isSqliteBusy } from './sqlite-errors';
 import type { Database } from 'bun:sqlite';
 import type { SyncStats } from '../../types';
 import { canonicalizePath } from '../path-resolver';
@@ -33,9 +34,7 @@ export async function syncWorkspace(
       try {
         return await stagedSync(absRoot, scopePath, db);
       } catch (err) {
-        const isBusy =
-          (err as { code?: string })?.code === 'SQLITE_BUSY' ||
-          (err instanceof Error && (err.message.includes('locked') || err.message.includes('busy') || err.message.includes('SQLITE_BUSY')));
+        const isBusy = isSqliteBusy(err);
         const isWorkspaceChanged = err instanceof Error && err.message.startsWith('WORKSPACE_CHANGED');
 
         if (attempt < maxRetries - 1 && (isBusy || isWorkspaceChanged)) {

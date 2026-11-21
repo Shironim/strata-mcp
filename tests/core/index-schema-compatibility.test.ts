@@ -16,12 +16,13 @@ test('future schema is rejected without modifying the database, journal or data'
     await mkdir(join(root, '.strata'));
     const db = new Database(path);
     const futureVersion = SCHEMA_USER_VERSION + 1;
+    let before: Buffer;
     try {
       db.run(`CREATE TABLE sentinel(value TEXT); INSERT INTO sentinel VALUES ('preserve'); PRAGMA user_version = ${futureVersion};`);
+      before = await readFile(path);
       expect(() => initSchema(db)).toThrow('INDEX_SCHEMA_TOO_NEW');
       await expect(syncWorkspace(root, undefined, db, { rebuild: true })).rejects.toThrow('INDEX_SCHEMA_TOO_NEW');
     } finally { db.close(); }
-    const before = await readFile(path);
     expect(() => getWorkspaceDatabase(root)).toThrow('INDEX_SCHEMA_TOO_NEW');
     expect(() => openReadonlyIndex(path)).toThrow('INDEX_SCHEMA_TOO_NEW');
     expect(observeRetrievalIndex(root)).toBeNull();
