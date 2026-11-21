@@ -4,12 +4,10 @@ import { collectFiles } from './collector';
 import { getCandidateNames, toKebabCase } from './template';
 import { detectFramework } from './contract';
 import { escapeRegExp } from './patterns';
-import { renderedComponentKeys } from './graph/downward-traversal';
-import { extractLocalImports, resolveImportPath, resolveBarrelExport } from './graph/path-helpers';
+import { componentTagKeys, renderedComponentKeys } from './graph/rendered-components';
+import { extractLocalImports, resolveBarrelExport } from './graph/path-helpers';
 import { loadAliasConfig } from './resolver';
-import ts from 'typescript';
-import { parseTypeScript } from './source-parser';
-import { reactBindings } from './parsers/react-bindings';
+import { collectJsxComponentUses, isJsxComponentFile, jsxImportSites, resolveComponentImport } from './graph/component-relationships';
 import { scanDynamicImportsAndGlobals } from './dynamic-imports';
 import type { UnusedComponentInfo, UnusedComponentsOptions, UnusedComponentsResult } from '../types';
 
@@ -158,36 +156,32 @@ export async function findUnusedComponents(
   const renderedFiles = new Set<string>();
   for (const { file, content } of fileContents) {
     const renderedKeys = renderedComponentKeys(content);
+    const aliases = await loadAliasConfig(file);
+    const jsxUses = isJsxComponentFile(file) ? collectJsxComponentUses(file, content, aliases) : undefined;
+    const boundKeys = new Set<string>();
+    const unboundKeys = new Set<string>();
+    for (const use of jsxUses?.values() ?? []) {
+      const keys = use.bound ? boundKeys : unboundKeys;
+      for (const key of componentTagKeys(use.tag)) keys.add(key);
+    }
     for (const key of renderedKeys) {
+      if (boundKeys.has(key) && !unboundKeys.has(key)) continue;
       let files = referencedBy.get(key);
       if (!files) referencedBy.set(key, files = new Set());
       files.add(file);
     }
-    const aliases = await loadAliasConfig(file);
-    const jsxImports = new Set<string>();
-    const isJsx = /\.[jt]sx$/.test(file);
-    if (isJsx) {
-      const sf = parseTypeScript(file, content, ts.ScriptKind.TSX);
-      const bindings = reactBindings(sf);
-      function visit(node: ts.Node) {
-        if (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) {
-          const binding = bindings.imported(node.tagName as ts.Expression);
-          if (binding?.source) jsxImports.add(`${binding.source}\0${node.tagName.getText(sf)}`);
-        }
-        ts.forEachChild(node, visit);
-      }
-      visit(sf);
-    }
     for (const imp of extractLocalImports(content, aliases, file)) {
       const local = imp.alias ?? imp.name;
       if (!renderedKeys.has(`case:${local.toLowerCase()}`)) continue;
-      if (isJsx && !imp.isDynamic && !jsxImports.has(`${imp.source}\0${local}`)) continue;
-      let target = resolveImportPath(file, imp.source, aliases);
+      const resolved = resolveComponentImport(file, imp.source, imp.exportedName ?? imp.name, aliases);
+      if (jsxUses && !imp.isDynamic && !jsxImportSites(jsxUses, imp, resolved.target)?.size) continue;
+      if (resolved.barrel && resolved.barrel !== file) renderedFiles.add(resolved.barrel);
+      let target = resolved.target;
       const visited = new Set<string>();
       while (target && !visited.has(target)) {
         visited.add(target);
         if (target !== file) renderedFiles.add(normalize(target));
-        target = resolveBarrelExport(target, imp.name, aliases);
+        target = resolveBarrelExport(target, imp.exportedName ?? imp.name, aliases);
       }
     }
   }

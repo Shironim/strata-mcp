@@ -1,18 +1,100 @@
 import { parse, NodeTypes, type RootNode, type TemplateChildNode } from '@vue/compiler-dom';
+import { parse as parseSvelteAst } from 'svelte/compiler';
 import ts from 'typescript';
 import { basename, extname, resolve } from 'node:path';
 import { collectFiles } from './collector';
 import { readSourceSnapshot } from './source-file';
 import { parseSfc } from './splitter';
+import { parseAstro } from './astro-sfc';
+import { astroExpressionEnd, astroOpeningTags } from './astro-template';
 import { inspectVueTreeInput } from './graph/vue-tree-input';
-import { extractImports, resolveImportPath } from './graph/path-helpers';
-import { resolveBarrelExport } from './graph/path-helpers';
+import { extractImports } from './graph/path-helpers';
+import { collectJsxComponentUses, resolveComponentImport } from './graph/component-relationships';
+import { canonicalizePath } from './path-resolver';
+import { parseTypeScript } from './source-parser';
 import { loadAliasConfig } from './resolver';
 import { getCandidateNames } from './template';
 import { hashRetrievalIdentity } from './retrieval-evidence';
 import type { ComponentPropContract, PropImpactResult, PropUsage, SourceRef } from '../types';
 
 const normalizeProp = (name: string) => name.replace(/-([a-z])/g, (_, char: string) => char.toUpperCase());
+
+type TargetBinding = { kind: 'target' | 'other' | 'unresolved'; confirmed: boolean };
+
+async function resolveTargetBindings(
+  content: string,
+  file: string,
+  target: string,
+  confirmedNames?: Set<string>
+): Promise<Map<string, TargetBinding>> {
+  const config = await loadAliasConfig(file);
+  const bindings = new Map<string, TargetBinding>();
+  for (const imp of extractImports(content, file)) {
+    const localName = imp.alias || imp.name;
+    const { target: path } = resolveComponentImport(file, imp.source, imp.exportedName ?? imp.name, config);
+    const kind = path ? path === target ? 'target' : 'other' : 'unresolved';
+    const isConfirmed = kind === 'target' && !imp.isDynamic && (!confirmedNames || confirmedNames.has(localName));
+    for (const name of getCandidateNames(localName)) bindings.set(name.toLowerCase(), { kind, confirmed: isConfirmed });
+  }
+  return bindings;
+}
+
+interface ScannedAstroAttr {
+  name: string | null;
+  kind: 'attribute' | 'possible-binding';
+  start: number;
+  end: number;
+}
+
+function scanAstroAttributesWithOffsets(attrString: string): ScannedAstroAttr[] {
+  const result: ScannedAstroAttr[] = [];
+  const len = attrString.length;
+  let i = 0;
+  while (i < len) {
+    while (i < len && /\s/.test(attrString[i])) i++;
+    if (i >= len) break;
+    if (attrString[i] === '{') {
+      const start = i;
+      const end = astroExpressionEnd(attrString, i);
+      const inner = attrString.slice(start + 1, Math.max(start + 1, end - 1)).trim();
+      if (inner.startsWith('...')) {
+        result.push({ name: null, kind: 'possible-binding', start, end });
+      } else if (/^[A-Za-z_$][\w$-]*$/.test(inner)) {
+        result.push({ name: inner, kind: 'attribute', start, end });
+      }
+      i = end;
+      continue;
+    }
+    const keyStart = i;
+    while (i < len && /[a-zA-Z0-9_:@.-]/.test(attrString[i])) i++;
+    const key = attrString.slice(keyStart, i);
+    if (!key) { i++; continue; }
+    while (i < len && /\s/.test(attrString[i])) i++;
+    let end = i;
+    if (i < len && attrString[i] === '=') {
+      i++;
+      while (i < len && /\s/.test(attrString[i])) i++;
+      if (i < len) {
+        const quote = attrString[i];
+        if (quote === '"' || quote === "'") {
+          i++;
+          while (i < len && attrString[i] !== quote) i += attrString[i] === '\\' ? 2 : 1;
+          if (i < len && attrString[i] === quote) i++;
+          end = i;
+        } else if (quote === '{') {
+          i = astroExpressionEnd(attrString, i);
+          end = i;
+        } else {
+          while (i < len && !/[\s>]/.test(attrString[i])) i++;
+          end = i;
+        }
+      }
+    }
+    if (/^(?:client|set|is|define):/.test(key)) continue;
+    result.push({ name: key, kind: 'attribute', start: keyStart, end });
+  }
+  return result;
+}
 
 export function formatPropImpactAsText(result: PropImpactResult): string {
   return [
@@ -33,7 +115,7 @@ export function formatPropImpactAsText(result: PropImpactResult): string {
 export async function analyzePropImpact(options: {
   target: string; workspace: string; props: ComponentPropContract[]; detail: 'summary' | 'full';
 }): Promise<PropImpactResult> {
-  const target = resolve(options.target);
+  const target = canonicalizePath(options.target);
   const scope = resolve(options.workspace);
   const diagnostics: PropImpactResult['diagnostics'] = [];
   const usages = new Map(options.props.map(prop => [normalizeProp(prop.name), [] as PropUsage[]]));
@@ -48,23 +130,21 @@ export async function analyzePropImpact(options: {
     'Risk describes rename/remove impact. Requiredness, defaults and type changes also require reviewing consumers that omit the prop.',
   ];
   const targetExt = extname(target).toLowerCase();
-  if (!['.vue', '.tsx', '.jsx'].includes(targetExt)) {
+  if (!['.vue', '.tsx', '.jsx', '.svelte', '.astro'].includes(targetExt)) {
     return { status: 'unsupported', target, scope, freshness: 'unverified', inputIdentity: hashRetrievalIdentity({ target, scope }),
-      renderConsumerCount: 0, unknownConsumerCount: null, props: [], diagnostics: [{ file: target, code: 'PROP_IMPACT_UNSUPPORTED', reason: 'Prop impact currently supports Vue and React/JSX targets only.' }], limitations };
+      renderConsumerCount: 0, unknownConsumerCount: null, props: [], diagnostics: [{ file: target, code: 'PROP_IMPACT_UNSUPPORTED', reason: 'Prop impact currently supports Vue, React/JSX, Svelte, and Astro targets only.' }], limitations };
   }
   const targetNames = new Set(getCandidateNames(basename(target, targetExt)).map(name => name.toLowerCase()));
-  const isVueTarget = targetExt === '.vue';
-  const isJsxTarget = targetExt === '.tsx' || targetExt === '.jsx';
+  const allowedConsumerExts = targetExt === '.vue' ? ['.vue']
+    : (targetExt === '.tsx' || targetExt === '.jsx') ? ['.tsx', '.jsx']
+      : targetExt === '.svelte' ? ['.svelte']
+        : ['.astro'];
 
   for (const file of (await collectFiles(scope)).sort()) {
     if (resolve(file) === target) continue;
     const fileExt = extname(file).toLowerCase();
-    if (isVueTarget && fileExt !== '.vue') {
-      diagnostics.push({ file, code: 'PROP_IMPACT_UNSCANNED', reason: 'Non-Vue source is outside template consumer analysis; it may contain render or registration references.' });
-      continue;
-    }
-    if (isJsxTarget && fileExt !== '.tsx' && fileExt !== '.jsx') {
-      diagnostics.push({ file, code: 'PROP_IMPACT_UNSCANNED', reason: 'Non-JSX source is outside React component consumer analysis; it may contain render or registration references.' });
+    if (!allowedConsumerExts.includes(fileExt)) {
+      diagnostics.push({ file, code: 'PROP_IMPACT_UNSCANNED', reason: `Source (${fileExt || 'unknown'}) is outside same-framework template consumer analysis; it may contain render or registration references.` });
       continue;
     }
     try {
@@ -76,18 +156,9 @@ export async function analyzePropImpact(options: {
         if (issue) { diagnostics.push({ file, code: issue.code, reason: issue.reason }); continue; }
         const sfc = parseSfc(content, file);
         if (!sfc.template) continue;
-        const config = await loadAliasConfig(file);
         const setupImports = new Set(sfc.scriptSetup ? extractImports(`<script setup>${sfc.scriptSetup.content}</script>`, file)
           .filter(imp => !imp.isDynamic).map(imp => imp.alias || imp.name) : []);
-        const bindings = new Map<string, { kind: 'target' | 'other' | 'unresolved'; confirmed: boolean }>();
-        for (const imp of extractImports(content, file)) {
-          const localName = imp.alias || imp.name;
-          const local = imp.source.startsWith('.') || imp.source.startsWith('/') || config?.isAlias(imp.source);
-          let path = local ? resolveImportPath(file, imp.source, config) : null;
-          if (path && /[/\\]index\.[tj]sx?$/.test(path)) path = resolveBarrelExport(path, imp.name, config) ?? path;
-          const kind = path ? resolve(path) === target ? 'target' : 'other' : 'unresolved';
-          for (const name of getCandidateNames(localName)) bindings.set(name.toLowerCase(), { kind, confirmed: kind === 'target' && !imp.isDynamic && setupImports.has(localName) });
-        }
+        const bindings = await resolveTargetBindings(content, file, target, setupImports);
         const offset = sfc.template.loc.start.offset;
         const add = (name: string | null, node: { loc: { start: { offset: number }; end: { offset: number } } },
           tag: string, kind: PropUsage['kind'], resolution: PropUsage['resolution'], reason: string) => {
@@ -147,28 +218,120 @@ export async function analyzePropImpact(options: {
           for (const child of node.children) walk(child, childScoped);
         };
         walk(parse(sfc.template.content), false);
+      } else if (fileExt === '.svelte') {
+        const bindings = await resolveTargetBindings(content, file, target);
+        const bom = content.charCodeAt(0) === 0xFEFF ? 1 : 0;
+        const ast = parseSvelteAst(content.slice(bom), { modern: true, filename: file });
+        const walkSvelte = (node: any): void => {
+          if (!node || typeof node !== 'object') return;
+          if (Array.isArray(node)) { for (const child of node) walkSvelte(child); return; }
+          if (node.type === 'Component' || node.type === 'SvelteComponent') {
+            const dynamic = node.type === 'SvelteComponent';
+            const tagName = dynamic ? 'svelte:component' : String(node.name ?? '');
+            const binding = dynamic ? undefined : bindings.get(tagName.toLowerCase());
+            const relevant = dynamic || binding?.kind === 'target' || binding?.kind === 'unresolved'
+              || (!binding && targetNames.has(tagName.toLowerCase()));
+            if (relevant) {
+              const confirmed = !dynamic && binding?.confirmed === true;
+              if (confirmed) renders.add(file);
+              const supplied = new Set<string>();
+              let uncertain = false;
+              for (const attr of node.attributes ?? []) {
+                if (attr.type === 'Attribute' && attr.name) supplied.add(normalizeProp(attr.name));
+                else if (attr.type === 'BindDirective' && attr.name) supplied.add(normalizeProp(attr.name));
+                else if (attr.type === 'SpreadAttribute') uncertain = true;
+              }
+              if (confirmed) {
+                for (const [name, entries] of omissions) {
+                  if (supplied.has(name)) continue;
+                  if (uncertain) indeterminate.set(name, indeterminate.get(name)! + 1);
+                  else entries.push({ file, sourceRef: { sha256: snapshot.sha256, startOffset: node.start + bom, endOffset: node.end + bom } });
+                }
+              }
+              const resolution = confirmed ? 'resolved' : 'candidate';
+              const reason = confirmed ? 'Explicit static import resolves to the target.'
+                : 'Dynamic component or unresolved import binding may supply a target prop.';
+              if (!confirmed) diagnostics.push({ file, code: 'PROP_IMPACT_CANDIDATE', reason: `${tagName}: ${reason}` });
+              if (dynamic) {
+                const entry: PropUsage = { file, tag: tagName, kind: 'possible-binding', resolution: 'candidate',
+                  reason: 'Dynamic <svelte:component> may supply any target prop.',
+                  sourceRef: { sha256: snapshot.sha256, startOffset: node.start + bom, endOffset: node.end + bom } };
+                for (const values of usages.values()) values.push(entry);
+              } else {
+                for (const attr of node.attributes ?? []) {
+                  if ((attr.type === 'Attribute' || attr.type === 'BindDirective') && attr.name) {
+                    const entry: PropUsage = { file, tag: tagName, kind: attr.type === 'BindDirective' ? 'model' : 'attribute',
+                      resolution, reason, sourceRef: { sha256: snapshot.sha256, startOffset: attr.start + bom, endOffset: attr.end + bom } };
+                    usages.get(normalizeProp(attr.name))?.push(entry);
+                  } else if (attr.type === 'SpreadAttribute') {
+                    const entry: PropUsage = { file, tag: tagName, kind: 'possible-binding', resolution: 'candidate',
+                      reason: 'Svelte spread attribute {...props} may supply any target prop.',
+                      sourceRef: { sha256: snapshot.sha256, startOffset: attr.start + bom, endOffset: attr.end + bom } };
+                    for (const values of usages.values()) values.push(entry);
+                  }
+                }
+              }
+            }
+          }
+          for (const [key, child] of Object.entries(node)) {
+            if (!['attributes', 'expression', 'metadata', 'loc', 'parent'].includes(key)) walkSvelte(child);
+          }
+        };
+        walkSvelte(ast.fragment);
+      } else if (fileExt === '.astro') {
+        const astro = parseAstro(content, file);
+        if (!astro.template) continue;
+        const bindings = await resolveTargetBindings(content, file, target);
+        const templateOffset = astro.template.loc.start.offset;
+        for (const tag of astroOpeningTags(astro.template.content)) {
+          const binding = bindings.get(tag.name.toLowerCase());
+          const relevant = binding?.kind === 'target' || binding?.kind === 'unresolved'
+            || (!binding && targetNames.has(tag.name.toLowerCase()));
+          if (!relevant) continue;
+          const confirmed = binding?.confirmed === true;
+          if (confirmed) renders.add(file);
+          const attrs = scanAstroAttributesWithOffsets(tag.attributes);
+          const supplied = new Set<string>();
+          let uncertain = false;
+          for (const attr of attrs) {
+            if (attr.kind === 'possible-binding') uncertain = true;
+            else if (attr.name) supplied.add(normalizeProp(attr.name));
+          }
+          if (confirmed) {
+            for (const [name, entries] of omissions) {
+              if (supplied.has(name)) continue;
+              if (uncertain) indeterminate.set(name, indeterminate.get(name)! + 1);
+              else entries.push({ file, sourceRef: { sha256: snapshot.sha256, startOffset: templateOffset + tag.start, endOffset: templateOffset + tag.end } });
+            }
+          }
+          const resolution = confirmed ? 'resolved' : 'candidate';
+          const reason = confirmed ? 'Explicit static frontmatter import resolves to the target.'
+            : 'Unresolved import binding is not fully resolved to the target.';
+          if (!confirmed) diagnostics.push({ file, code: 'PROP_IMPACT_CANDIDATE', reason: `${tag.name}: ${reason}` });
+          const attrsStartOffset = templateOffset + tag.start + 1 + tag.name.length;
+          for (const attr of attrs) {
+            const sourceRef: SourceRef = { sha256: snapshot.sha256, startOffset: attrsStartOffset + attr.start, endOffset: attrsStartOffset + attr.end };
+            if (attr.kind === 'possible-binding') {
+              const entry: PropUsage = { file, tag: tag.name, kind: 'possible-binding', resolution: 'candidate',
+                reason: 'Astro spread attribute {...props} may supply any target prop.', sourceRef };
+              for (const values of usages.values()) values.push(entry);
+            } else if (attr.name) {
+              usages.get(normalizeProp(attr.name))?.push({ file, tag: tag.name, kind: 'attribute', resolution, reason, sourceRef });
+            }
+          }
+        }
       } else {
         // JSX / TSX
-        const config = await loadAliasConfig(file);
-        const bindings = new Map<string, { kind: 'target' | 'other' | 'unresolved'; confirmed: boolean }>();
-        for (const imp of extractImports(content, file)) {
-          const localName = imp.alias || imp.name;
-          const local = imp.source.startsWith('.') || imp.source.startsWith('/') || config?.isAlias(imp.source);
-          let path = local ? resolveImportPath(file, imp.source, config) : null;
-          if (path && /[/\\]index\.[tj]sx?$/.test(path)) path = resolveBarrelExport(path, imp.name, config) ?? path;
-          const kind = path ? resolve(path) === target ? 'target' : 'other' : 'unresolved';
-          for (const name of getCandidateNames(localName)) bindings.set(name.toLowerCase(), { kind, confirmed: kind === 'target' && !imp.isDynamic });
-        }
-
-        const sf = ts.createSourceFile(file, content, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+        const uses = collectJsxComponentUses(file, content, await loadAliasConfig(file));
+        const sf = parseTypeScript(file, content, ts.ScriptKind.TSX);
 
         const walkJsx = (node: ts.Node) => {
           if (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) {
             const tagName = node.tagName.getText(sf);
-            const binding = bindings.get(tagName.toLowerCase());
-            const relevant = binding?.kind === 'target' || (!binding && targetNames.has(tagName.toLowerCase()));
+            const use = uses.get(node.getStart(sf));
+            const confirmed = use?.target === target;
+            const relevant = confirmed || (use && !use.bound && targetNames.has(tagName.toLowerCase()));
             if (relevant) {
-              const confirmed = binding?.confirmed === true;
               if (confirmed) renders.add(file);
 
               const supplied = new Set<string>();

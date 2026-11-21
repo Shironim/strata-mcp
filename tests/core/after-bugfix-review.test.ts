@@ -157,7 +157,7 @@ test('cache refresh reparses old state classifications after the parser version 
   const root = workspace(); put(root, 'App.vue', '<script setup>const cart = useCartStore();</script><template/>');
   const db = getWorkspaceDatabase(root, { create: true }); await syncWorkspace(root);
   db.run("UPDATE state_deps SET identifier = 'usePhantom'");
-  db.run("UPDATE meta SET value = 'memory-v3:0.7.10' WHERE key = 'cache_version'");
+  db.run("UPDATE meta SET value = 'memory-v3:0.7.10' WHERE key = 'analysis_fingerprint'");
   expect((await syncWorkspace(root)).modified).toBeGreaterThan(0);
   expect(db.query("SELECT identifier FROM state_deps WHERE identifier = 'usePhantom'").all()).toHaveLength(0);
   expect((await syncWorkspace(root)).modified).toBe(0);

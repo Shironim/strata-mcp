@@ -3,6 +3,7 @@ import { findUnusedComponents, formatUnusedAsText } from './audit';
 import { findUnusedState, formatUnusedStateAsText } from './storage/state-storage';
 import { extractWorkspaceApiContracts, formatApiContractsAsText } from './api-contract';
 import { prepareIndexedAnalysis } from './prepare-index';
+import { reportAnalysisProgress } from './analysis-context';
 import type { IndexObservation } from './index-retrieval-evidence';
 import type { RouteFramework, RouteManifestResult, UnusedComponentsResult, UnusedStateResult, ApiContractResult } from '../types';
 
@@ -38,12 +39,35 @@ export async function analyzeFrontend(options: FrontendAuditOptions): Promise<Au
   const state = () => findUnusedState(targetPath, { scopePath, excludeDirs, skipSync: true });
   const apis = () => extractWorkspaceApiContracts({ targetPath, scopePath, excludeDirs });
   switch (target) {
-    case 'routes': return { target, data: await routes(), before };
-    case 'dead-components': return { target, data: await components(), before };
-    case 'dead-state': return { target, data: await state(), before };
-    case 'api-contracts': return { target, data: await apis(), before };
+    case 'routes':
+    case 'dead-components':
+    case 'dead-state':
+    case 'api-contracts': {
+      reportAnalysisProgress(0, 1, `Running ${target} audit`);
+      const runner =
+        target === 'routes' ? routes
+        : target === 'dead-components' ? components
+        : target === 'dead-state' ? state
+        : apis;
+      const data = await runner();
+      reportAnalysisProgress(1, 1, `Completed ${target} audit`);
+      return { target, data, before } as AuditAnalysis;
+    }
     case 'all': {
-      const pending = [routes(), components(), state(), apis()] as const;
+      reportAnalysisProgress(0, 4, 'Starting full frontend audit');
+      let completed = 0;
+      const track = <T>(label: string, run: () => Promise<T>): Promise<T> =>
+        run().then((res) => {
+          completed += 1;
+          reportAnalysisProgress(completed, 4, `Completed ${label} audit`);
+          return res;
+        });
+      const pending = [
+        track('routes', routes),
+        track('dead-components', components),
+        track('dead-state', state),
+        track('api-contracts', apis),
+      ] as const;
       try {
         const [routes, unusedComponents, unusedState, apiContracts] = await Promise.all(pending);
         return { target, data: { routes, unusedComponents, unusedState, apiContracts }, before };

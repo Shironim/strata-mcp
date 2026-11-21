@@ -1,21 +1,26 @@
 import { readSourceSnapshot, sliceSourceSnapshot } from './source-file';
 import { existsSync } from 'node:fs';
-import { basename, extname, resolve } from 'node:path';
+import { extname, resolve } from 'node:path';
 import { parseSfc } from './splitter';
 import { extractImports } from './graph/path-helpers';
-import { getComponentTree, resolveImportPath, resolveBarrelExport } from './tree';
+import { getComponentTree } from './tree';
+import { extractRenderedCustomTags } from './graph/rendered-components';
+import { autoComponentCandidates, buildAutoComponentCatalog, collectJsxComponentUses, isJsxComponentFile, resolveComponentImport } from './graph/component-relationships';
 import { loadAliasConfig } from './resolver';
-import { findProjectRoot } from './path-resolver';
+import { canonicalizePath, findProjectRoot } from './path-resolver';
 import { collectFiles } from './collector';
 import { getCandidateNames } from './template';
 import { STRATA_VERSION } from '../version';
 import { collectVuePatchOmissions, collectJsxPatchOmissions } from './patch-coverage';
 import { prepareIndexedAnalysis } from './prepare-index';
+import { reportAnalysisProgress } from './analysis-context';
+import { extractComponentContract } from './contract';
+import { escapeRegExp } from './patterns';
+import { toKebabCase } from './template';
 import {
   cleanIdentifier,
   matchVueProp,
   matchVueEvent,
-  getCandidateTagNames,
   scanVueTemplateProps,
   scanTsxLikeProps,
 } from './parsers/patch-scanners';
@@ -24,6 +29,7 @@ import type {
   PatchPlanOptions,
   PatchPlanResult,
   PatchRefactorType,
+  TargetDeclarationCandidate,
 } from '../types';
 
 export { cleanIdentifier, matchVueProp, matchVueEvent };
@@ -71,6 +77,90 @@ export function normalizePatchOperations(options: PatchPlanOptions) {
 
 }
 
+function declarationKind(refactorType: PatchRefactorType): TargetDeclarationCandidate['kind'] {
+  if (refactorType.endsWith('_event')) return 'event';
+  if (refactorType.endsWith('_model')) return 'model';
+  if (refactorType.endsWith('_slot')) return 'slot';
+  return 'prop';
+}
+
+function sameSymbolName(a: string, b: string): boolean {
+  const cleanA = cleanIdentifier(a);
+  const cleanB = cleanIdentifier(b);
+  return cleanA === cleanB || toKebabCase(cleanA) === toKebabCase(cleanB);
+}
+
+async function resolveTargetDeclarations(
+  absComponentPath: string,
+  projectRoot: string,
+  ops: Array<{ refactorType: PatchRefactorType; cleanOld: string }>
+): Promise<TargetDeclarationCandidate[]> {
+  try {
+    const [{ content, snapshot }, contract] = await Promise.all([
+      readSourceSnapshot(absComponentPath),
+      extractComponentContract(absComponentPath, { workspaceRoot: projectRoot }),
+    ]);
+    const lines = content.split('\n');
+    const lineStarts: number[] = [];
+    let offset = 0;
+    for (const line of lines) {
+      lineStarts.push(offset);
+      offset += line.length + 1;
+    }
+
+    return ops.map(({ refactorType, cleanOld }) => {
+      const kind = declarationKind(refactorType);
+      const candidates = kind === 'prop'
+        ? contract.props.map(p => p.name)
+        : kind === 'event'
+          ? contract.emits.map(e => e.name)
+          : kind === 'model'
+            ? [...(contract.models ?? []).map(m => m.name), ...contract.props.map(p => p.name)]
+            : [...(contract.slotDetails ?? []).map(s => s.name), ...contract.slots];
+
+      const matchedName = candidates.find(name => sameSymbolName(name, cleanOld));
+      if (!matchedName) {
+        return { refactorType, symbol: cleanOld, kind, found: false, file: absComponentPath };
+      }
+
+      const nameVariants = [...new Set([matchedName, cleanOld, toKebabCase(matchedName)])];
+      const variantPattern = new RegExp(`\\b(?:${nameVariants.map(escapeRegExp).join('|')})\\b`);
+      const lineIdx = lines.findIndex(line => variantPattern.test(line));
+      if (lineIdx < 0) {
+        return { refactorType, symbol: matchedName, kind, found: true, file: absComponentPath };
+      }
+
+      const lineText = lines[lineIdx];
+      const trimmed = lineText.trim();
+      const leadSpaces = lineText.length - lineText.trimStart().length;
+      const startOffset = lineStarts[lineIdx] + leadSpaces;
+      const sourceRef = {
+        sha256: snapshot.sha256,
+        startOffset,
+        endOffset: startOffset + trimmed.length,
+      };
+      return {
+        refactorType,
+        symbol: matchedName,
+        kind,
+        found: true,
+        file: absComponentPath,
+        line: lineIdx + 1,
+        snippet: trimmed,
+        sourceRef,
+      };
+    });
+  } catch {
+    return ops.map(({ refactorType, cleanOld }) => ({
+      refactorType,
+      symbol: cleanOld,
+      kind: declarationKind(refactorType),
+      found: false,
+      file: absComponentPath,
+    }));
+  }
+}
+
 /**
  * Generates an automated, prescriptive AST patch plan across all upward consumers of a component.
  */
@@ -79,29 +169,11 @@ export async function generatePatchPlan(options: PatchPlanOptions): Promise<Patc
   const normalizedOps = normalizePatchOperations(options);
 
   const projectRoot = targetPath ? resolve(targetPath) : findProjectRoot(componentPath);
-  const absComponentPath = resolve(componentPath);
+  const absComponentPath = canonicalizePath(componentPath);
   if (!options.skipSync) await prepareIndexedAnalysis(projectRoot, true);
 
-  // Index component candidate names in project to detect collision for auto-imports
-  const allProjectFiles = await collectFiles(projectRoot);
-  const candidateToFileMap = new Map<string, string[]>();
-  for (const file of allProjectFiles) {
-    const ext = extname(file).toLowerCase();
-    if (ext === '.vue' || ext === '.astro' || ext === '.svelte' || ext === '.tsx' || ext === '.jsx') {
-      const base = basename(file, ext);
-      for (const cand of getCandidateNames(base)) {
-        const key = cand.toLowerCase();
-        const list = candidateToFileMap.get(key) || [];
-        if (!list.includes(resolve(file))) list.push(resolve(file));
-        candidateToFileMap.set(key, list);
-      }
-    }
-  }
-
-  const compName = basename(absComponentPath, extname(absComponentPath));
-  const targetTags = getCandidateTagNames(compName);
-
   // 1. Resolve upward tree to get all consumer components (blast radius)
+  reportAnalysisProgress(0, 2, 'Discovering consumer components');
   const treeResult = await getComponentTree({
     skipSync: true,
     entryPath: absComponentPath,
@@ -122,8 +194,12 @@ export async function generatePatchPlan(options: PatchPlanOptions): Promise<Patc
   }
 
   collectConsumerPaths(treeResult.root);
+  const catalog = [...consumerFiles].some(file => !isJsxComponentFile(file))
+    ? buildAutoComponentCatalog(await collectFiles(projectRoot))
+    : new Map<string, Set<string>>();
 
   const allPatches: ComponentPatchItem[] = [];
+  reportAnalysisProgress(1, 2, `Scanning ${consumerFiles.size} consumer files for patch plan`);
   const coverage: PatchPlanResult['coverage'] = {
     candidateCount: consumerFiles.size, analyzedCount: 0, failedCount: 0,
     unsupportedCount: 0, analyzedWithPatchCount: 0, analyzedWithoutPatchCount: 0,
@@ -152,6 +228,7 @@ export async function generatePatchPlan(options: PatchPlanOptions): Promise<Patc
       }
     }
   }
+  reportAnalysisProgress(2, 2, `Patch plan generated (${allPatches.length} patches)`);
 
   // 2. For each consumer file, parse template / JSX and locate exact code replacements
   for (const consumerPath of [...consumerFiles].sort()) {
@@ -173,37 +250,24 @@ export async function generatePatchPlan(options: PatchPlanOptions): Promise<Patc
       }
       const aliasConfig = await loadAliasConfig(consumerPath);
       const consumerTags = new Set<string>();
-      const boundToOther = new Set<string>();
-
-      for (const imp of extractImports(content, consumerPath)) {
-        const isLocal = imp.source.startsWith('.') || imp.source.startsWith('/') || aliasConfig?.isAlias(imp.source);
-        let importedPath = isLocal ? resolveImportPath(consumerPath, imp.source, aliasConfig) : null;
-        if (importedPath && /[/\\]index\.[tj]sx?$/.test(importedPath)) {
-          importedPath = resolveBarrelExport(importedPath, imp.name, aliasConfig) ?? importedPath;
-        }
-        if (importedPath && resolve(importedPath) === absComponentPath) {
-          const importName = imp.alias || imp.name;
-          consumerTags.add(importName);
-          for (const cand of getCandidateNames(importName)) {
-            consumerTags.add(cand);
-          }
-        } else {
-          const boundName = imp.alias || imp.name;
-          if (boundName && boundName !== '*') {
-            for (const cand of getCandidateNames(boundName)) {
-              boundToOther.add(cand.toLowerCase());
-            }
+      let resolvedTagStarts: Set<number> | undefined;
+      if (isJsxComponentFile(consumerPath)) {
+        resolvedTagStarts = new Set();
+        for (const [start, use] of collectJsxComponentUses(consumerPath, content, aliasConfig)) {
+          if (use.target === absComponentPath) {
+            resolvedTagStarts.add(start);
+            consumerTags.add(use.tag);
           }
         }
-      }
-
-      // Check auto-import for Vue and Astro only if not explicitly bound to another component
-      if (ext !== '.tsx' && ext !== '.jsx') {
-        for (const tag of targetTags) {
-          if (!boundToOther.has(tag.toLowerCase())) {
-            const matching = candidateToFileMap.get(tag.toLowerCase()) || [];
-            if (matching.length === 1 && matching[0] === absComponentPath) consumerTags.add(tag);
-          }
+      } else {
+        const imports = extractImports(content, consumerPath);
+        for (const imp of imports) {
+          if (resolveComponentImport(consumerPath, imp.source, imp.exportedName ?? imp.name, aliasConfig).target !== absComponentPath) continue;
+          for (const name of getCandidateNames(imp.alias || imp.name)) consumerTags.add(name);
+        }
+        for (const tag of extractRenderedCustomTags(content)) {
+          const matching = autoComponentCandidates(consumerPath, tag, imports, catalog);
+          if (matching.length === 1 && matching[0] === absComponentPath) consumerTags.add(tag);
         }
       }
 
@@ -247,11 +311,12 @@ export async function generatePatchPlan(options: PatchPlanOptions): Promise<Patc
           }));
         }
       } else if (ext === '.tsx' || ext === '.jsx') {
-        coverage.omissions.push(...collectJsxPatchOmissions(content, consumerPath, snapshot.sha256, consumerTags));
+        coverage.omissions.push(...collectJsxPatchOmissions(content, consumerPath, snapshot.sha256, consumerTags, resolvedTagStarts));
         for (const op of normalizedOps) {
           filePatches.push(...scanTsxLikeProps(content, consumerTags, op.refactorType, op.cleanOld, op.cleanNew, consumerPath, {
             kindLabel: 'JSX attribute',
             preserveKebabCase: false,
+            resolvedTagStarts,
           }));
         }
       } else if (ext === '.svelte') {
@@ -306,9 +371,12 @@ export async function generatePatchPlan(options: PatchPlanOptions): Promise<Patc
       coverage.diagnostics.push({ file: consumerPath, code: 'CONSUMER_ANALYSIS_FAILED', message: error instanceof Error ? error.message : String(error) });
     }
   }
+  reportAnalysisProgress(2, 2, `Patch plan generated (${allPatches.length} patches)`);
 
   // Mathematically enforce the invariant candidateCount = analyzedCount + failedCount + unsupportedCount
   coverage.candidateCount = coverage.analyzedCount + coverage.failedCount + coverage.unsupportedCount;
+
+  const targetDeclarations = await resolveTargetDeclarations(absComponentPath, projectRoot, normalizedOps);
 
   return {
     component: absComponentPath,
@@ -316,6 +384,7 @@ export async function generatePatchPlan(options: PatchPlanOptions): Promise<Patc
     oldName: normalizedOps[0].cleanOld,
     newName: normalizedOps[0].cleanNew,
     operations: options.operations,
+    targetDeclarations,
     totalConsumersAudited: coverage.analyzedCount,
     coverage,
     totalPatches: allPatches.length,

@@ -46,7 +46,8 @@ export function collectJsxPatchOmissions(
   code: string,
   file: string,
   sha256: string,
-  targetTags: Set<string>
+  targetTags: Set<string>,
+  resolvedTagStarts?: ReadonlySet<number>,
 ): Omissions {
   const omissions: Omissions = [];
   const sf = ts.createSourceFile(file, code, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
@@ -59,7 +60,7 @@ export function collectJsxPatchOmissions(
   function visit(node: ts.Node) {
     if (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) {
       const tag = node.tagName.getText(sf);
-      if (matches(tag)) {
+      if (resolvedTagStarts ? resolvedTagStarts.has(node.getStart(sf)) : matches(tag)) {
         for (const prop of node.attributes.properties) {
           if (ts.isJsxSpreadAttribute(prop)) {
             const exprText = prop.expression.getText(sf).trim();

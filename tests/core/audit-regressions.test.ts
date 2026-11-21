@@ -107,7 +107,7 @@ describe('Audit regression cases', () => {
     const db = getWorkspaceDatabase(root, { create: true });
     await syncWorkspace(root);
     db.run("UPDATE edges SET payload_json = json_remove(payload_json, '$.alias')");
-    db.run("UPDATE meta SET value = 'memory-v2:0.7.10' WHERE key = 'cache_version'");
+    db.run("UPDATE meta SET value = 'memory-v2:0.7.10' WHERE key = 'analysis_fingerprint'");
     const refreshed = await syncWorkspace(root);
     expect(refreshed.modified).toBeGreaterThan(0);
     const tree = await getComponentTree({ entryPath: join(root, 'App.tsx'), targetPath: root });
