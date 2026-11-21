@@ -137,7 +137,8 @@ describe('Strata-MCP Parity, Coercion, & Hardening Suite', () => {
         expect(skillText).not.toContain('query:');
         expect(skillText).toContain('pattern:');
         expect(skillText).toContain('old_name:');
-        expect(skillText).toContain('rename_model');
+        expect(skillText).toContain('rename_*|remove_*');
+        expect(skillText).toContain('models, or slots');
       }
 
       expect(STRATA_TS_RULE).not.toContain('archetype-drift');
