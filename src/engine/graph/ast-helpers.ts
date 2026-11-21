@@ -1,12 +1,19 @@
 import { NodeTypes, type RootNode, type TemplateChildNode, type ElementNode } from "@vue/compiler-dom";
 import { parseSfc } from "../splitter";
+import { vueElementBindings } from '../template';
 
 /**
  * Traverses Vue Compiler-DOM AST nodes recursively to visit every ElementNode.
  */
-export function walkVueDom(node: RootNode | TemplateChildNode, visitor: (el: ElementNode) => void): void {
+export function walkVueDom(
+  node: RootNode | TemplateChildNode,
+  visitor: (el: ElementNode, bindings: ReadonlySet<string>) => void,
+  outer: ReadonlySet<string> = new Set(),
+): void {
+  let scope = outer;
   if (node.type === NodeTypes.ELEMENT) {
-    visitor(node);
+    scope = vueElementBindings(node, outer);
+    visitor(node, scope);
   }
   if (
     node.type === NodeTypes.ROOT ||
@@ -15,14 +22,14 @@ export function walkVueDom(node: RootNode | TemplateChildNode, visitor: (el: Ele
   ) {
     for (const child of node.children) {
       if (typeof child === 'object' && child !== null && 'type' in child) {
-        walkVueDom(child as TemplateChildNode, visitor);
+        walkVueDom(child as TemplateChildNode, visitor, scope);
       }
     }
   } else if (node.type === NodeTypes.IF) {
     for (const branch of node.branches) {
       for (const child of branch.children) {
         if (typeof child === 'object' && child !== null && 'type' in child) {
-          walkVueDom(child as TemplateChildNode, visitor);
+          walkVueDom(child as TemplateChildNode, visitor, scope);
         }
       }
     }

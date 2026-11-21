@@ -1,21 +1,16 @@
-import { parseTypeScript } from '../source-parser';
+import { extractDynamicWarnings, extractRenderedCustomTags, isRenderedInContent } from './rendered-components';
 import { readSourceSnapshot } from '../source-file';
 import { moduleDirective } from '../parsers/ts-syntax';
 import { collectVueDynamicTreeInputs, inspectVueTreeInput } from './vue-tree-input';
-import { existsSync, promises as fs, statSync, readFileSync } from "node:fs";
-import { basename, dirname, extname, join, normalize, relative, resolve } from "node:path";
-import { parse as parseDom, NodeTypes } from "@vue/compiler-dom";
-import ts from "typescript";
+import { existsSync } from "node:fs";
+import { basename, dirname, extname, normalize, relative, resolve } from "node:path";
 import { collectFiles } from "../collector";
-import { getCandidateNames, isComponentNameMatch, toKebabCase } from "../template";
-import { escapeRegExp } from "../patterns";
+import { getCandidateNames } from "../template";
 import {
   createAliasConfig,
   loadAliasConfig,
   mergeAliasConfigs,
-  type AliasConfig,
 } from "../resolver";
-import { getWorkspaceDatabase } from "../database";
 import type {
   ComponentTreeNode,
   ComponentTreeOptions,
@@ -23,339 +18,26 @@ import type {
   ContextDependencyGraph,
   ContextDependencyNode,
   ContextDependencyRelation,
-  EdgePayload,
-  PassedPropInfo,
   PropsDrillingAlert,
 } from "../../types";
-import { walkVueDom, extractVueTemplate } from "./ast-helpers";
 import {
   findProjectRoot,
   isPageFile,
-  isSameMonorepoBoundary,
-  resolveImportPath,
-  resolveBarrelExport,
+  isPathInScope,
+  normalizeScopeFilters,
 } from "./path-helpers";
 import { extractImports } from './path-helpers';
+import { autoComponentCandidates, buildAutoComponentCatalog, collectJsxComponentUses, isJsxComponentFile, jsxImportSites, resolveComponentImport } from './component-relationships';
 import {
   extractPassedProps,
   detectPropsDrilling,
 } from "./props-drilling";
 import { createHookContextAnalyzer } from './hook-context';
 
-export interface DynamicComponentWarning {
-  component: string;
-  warning: string;
-}
+// Compatibility exports for callers of the existing graph facade.
+export * from './rendered-components';
 
-/**
- * Extracts custom component tags rendered in a template or JSX (e.g. <AppHeader>, <app-button>).
- * Also resolves dynamic components rendered via Vue/Nuxt `<component :is="...">` and dictionary maps.
- */
-/**
- * Helper to resolve component references from an object literal dictionary in TypeScript AST.
- */
-export function extractDictionaryComponentsFromTsAst(sourceFile: ts.SourceFile, dictVarName: string, tags: Set<string>): void {
-  function visit(node: ts.Node) {
-    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.name.text === dictVarName) {
-      if (node.initializer && ts.isObjectLiteralExpression(node.initializer)) {
-        for (const prop of node.initializer.properties) {
-          if (ts.isPropertyAssignment(prop) && ts.isIdentifier(prop.initializer)) {
-            const compName = prop.initializer.text;
-            if (/^[A-Z][A-Za-z0-9_$]*$/.test(compName)) {
-              tags.add(compName);
-            }
-          }
-        }
-      }
-    }
-    ts.forEachChild(node, visit);
-  }
-  visit(sourceFile);
-}
-
-/**
- * Builds an index of available component files in the project for auto-import resolution.
- * Maps lowercase component names (both PascalCase and kebab-case) to their absolute file paths.
- */
-export async function buildComponentCatalog(rootDir: string): Promise<Map<string, string>> {
-  const catalog = new Map<string, string>();
-  const files = await collectFiles(rootDir);
-
-  for (const file of files) {
-    const ext = extname(file).toLowerCase();
-    if (ext === '.vue' || ext === '.astro' || ext === '.svelte' || ext === '.tsx' || ext === '.jsx') {
-      const base = basename(file, ext);
-      const candidates = getCandidateNames(base);
-      for (const cand of candidates) {
-        const lower = cand.toLowerCase();
-        if (!catalog.has(lower)) {
-          catalog.set(lower, normalize(file));
-        }
-      }
-    }
-  }
-
-  return catalog;
-}
-
-/**
- * Extracts custom component tags rendered in a template or JSX (e.g. <AppHeader>, <app-button>).
- */
-function resolveDynamicComponentTag(
-  prop: any,
-  getTsSourceFile: () => ts.SourceFile,
-  tags: Set<string>
-): void {
-  if (
-    prop.type !== NodeTypes.DIRECTIVE ||
-    prop.name !== 'bind' ||
-    !prop.arg ||
-    !('content' in prop.arg) ||
-    prop.arg.content !== 'is' ||
-    !prop.exp ||
-    !('content' in prop.exp)
-  ) {
-    return;
-  }
-
-  const exp = prop.exp.content.trim();
-  const directMatch = exp.match(/^([A-Z][A-Za-z0-9_$]*)$/);
-  if (directMatch) {
-    tags.add(directMatch[1]);
-    return;
-  }
-
-  const mapMatch = exp.match(/^([A-Za-z0-9_$]+)(?:\[|\.)/);
-  if (mapMatch) {
-    extractDictionaryComponentsFromTsAst(getTsSourceFile(), mapMatch[1], tags);
-  }
-}
-
-const HTML_COMMENT_RE = new RegExp('<' + '!--[\\s\\S]*?-->', 'g');
-const BLOCK_COMMENT_RE = /\/\*[\s\S]*?\*\//g;
-const LINE_COMMENT_RE = /\/\/[^\n]*/g;
-const DOUBLE_QUOTE_RE = /"[^"\\]*(?:\\.[^"\\]*)*"/g;
-const SINGLE_QUOTE_RE = /'[^'\\]*(?:\\.[^'\\]*)*'/g;
-
-function sanitizeTemplateContent(raw: string): string {
-  return raw
-    .replace(HTML_COMMENT_RE, '')
-    .replace(BLOCK_COMMENT_RE, '')
-    .replace(LINE_COMMENT_RE, '')
-    .replace(DOUBLE_QUOTE_RE, '')
-    .replace(SINGLE_QUOTE_RE, '');
-}
-
-/**
- * Traverses Vue/Nuxt SFC template AST, TSX JSX elements, and Astro component templates
- * to extract supported rendered child component tags as static candidates.
- * Also resolves dynamic components rendered via Vue/Nuxt `<component :is="...">` and dictionary maps
- * using official AST traversals (@vue/compiler-dom and TypeScript Compiler API).
- */
-export function extractRenderedCustomTags(content: string): string[] {
-  const tags = new Set<string>();
-
-  // 1. Vue/Nuxt AST traversal via @vue/compiler-dom
-  const vueTemplate = extractVueTemplate(content);
-  const templateSource = vueTemplate ?? (/<[A-Za-z]/.test(content) && !content.includes('export default') ? content : null);
-
-  let sourceFile: ts.SourceFile | null = null;
-  const getTsSourceFile = () => {
-    if (!sourceFile) {
-      let scriptCode = content;
-      if (content.includes('<script')) {
-        const scriptMatches = Array.from(content.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi));
-        if (scriptMatches.length > 0) {
-          scriptCode = scriptMatches.map((m) => m[1]).join('\n');
-        }
-      }
-      sourceFile = parseTypeScript('component.tsx', scriptCode, ts.ScriptKind.TSX);
-    }
-    return sourceFile;
-  };
-
-  if (templateSource) {
-    try {
-      const ast = parseDom(templateSource, { comments: false });
-      walkVueDom(ast, (el) => {
-        if (el.tag === 'component') {
-          for (const prop of el.props) {
-            resolveDynamicComponentTag(prop, getTsSourceFile, tags);
-          }
-          return;
-        }
-
-        if (
-          /^[A-Z][A-Za-z0-9_.]*$/.test(el.tag) ||
-          /^[a-z][a-z0-9_]*-[a-z0-9_.-]*$/.test(el.tag)
-        ) {
-          tags.add(el.tag);
-        }
-      });
-    } catch {
-      // Fall through to JS/TS AST and fallback regex if template parsing errors
-    }
-  }
-
-  // 2. React / JSX / Astro AST traversal via TypeScript AST
-  try {
-    const sf = getTsSourceFile();
-    function visit(node: ts.Node) {
-      // JSX opening & self-closing elements: <ProductCard ... />
-      if (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) {
-        if (ts.isIdentifier(node.tagName)) {
-          const name = node.tagName.text;
-          if (/^[A-Z][A-Za-z0-9_$]*$/.test(name)) {
-            tags.add(name);
-          }
-        } else if (ts.isPropertyAccessExpression(node.tagName)) {
-          const fullName = node.tagName.getText(sf);
-          if (/^[A-Z]/.test(fullName)) {
-            tags.add(fullName);
-          }
-        }
-      }
-
-      // React dynamic component assignment: const SelectedWidget = WIDGETS[type];
-      if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && /^[A-Z][A-Za-z0-9_$]*$/.test(node.name.text)) {
-        if (node.initializer && ts.isElementAccessExpression(node.initializer)) {
-          if (ts.isIdentifier(node.initializer.expression)) {
-            const mapVarName = node.initializer.expression.text;
-            extractDictionaryComponentsFromTsAst(sf, mapVarName, tags);
-          }
-        }
-      }
-
-      // React.createElement or jsx/jsxs call: createElement(DynamicModal, ...)
-      if (ts.isCallExpression(node)) {
-        const calleeText = node.expression.getText(sf);
-        if (
-          calleeText === 'createElement' ||
-          calleeText === 'React.createElement' ||
-          calleeText === 'jsx' ||
-          calleeText === 'jsxs' ||
-          calleeText.endsWith('.createElement')
-        ) {
-          if (node.arguments.length > 0 && ts.isIdentifier(node.arguments[0])) {
-            const compName = node.arguments[0].text;
-            if (/^[A-Z][A-Za-z0-9_$]*$/.test(compName)) {
-              tags.add(compName);
-            }
-          }
-        }
-      }
-
-      ts.forEachChild(node, visit);
-    }
-    visit(sf);
-  } catch {
-    // Fallback if AST generation fails
-  }
-
-  // 3. Resilient fallback for standalone raw fragments (only if no SFC template is present)
-  if (vueTemplate === null) {
-    const sanitized = sanitizeTemplateContent(content);
-    const tagRegex = /<([A-Z][A-Za-z0-9_]*|[a-z][a-z0-9_]*-[a-z0-9_-]*)/g;
-    for (const match of sanitized.matchAll(tagRegex)) {
-      tags.add(match[1]);
-    }
-  }
-
-  return Array.from(tags);
-}
-
-/**
- * Extracts warnings for dynamic or polymorphic components that cannot be statically resolved.
- */
-export function extractDynamicWarnings(
-  content: string,
-  resolvedCustomTags: Set<string>
-): DynamicComponentWarning[] {
-  const warnings: DynamicComponentWarning[] = [];
-
-  // 1. Vue dynamic component: <component :is="expr" /> where expr is not resolved statically
-  const anyIsRegex = /<component\s+[^>]*?(?::|v-bind:)is=["']([^"']+)["']/g;
-  for (const m of content.matchAll(anyIsRegex)) {
-    const rawExpr = m[1].trim();
-    if (!resolvedCustomTags.has(rawExpr)) {
-      warnings.push({
-        component: `<component :is="${rawExpr}">`,
-        warning: `Dynamic/polymorphic component (:is="${rawExpr}") cannot be statically resolved`,
-      });
-    }
-  }
-
-  // 2. Radix UI / Headless / Polymorphic asChild pattern
-  const asChildRegex = /<([A-Z][A-Za-z0-9_.]*)\s+[^>]*?\basChild\b/g;
-  for (const m of content.matchAll(asChildRegex)) {
-    warnings.push({
-      component: `<${m[1]} asChild>`,
-      warning: `Polymorphic delegate component (<${m[1]} asChild>) cannot be statically resolved`,
-    });
-  }
-
-  return warnings;
-}
-
-/**
- * Checks if a single candidate name appears as a rendered tag, `:is` binding, or inside a dynamic map
- * by querying AST-extracted tags from extractRenderedCustomTags.
- */
-export function isCandidateRendered(content: string, candidate: string): boolean {
-  const renderedTags = extractRenderedCustomTags(content);
-  for (const tag of renderedTags) {
-    if (isComponentNameMatch(tag, candidate)) return true;
-    // Support namespaced and dot-access components: <COMPONENT_MAP.candidate /> or <UI.Button />
-    const lastPart = tag.split('.').pop();
-    if (lastPart && isComponentNameMatch(lastPart, candidate)) return true;
-  }
-
-  // If Vue template was present, AST traversal via @vue/compiler-dom is authoritative
-  const vueTemplate = extractVueTemplate(content);
-  if (vueTemplate !== null) {
-    return false;
-  }
-
-  // Resilient fallback for non-SFC / raw template fragments, but strip comments and strings first
-  const sanitized = sanitizeTemplateContent(content);
-
-  const fastTagPattern = new RegExp(
-    `<(?:[A-Za-z0-9_$.]+\\.)?${escapeRegExp(candidate)}[\\s/>]|:is=['"]${escapeRegExp(candidate)}['"]`,
-    'i'
-  );
-  return fastTagPattern.test(sanitized);
-}
-
-/** Normalize once per file for workspace audits; namespaced renders also expose their final name. */
-export function renderedComponentKeys(content: string): Set<string> {
-  const tags = extractRenderedCustomTags(content);
-  if (extractVueTemplate(content) === null) {
-    for (const match of sanitizeTemplateContent(content).matchAll(/<([A-Za-z0-9_$.]+)(?=[\s/>])/g)) tags.push(match[1]);
-  }
-  return new Set(tags.flatMap(tag => {
-    const last = tag.split('.').pop()!;
-    return [`case:${tag.toLowerCase()}`, `kebab:${toKebabCase(tag)}`, `case:${last.toLowerCase()}`, `kebab:${toKebabCase(last)}`];
-  }));
-}
-
-/**
- * Checks if a component identifier or candidate alias is actually rendered in the file's template/JSX.
- */
-export function isRenderedInContent(content: string, identifier: string): boolean {
-  return getCandidateNames(identifier).some((candidate) => isCandidateRendered(content, candidate));
-}
-
-export function normalizeScopeFilters(filter?: string | string[]): string[] {
-  if (!filter) return [];
-  const arr = Array.isArray(filter) ? filter : [filter];
-  return arr.map((f) => f.trim().replace(/\\/g, '/')).filter(Boolean);
-}
-
-export function isPathInScope(filePath: string, scopeFilters: string[]): boolean {
-  if (scopeFilters.length === 0) return true;
-  const norm = filePath.replace(/\\/g, '/');
-  return scopeFilters.some((f) => norm.includes(f) || norm.startsWith(f));
-}
+export { normalizeScopeFilters, isPathInScope } from './path-helpers';
 
 /**
  * Resolves downward component hierarchy tree starting from a root page or layout.
@@ -370,16 +52,9 @@ export async function getDownwardComponentTree(
       : 3;
   const scopeFilters = normalizeScopeFilters(options.scopeFilter);
 
-  // Discover aliases
-  const autoDetectedAliases = await loadAliasConfig(entryPath);
-  const explicitAliases = options.aliasMap
-    ? createAliasConfig(options.aliasMap, dirname(entryPath))
-    : null;
-  const aliasConfig = mergeAliasConfigs(explicitAliases, autoDetectedAliases);
-
-  // Discover project root and component catalog for auto-imports
-  const projectRoot = findProjectRoot(entryPath);
-  const catalog = await buildComponentCatalog(projectRoot);
+  const projectRoot = options.targetPath ? resolve(options.targetPath) : findProjectRoot(entryPath);
+  const explicitAliases = options.aliasMap ? createAliasConfig(options.aliasMap, projectRoot) : null;
+  const catalog = buildAutoComponentCatalog(await collectFiles(projectRoot));
 
   const allComponents = new Set<string>();
   const diagnostics: NonNullable<ComponentTreeResult['diagnostics']> = [];
@@ -389,7 +64,7 @@ export async function getDownwardComponentTree(
   const allConsumers: ContextDependencyNode[] = [];
   const contextRelations: ContextDependencyRelation[] = [];
   const danglingConsumers: ContextDependencyRelation[] = [];
-  const analyzeContexts = createHookContextAnalyzer(aliasConfig);
+  const analyzeContexts = createHookContextAnalyzer(mergeAliasConfigs(explicitAliases, await loadAliasConfig(entryPath)));
 
 
 
@@ -492,15 +167,19 @@ export async function getDownwardComponentTree(
     }
 
     const allImports = extractImports(content, normPath);
+    const aliasConfig = mergeAliasConfigs(explicitAliases, await loadAliasConfig(normPath));
+    const jsxUses = isJsxComponentFile(normPath) ? collectJsxComponentUses(normPath, content, aliasConfig) : undefined;
     const imports = allImports.filter(i => i.source.startsWith('.') || i.source.startsWith('/') || aliasConfig?.isAlias(i.source));
     const resolvedChildren = new Set<string>();
 
     // 1. Static and dynamic imports
     for (const imp of imports) {
-      let resolved = resolveImportPath(normPath, imp.source, aliasConfig);
+      const { target: resolved } = resolveComponentImport(normPath, imp.source, imp.exportedName ?? imp.name, aliasConfig);
+      const identifier = imp.alias || imp.name;
+      const jsxSites = jsxImportSites(jsxUses, imp, resolved);
+      const rendered = jsxSites ? jsxSites.size > 0 : isRenderedInContent(content, identifier);
       if (!resolved) {
-        const identifier = imp.alias || imp.name;
-        if (isRenderedInContent(content, identifier)) {
+        if (rendered) {
           diagnostics.push({
             code: 'UNRESOLVED_RENDERED_IMPORT', filePath: normPath, sourceHash,
             specifier: imp.source, identifier, resolution: 'unresolved',
@@ -510,24 +189,11 @@ export async function getDownwardComponentTree(
         continue;
       }
 
-      // If resolved is a barrel file, follow the re-export to the underlying component
-      if (
-        resolved.endsWith('index.ts') ||
-        resolved.endsWith('index.js') ||
-        resolved.endsWith('index.tsx')
-      ) {
-        const barrelTarget = resolveBarrelExport(resolved, imp.name, aliasConfig);
-        if (barrelTarget) resolved = barrelTarget;
-      }
-
-      // Check if this component or its alias is actually rendered
-      const renderId = imp.alias || imp.name;
-      if (!isRenderedInContent(content, renderId)) {
-        continue;
-      }
+      if (!rendered) continue;
 
       const childNorm = normalize(resolved);
       resolvedChildren.add(childNorm);
+      const passedProps = extractPassedProps(content, getCandidateNames(identifier), jsxSites);
 
       // Prevent infinite loops on circular dependencies in the current branch
       if (!visitedInBranch.has(childNorm)) {
@@ -540,10 +206,7 @@ export async function getDownwardComponentTree(
         );
         childNode.alias = imp.alias;
         childNode.isDynamic = imp.isDynamic;
-        childNode.isPage = isPageFile(childNorm);
 
-        const candidateNames = getCandidateNames(imp.alias || imp.name);
-        const passedProps = extractPassedProps(content, candidateNames);
         if (passedProps.length > 0) {
           childNode.passedProps = passedProps;
           if (passedProps.some((p) => p.isSpread || p.propName === '...spread' || p.propName === '...v-bind')) {
@@ -556,8 +219,6 @@ export async function getDownwardComponentTree(
         diagnostics.push({ code: 'CYCLE_TRUNCATED', filePath: normPath, sourceHash,
           targetPath: childNorm, depth: depth + 1,
           reason: `Traversal stopped at '${childNorm}' because this file already occurs in the current branch.` });
-        const candidateNames = getCandidateNames(imp.alias || imp.name);
-        const passedProps = extractPassedProps(content, candidateNames);
         node.children.push({
           component: imp.alias || imp.name,
           filePath: childNorm,
@@ -575,15 +236,13 @@ export async function getDownwardComponentTree(
     // 2. Auto-import resolution fallback for template tags not in imports
     const customTags = extractRenderedCustomTags(content);
     for (const tag of customTags) {
-      if (allImports.some(i => isComponentNameMatch(tag, i.alias || i.name))) continue;
-      const lower = tag.toLowerCase();
-      const catalogTarget = catalog.get(lower);
-      if (
-        catalogTarget &&
-        catalogTarget !== normPath &&
-        isSameMonorepoBoundary(normPath, catalogTarget) &&
-        !resolvedChildren.has(catalogTarget)
-      ) {
+      const candidates = autoComponentCandidates(normPath, tag, allImports, catalog);
+      if (candidates.length > 1) {
+        diagnostics.push({ code: 'AMBIGUOUS_COMPONENT', filePath: normPath, sourceHash,
+          identifier: tag, candidates, reason: 'Multiple auto-import candidates match this component tag.' });
+      }
+      const catalogTarget = candidates.length === 1 ? candidates[0] : undefined;
+      if (catalogTarget && !resolvedChildren.has(catalogTarget)) {
         resolvedChildren.add(catalogTarget);
         if (!visitedInBranch.has(catalogTarget)) {
           const childNode = await buildSubTree(
@@ -594,7 +253,6 @@ export async function getDownwardComponentTree(
             currentBranchIsClient
           );
           childNode.isAutoImported = true;
-          childNode.isPage = isPageFile(catalogTarget);
 
           const candidateNames = getCandidateNames(tag);
           const passedProps = extractPassedProps(content, candidateNames);

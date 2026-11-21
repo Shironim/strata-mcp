@@ -1,7 +1,6 @@
 import { parseTypeScript } from '../source-parser';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { basename, dirname, extname, resolve } from 'node:path';
-import { escapeRegExp } from '../patterns';
 import { findProjectRoot } from '../path-resolver';
 import type { AliasConfig } from '../resolver';
 import type { ExtractedImport } from '../../types';
@@ -33,27 +32,8 @@ export function isSameMonorepoBoundary(fileA: string, fileB: string): boolean {
   return a === b;
 }
 
-/**
- * Checks if a file path is a page or route file based on common framework conventions.
- */
-export function isPageFile(filePath: string): boolean {
-  const norm = filePath.replace(/\\/g, '/');
-  if (/\/(?:Pages|pages|Views|views)\/(?:.*\/)?(?:Partials|partials|Components|components)\//.test(norm)) {
-    return false;
-  }
-  return (
-    norm.includes('/pages/') ||
-    norm.includes('/Pages/') ||
-    norm.includes('/views/') ||
-    norm.includes('/Views/') ||
-    norm.includes('/routes/') ||
-    (norm.includes('/app/') &&
-      (norm.endsWith('/page.tsx') ||
-        norm.endsWith('/page.jsx') ||
-        norm.endsWith('/page.vue') ||
-        norm.endsWith('/page.js')))
-  );
-}
+// Kept for consumers of the graph facade.
+export { isPageFile } from '../routing/file-role';
 
 /**
  * Resolves an import specifier to a physical file path.
@@ -106,11 +86,16 @@ export function resolveImportPath(
  * e.g. `export { default as BaseButton } from './BaseButton.vue'`.
  */
 export function findBarrelReexportTarget(content: string, exportedName: string): string | null {
-  const pattern = new RegExp(
-    `export\\s*\\{[^}]*?\\b(?:default\\s+as\\s+)?${escapeRegExp(exportedName)}\\b[^}]*?\\}\\s*from\\s*['"]([^'"]+)['"]`,
-    'm'
-  );
-  return content.match(pattern)?.[1] ?? null;
+  const ast = parseTypeScript('barrel.ts', content, ts.ScriptKind.TS);
+  for (const statement of ast.statements) {
+    if (!ts.isExportDeclaration(statement) || statement.isTypeOnly || !statement.moduleSpecifier
+      || !ts.isStringLiteral(statement.moduleSpecifier) || !statement.exportClause
+      || !ts.isNamedExports(statement.exportClause)) continue;
+    if (statement.exportClause.elements.some(element => !element.isTypeOnly && element.name.text === exportedName)) {
+      return statement.moduleSpecifier.text;
+    }
+  }
+  return null;
 }
 
 /**
@@ -146,16 +131,16 @@ export function extractImports(
   const code = createDocumentAdapter(inferredPath, content).getScriptBlocks().map(b => b.content).join('\n');
   const sf = parseTypeScript('file.tsx', code, ts.ScriptKind.TSX);
   const namespaces = new Map<string, string>();
-  const add = (name: string, source: string, isDynamic: boolean, alias?: string) => {
+  const add = (name: string, source: string, isDynamic: boolean, alias?: string, exportedName?: string) => {
     if (!imports.some(i => i.name === name && i.alias === alias && i.source === source)) {
-      imports.push({ name, source, isDynamic, alias });
+      imports.push({ name, source, isDynamic, alias, ...(exportedName ? { exportedName } : {}) });
     }
   };
   for (const stmt of sf.statements) {
     if (!ts.isImportDeclaration(stmt) || !ts.isStringLiteral(stmt.moduleSpecifier) || !stmt.importClause || stmt.importClause.isTypeOnly) continue;
     const source = stmt.moduleSpecifier.text;
     const clause = stmt.importClause;
-    if (clause.name) add(clause.name.text, source, false);
+    if (clause.name) add(clause.name.text, source, false, undefined, 'default');
     if (clause.namedBindings && ts.isNamedImports(clause.namedBindings)) {
       for (const el of clause.namedBindings.elements) {
         if (!el.isTypeOnly) add(el.propertyName?.text ?? el.name.text, source, false, el.propertyName ? el.name.text : undefined);
@@ -252,4 +237,16 @@ export function extractImports(
 /** Keeps the public local-import contract; all bindings are available for shadow checks. */
 export function extractLocalImports(content: string, aliasConfig?: AliasConfig | null, filePath?: string): ExtractedImport[] {
   return extractImports(content, filePath).filter(i => i.source.startsWith('.') || i.source.startsWith('/') || aliasConfig?.isAlias(i.source));
+}
+
+export function normalizeScopeFilters(filter?: string | string[]): string[] {
+  if (!filter) return [];
+  const arr = Array.isArray(filter) ? filter : [filter];
+  return arr.map((f) => f.trim().replace(/\\/g, '/')).filter(Boolean);
+}
+
+export function isPathInScope(filePath: string, scopeFilters: string[]): boolean {
+  if (scopeFilters.length === 0) return true;
+  const norm = filePath.replace(/\\/g, '/');
+  return scopeFilters.some((f) => norm.includes(f) || norm.startsWith(f));
 }

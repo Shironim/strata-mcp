@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import { resolveRouteEntry } from './routes';
 import { getDownwardComponentTree } from './graph/downward-traversal';
 import { getUpwardComponentTree } from './graph/upward-traversal';
+import { reportAnalysisProgress } from './analysis-context';
 import type { ComponentTreeOptions, ComponentTreeResult } from '../types';
 /**
  * Tree Facade (Strata MCP Engine)
@@ -65,9 +66,11 @@ export async function getComponentTree(
   };
 
   const isUpward = options.direction === 'upward' || options.direction === 'up';
+  reportAnalysisProgress(0, 1, `Traversing ${isUpward ? 'upward' : 'downward'} component tree`);
   const result = isUpward
     ? await getUpwardComponentTree(effectiveOptions)
     : await getDownwardComponentTree(effectiveOptions);
+  reportAnalysisProgress(1, 1, 'Component tree resolved');
 
   if (resolvedRouteInfo) {
     result.resolvedRoute = resolvedRouteInfo;

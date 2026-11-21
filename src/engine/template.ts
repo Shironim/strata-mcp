@@ -9,6 +9,8 @@ import {
 import type { RawMatch, ResolvedMatch, SfcBlock } from '../types';
 import { remapMatches } from './remapper';
 import { stripQuotes } from './patterns';
+import ts from 'typescript';
+import { parseTypeScript } from './source-parser';
 
 /**
  * Converts PascalCase to kebab-case (e.g., OldButton -> old-button, UIModal -> ui-modal).
@@ -209,6 +211,38 @@ export interface TemplateExpression {
   content: string;
   start: { line: number; column: number };
   directive?: string;
+  loopBindings?: ReadonlySet<string>;
+}
+
+function addLoopBindings(pattern: ExpressionNode | undefined, bindings: Set<string>): void {
+  if (!pattern || !('content' in pattern)) return;
+  const source = parseTypeScript('vue-loop.ts', `(${pattern.content}) => {}`, ts.ScriptKind.TS);
+  const statement = source.statements[0];
+  if (!statement || !ts.isExpressionStatement(statement) || !ts.isArrowFunction(statement.expression)) return;
+  function add(name: ts.BindingName): void {
+    if (ts.isIdentifier(name)) bindings.add(name.text);
+    else for (const item of name.elements) if (ts.isBindingElement(item)) add(item.name);
+  }
+  for (const parameter of statement.expression.parameters) add(parameter.name);
+}
+
+export function vueElementBindings(element: ElementNode, outer: ReadonlySet<string>): ReadonlySet<string> {
+  const locals = new Set<string>();
+  for (const prop of element.props) {
+    if (prop.type !== NodeTypes.DIRECTIVE) continue;
+    if (prop.name === 'for' && prop.forParseResult) {
+      const { value, key, index } = prop.forParseResult;
+      for (const alias of [value, key, index]) addLoopBindings(alias, locals);
+    }
+    if (prop.name === 'slot') addLoopBindings(prop.exp, locals);
+  }
+  return locals.size ? new Set([...outer, ...locals]) : outer;
+}
+
+export function isVueTagBoundLocally(tag: string, bindings: ReadonlySet<string>): boolean {
+  const name = tag.split('.')[0];
+  if (bindings.has(name)) return true;
+  return [...bindings].some(binding => isComponentNameMatch(name, binding));
 }
 
 /**
@@ -225,7 +259,7 @@ export function extractTemplateExpressions(templateContent: string): TemplateExp
 
   const expressions: TemplateExpression[] = [];
 
-  function pushExpression(exp: ExpressionNode | undefined, directive?: string): void {
+  function pushExpression(exp: ExpressionNode | undefined, directive?: string, loopBindings?: ReadonlySet<string>): void {
     if (!exp || !('content' in exp)) return;
     const content = exp.content.trim();
     if (!content) return;
@@ -236,26 +270,39 @@ export function extractTemplateExpressions(templateContent: string): TemplateExp
       start: { line: exp.loc.start.line + leading.length - 1,
         column: leading.length > 1 ? leading[leading.length - 1].length + 1 : exp.loc.start.column + leading[0].length },
       ...(directive ? { directive } : {}),
+      ...(loopBindings?.size ? { loopBindings } : {}),
     });
   }
 
-  function walk(node: RootNode | TemplateChildNode): void {
+  function walk(node: RootNode | TemplateChildNode, outer: ReadonlySet<string>): void {
+    let scope = outer;
     if (node.type === NodeTypes.ELEMENT) {
+      const loop = node.props.find(prop => prop.type === NodeTypes.DIRECTIVE && prop.name === 'for');
+      if (loop?.type === NodeTypes.DIRECTIVE && loop.forParseResult) {
+        const { source, value, key, index } = loop.forParseResult;
+        pushExpression(source, 'for', outer);
+        const locals = new Set(outer);
+        for (const alias of [value, key, index]) addLoopBindings(alias, locals);
+        scope = locals;
+      }
       for (const prop of node.props) {
-        if (prop.type === NodeTypes.DIRECTIVE && prop.exp) {
-          pushExpression(prop.exp, prop.name);
+        if (prop.type === NodeTypes.DIRECTIVE && prop.exp && prop !== loop) {
+          pushExpression(prop.exp, prop.name, prop.name === 'if' ? outer : scope);
         }
       }
     } else if (node.type === NodeTypes.INTERPOLATION) {
-      pushExpression(node.content);
+      pushExpression(node.content, undefined, scope);
     } else if (node.type === NodeTypes.IF) {
       for (const branch of node.branches) {
-        if (branch.condition) pushExpression(branch.condition);
-        for (const child of branch.children) walk(child);
+        if (branch.condition) pushExpression(branch.condition, undefined, scope);
+        for (const child of branch.children) walk(child, scope);
       }
       return;
     } else if (node.type === NodeTypes.FOR) {
-      if (node.source) pushExpression(node.source);
+      pushExpression(node.source, 'for', outer);
+      const locals = new Set(outer);
+      for (const alias of [node.valueAlias, node.keyAlias, node.objectIndexAlias]) addLoopBindings(alias, locals);
+      scope = locals;
     }
 
     if (
@@ -263,10 +310,10 @@ export function extractTemplateExpressions(templateContent: string): TemplateExp
       node.type === NodeTypes.ELEMENT ||
       node.type === NodeTypes.FOR
     ) {
-      for (const child of node.children) walk(child);
+      for (const child of node.children) walk(child, scope);
     }
   }
 
-  walk(root);
+  walk(root, new Set());
   return expressions;
 }

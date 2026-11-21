@@ -1,7 +1,7 @@
 import { parseTypeScript } from '../source-parser';
 import { parse as parseDom, NodeTypes } from "@vue/compiler-dom";
 import ts from "typescript";
-import { isComponentNameMatch } from "../template";
+import { isComponentNameMatch, isVueTagBoundLocally } from "../template";
 import { escapeRegExp } from "../patterns";
 import type {
   ComponentTreeNode,
@@ -89,14 +89,15 @@ function extractVueTemplatePassedProps(
   componentNames: string[],
   seenProps: Set<string>,
   passedProps: PassedPropInfo[]
-): void {
+): boolean {
   const vueTemplate = extractVueTemplate(parentContent);
   const templateSource = vueTemplate ?? (/<[A-Za-z]/.test(parentContent) && !parentContent.includes('export default') ? parentContent : null);
-  if (!templateSource) return;
+  if (!templateSource) return false;
 
   try {
     const ast = parseDom(templateSource, { comments: false });
-    walkVueDom(ast, (el) => {
+    walkVueDom(ast, (el, bindings) => {
+      if (isVueTagBoundLocally(el.tag, bindings)) return;
       const isMatched = componentNames.some((c) => isComponentNameMatch(el.tag, c));
       if (!isMatched) return;
 
@@ -104,8 +105,10 @@ function extractVueTemplatePassedProps(
         extractVueElementProp(prop, seenProps, passedProps);
       }
     });
+    return vueTemplate !== null;
   } catch {
     // Fall through to JSX AST and fallback regex if template parsing fails
+    return false;
   }
 }
 
@@ -157,7 +160,8 @@ function extractJsxPassedProps(
   parentContent: string,
   componentNames: string[],
   seenProps: Set<string>,
-  passedProps: PassedPropInfo[]
+  passedProps: PassedPropInfo[],
+  jsxSites?: ReadonlySet<number>,
 ): void {
   try {
     const sourceFile = parseTypeScript('component.tsx', parentContent, ts.ScriptKind.TSX);
@@ -170,7 +174,9 @@ function extractJsxPassedProps(
           tagName = node.tagName.getText(sourceFile);
         }
 
-        if (tagName && componentNames.some((c) => isComponentNameMatch(tagName, c))) {
+        const matches = jsxSites ? jsxSites.has(node.getStart(sourceFile))
+          : tagName && componentNames.some((c) => isComponentNameMatch(tagName, c));
+        if (matches) {
           for (const attr of node.attributes.properties) {
             extractJsxAttributeProp(attr, sourceFile, seenProps, passedProps);
           }
@@ -244,11 +250,17 @@ function extractRegexFallbackPassedProps(
  * Extracts props and dynamic bindings passed to child components in a template or JSX
  * using official AST traversals (@vue/compiler-dom for Vue templates and TypeScript Compiler API for JSX).
  */
-export function extractPassedProps(parentContent: string, componentNames: string[]): PassedPropInfo[] {
+export function extractPassedProps(
+  parentContent: string, componentNames: string[], jsxSites?: ReadonlySet<number>,
+): PassedPropInfo[] {
   const passedProps: PassedPropInfo[] = [];
   const seenProps = new Set<string>();
+  if (jsxSites) {
+    extractJsxPassedProps(parentContent, componentNames, seenProps, passedProps, jsxSites);
+    return passedProps;
+  }
 
-  extractVueTemplatePassedProps(parentContent, componentNames, seenProps, passedProps);
+  if (extractVueTemplatePassedProps(parentContent, componentNames, seenProps, passedProps)) return passedProps;
   if (!extractVueTemplate(parentContent)) {
     extractJsxPassedProps(parentContent, componentNames, seenProps, passedProps);
   }

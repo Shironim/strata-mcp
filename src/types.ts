@@ -46,7 +46,7 @@ export interface RetrievalEvidence {
   inputIdentity?: { kind: 'inline'; hash: string; algorithm: 'sha256-canonical-json' };
   policy: string;
   engineRevision: string;
-  index: null | { generation: string; configFingerprint: string; cacheVersion: string; manifestHash: string; consistency: 'observed-stable' | 'changed' | 'unavailable' };
+  index: null | { generation: string; configFingerprint: string; analysisFingerprint?: string; cacheVersion: string; manifestHash: string; consistency: 'observed-stable' | 'changed' | 'unavailable' };
   config: { applicability: 'not-used' | 'unverified' | 'indexed'; reason: string; fingerprint?: string };
   source?: SourceSnapshot;
   freshness: 'current' | 'stale' | 'unavailable';
@@ -194,6 +194,7 @@ export interface SvelteDescriptor {
   module: SfcBlock | null;
   template: SfcBlock | null;
   styles?: SfcBlock[];
+  legacySlots?: ComponentSlotDetail[];
   diagnostics?: Array<{ code: string; message: string }>;
 }
 
@@ -451,6 +452,7 @@ export interface ComponentContract {
   dataDependencies?: DataDependencyInfo;
   layoutStructure?: ComponentLayoutStructure;
   boundaryContracts?: BoundaryContract[];
+  boundaryDiagnostics?: Array<{ code: string; reason: string }>;
   formContracts?: FormContract[];
   symbolOutline?: ComponentSymbolOutline;
   nuxtPageMeta?: NuxtPageMetaContract;
@@ -509,6 +511,13 @@ export interface ComponentTreeResult {
     specifier: string;
     identifier: string;
     resolution: 'unresolved';
+    reason: string;
+  } | {
+    code: 'AMBIGUOUS_COMPONENT';
+    filePath: string;
+    sourceHash: string;
+    identifier: string;
+    candidates: string[];
     reason: string;
   } | {
     code: 'CYCLE_TRUNCATED';
@@ -1046,6 +1055,17 @@ export interface PatchPlanOptions {
   operations?: PatchOperation[];
 }
 
+export interface TargetDeclarationCandidate {
+  refactorType: PatchRefactorType;
+  symbol: string;
+  kind: 'prop' | 'event' | 'model' | 'slot';
+  found: boolean;
+  file: string;
+  line?: number;
+  snippet?: string;
+  sourceRef?: SourceRef;
+}
+
 export interface PatchPlanResult {
   patchValidation?: { valid: boolean; validatedPatchCount: number; errors: string[] };
   component: string;
@@ -1053,6 +1073,7 @@ export interface PatchPlanResult {
   oldName: string;
   newName?: string;
   operations?: PatchOperation[];
+  targetDeclarations?: TargetDeclarationCandidate[];
   totalConsumersAudited: number;
   coverage: {
     candidateCount: number;
@@ -1140,6 +1161,7 @@ export interface ApiContractResult {
 export interface ExtractedImport {
   name: string;
   alias?: string;
+  exportedName?: string;
   source: string;
   isDynamic: boolean;
 }
