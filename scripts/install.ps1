@@ -122,34 +122,7 @@ try {
 
     Write-Success "Installed binary to $TargetExe"
 
-    # 8. Check and Auto-Provision ast-grep.exe
-    $AstGrepInstalled = Get-Command ast-grep -ErrorAction SilentlyContinue
-    if (-not $AstGrepInstalled) {
-        $AstGrepInstalled = Get-Command sg -ErrorAction SilentlyContinue
-    }
-
-    if (-not $AstGrepInstalled) {
-        Write-Warn "ast-grep binary was not found in PATH."
-        Write-Step "Attempting automatic download of companion ast-grep.exe..."
-
-        $AstGrepVersion = "0.45.3"
-        $AstGrepZipUrl = "https://github.com/ast-grep/ast-grep/releases/download/$AstGrepVersion/app-x86_64-pc-windows-msvc.zip"
-        $AstGrepZip = Join-Path $TempDir "ast-grep.zip"
-
-        try {
-            Invoke-WebRequest -Uri $AstGrepZipUrl -OutFile $AstGrepZip -UseBasicParsing
-            Expand-Archive -Path $AstGrepZip -DestinationPath $TempDir -Force
-            $ExtractedAstGrep = Join-Path $TempDir "ast-grep.exe"
-            if (Test-Path $ExtractedAstGrep) {
-                Copy-Item -Path $ExtractedAstGrep -Destination (Join-Path $InstallDir "ast-grep.exe") -Force
-                Write-Success "Installed companion ast-grep.exe into $InstallDir"
-            }
-        } catch {
-            Write-Warn "Could not automatically download ast-grep.exe. You can install it manually from https://ast-grep.github.io/"
-        }
-    }
-
-    # 9. Ensure InstallDir is in User PATH
+    # 8. Ensure InstallDir is in User PATH
     $UserPath = [Environment]::GetEnvironmentVariable("Path", [EnvironmentVariableTarget]::User)
     $PathEntries = $UserPath -split ';' | Where-Object { $_ -ne '' }
 
@@ -161,12 +134,13 @@ try {
         Write-Success "Added to PATH. (You may need to restart existing terminal sessions)"
     }
 
-    # 10. Done Banner
+    # 9. Done Banner
     Write-Host ""
     Write-Host "✨ Strata MCP installed successfully!" -ForegroundColor Green
     Write-Host "You can now run 'strata --help' or configure it in your MCP client:" -ForegroundColor White
     Write-Host ""
-    Write-Host "  Binary Path: $TargetExe" -ForegroundColor Cyan
+    Write-Host "  Command: $TargetExe" -ForegroundColor Cyan
+    Write-Host '  Args: ["serve"]' -ForegroundColor Cyan
     Write-Host ""
 } finally {
     if (Test-Path $TempDir) {

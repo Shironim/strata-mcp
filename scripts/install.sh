@@ -151,34 +151,7 @@ mv -f "${TMP_DIR}/${BINARY_NAME}" "${INSTALL_DIR}/strata"
 
 print_success "Installed strata binary to ${INSTALL_DIR}/strata"
 
-# 9. Verify or Assist with ast-grep Dependency
-if ! command -v ast-grep >/dev/null 2>&1 && ! command -v sg >/dev/null 2>&1; then
-  print_warning "ast-grep binary not found in PATH."
-  print_step "Attempting automatic ast-grep download for AST search support..."
-
-  AST_GREP_VERSION="0.45.3"
-  case "${TARGET_OS}-${TARGET_ARCH}" in
-    linux-x64)   AST_GREP_TAR="app-x86_64-unknown-linux-gnu.tar.gz" ;;
-    linux-arm64) AST_GREP_TAR="app-aarch64-unknown-linux-gnu.tar.gz" ;;
-    darwin-x64)  AST_GREP_TAR="app-x86_64-apple-darwin.tar.gz" ;;
-    darwin-arm64) AST_GREP_TAR="app-aarch64-apple-darwin.tar.gz" ;;
-    *) AST_GREP_TAR="" ;;
-  esac
-
-  if [ -n "${AST_GREP_TAR}" ]; then
-    AST_GREP_URL="https://github.com/ast-grep/ast-grep/releases/download/${AST_GREP_VERSION}/${AST_GREP_TAR}"
-    if curl -sSLf "${AST_GREP_URL}" -o "${TMP_DIR}/ast-grep.tar.gz" 2>/dev/null || wget -q "${AST_GREP_URL}" -O "${TMP_DIR}/ast-grep.tar.gz" 2>/dev/null; then
-      tar -xzf "${TMP_DIR}/ast-grep.tar.gz" -C "${TMP_DIR}" 2>/dev/null || true
-      if [ -f "${TMP_DIR}/ast-grep" ]; then
-        chmod +x "${TMP_DIR}/ast-grep"
-        mv -f "${TMP_DIR}/ast-grep" "${INSTALL_DIR}/ast-grep"
-        print_success "Installed ast-grep companion binary to ${INSTALL_DIR}/ast-grep"
-      fi
-    fi
-  fi
-fi
-
-# 10. Check PATH Configuration
+# 9. Check PATH Configuration
 case ":${PATH}:" in
   *:"${INSTALL_DIR}":*) ;;
   *)
@@ -188,8 +161,9 @@ case ":${PATH}:" in
     ;;
 esac
 
-# 11. Final Success Banner
+# 10. Final Success Banner
 printf "\n${GREEN}${BOLD}✨ Strata MCP installed successfully!${RESET}\n"
 printf "Run '${CYAN}strata --help${RESET}' to get started or configure it in your MCP client:\n\n"
-printf "  ${BOLD}Command:${RESET} %s/strata\n\n" "${INSTALL_DIR}"
+printf "  ${BOLD}Command:${RESET} %s/strata\n" "${INSTALL_DIR}"
+printf "  ${BOLD}Args:${RESET} [\"serve\"]\n\n"
 
