@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join, relative, resolve, dirname, extname } from 'node:path';
+import ts from 'typescript';
 import { canonicalizePath } from '../path-resolver';
 import type { FrontendFrameworkId } from '../../plugins/types';
 
@@ -14,6 +15,8 @@ export interface WorkspacePackageInfo {
   exportsMap: Record<string, string>; // subpath (".", "./types") -> relative source file
   manifestHash: string;
   workspaceDeps: string[];       // names of other workspace packages referenced
+  aliasBaseUrl?: string;         // resolved tsconfig baseUrl (or pkg.rootPath)
+  pathAliases?: Record<string, string[]>; // tsconfig/jsconfig compilerOptions.paths
 }
 
 function readJsonSafe(filePath: string): Record<string, any> | null {
@@ -144,6 +147,29 @@ function extractExportsMap(pkg: Record<string, any> | null): Record<string, stri
   return map;
 }
 
+function hasFileWithExtension(dir: string, targetExt: string, maxDepth = 3): boolean {
+  const skipDirs = new Set(['node_modules', '.git', 'dist', 'build', 'coverage', '.strata']);
+  const walk = (currentDir: string, depth: number): boolean => {
+    if (depth > maxDepth) return false;
+    let entries;
+    try {
+      entries = readdirSync(currentDir, { withFileTypes: true });
+    } catch {
+      return false;
+    }
+    for (const entry of entries) {
+      if (entry.isFile() && extname(entry.name) === targetExt) {
+        return true;
+      }
+      if (entry.isDirectory() && !skipDirs.has(entry.name) && !entry.name.startsWith('.')) {
+        if (walk(join(currentDir, entry.name), depth + 1)) return true;
+      }
+    }
+    return false;
+  };
+  return walk(dir, 0);
+}
+
 function detectPackageFrameworkAndRouter(
   pkgRoot: string,
   pkg: Record<string, any> | null
@@ -165,7 +191,13 @@ function detectPackageFrameworkAndRouter(
   if (has('astro.config.mjs') || has('astro.config.ts') || has('astro.config.js') || deps.astro) {
     return { framework: 'astro', router: 'astro' };
   }
-  if (has('svelte.config.js') || has('svelte.config.ts') || deps['@sveltejs/kit'] || deps.svelte) {
+  if (
+    has('svelte.config.js') ||
+    has('svelte.config.ts') ||
+    has('svelte.config.mjs') ||
+    deps['@sveltejs/kit'] ||
+    (deps.svelte && hasFileWithExtension(pkgRoot, '.svelte'))
+  ) {
     return { framework: 'svelte', router: deps['@sveltejs/kit'] ? 'sveltekit' : 'none' };
   }
   if (deps.vue) {
@@ -183,6 +215,41 @@ function findPackageTsconfig(pkgRoot: string): string | null {
     if (existsSync(candidate)) return canonicalizePath(candidate);
   }
   return null;
+}
+
+function extractTsconfigAliases(
+  pkgRoot: string,
+  tsconfigPath: string | null
+): { aliasBaseUrl?: string; pathAliases?: Record<string, string[]> } {
+  if (!tsconfigPath || !existsSync(tsconfigPath)) return {};
+  try {
+    const readRes = ts.readConfigFile(tsconfigPath, ts.sys.readFile);
+    if (readRes.error || !readRes.config) return {};
+    const parsed = ts.parseJsonConfigFileContent(
+      readRes.config,
+      ts.sys,
+      dirname(tsconfigPath),
+      undefined,
+      tsconfigPath
+    );
+    const paths = parsed.options.paths;
+    const baseUrl = parsed.options.baseUrl
+      ? canonicalizePath(resolve(dirname(tsconfigPath), parsed.options.baseUrl))
+      : dirname(tsconfigPath);
+    if (!paths || Object.keys(paths).length === 0) {
+      return parsed.options.baseUrl ? { aliasBaseUrl: baseUrl } : {};
+    }
+    const cleanPaths: Record<string, string[]> = {};
+    for (const [k, v] of Object.entries(paths)) {
+      if (Array.isArray(v)) cleanPaths[k] = v.filter((x): x is string => typeof x === 'string');
+    }
+    return {
+      aliasBaseUrl: baseUrl || pkgRoot,
+      pathAliases: cleanPaths,
+    };
+  } catch {
+    return {};
+  }
 }
 
 function buildPackageInfo(workspaceRoot: string, pkgRoot: string): WorkspacePackageInfo {
@@ -204,6 +271,7 @@ function buildPackageInfo(workspaceRoot: string, pkgRoot: string): WorkspacePack
 
   const { framework, router } = detectPackageFrameworkAndRouter(canonicalPkgRoot, pkg);
   const exportsMap = extractExportsMap(pkg);
+  const { aliasBaseUrl, pathAliases } = extractTsconfigAliases(canonicalPkgRoot, tsconfigPath);
 
   const allDeps = { ...(pkg?.dependencies ?? {}), ...(pkg?.devDependencies ?? {}) };
   const workspaceDeps = Object.keys(allDeps);
@@ -218,6 +286,8 @@ function buildPackageInfo(workspaceRoot: string, pkgRoot: string): WorkspacePack
     exportsMap,
     manifestHash,
     workspaceDeps,
+    ...(aliasBaseUrl ? { aliasBaseUrl } : {}),
+    ...(pathAliases ? { pathAliases } : {}),
   };
 }
 
@@ -360,59 +430,114 @@ export function discoverWorkspacePackages(workspaceRoot: string): WorkspacePacka
   return packages;
 }
 
+const RESOLVE_FILE_EXTS = ['', '.ts', '.tsx', '.vue', '.svelte', '.astro', '.js', '.jsx'] as const;
+const RESOLVE_INDEX_EXTS = ['.ts', '.tsx', '.js', '.jsx', '.vue'] as const;
+
+function tryResolveCandidateFile(candidate: string, fileSet?: ReadonlySet<string>): string | null {
+  const canonBase = canonicalizePath(candidate);
+  const exts = extname(canonBase) ? ([''] as const) : RESOLVE_FILE_EXTS;
+  if (fileSet) {
+    for (const ext of exts) {
+      const full = canonBase + ext;
+      if (fileSet.has(full)) return full;
+    }
+    for (const ext of RESOLVE_INDEX_EXTS) {
+      const idx = join(canonBase, `index${ext}`);
+      if (fileSet.has(idx)) return idx;
+    }
+    return null;
+  }
+  for (const ext of exts) {
+    const full = canonBase + ext;
+    if (existsSync(full) && statSync(full).isFile()) return full;
+  }
+  for (const ext of RESOLVE_INDEX_EXTS) {
+    const idx = join(canonBase, `index${ext}`);
+    if (existsSync(idx) && statSync(idx).isFile()) return idx;
+  }
+  return null;
+}
+
+const packageByNameCache = new WeakMap<
+  readonly WorkspacePackageInfo[],
+  Map<string, WorkspacePackageInfo>
+>();
+
+function getPackageByNameMap(
+  packages: readonly WorkspacePackageInfo[]
+): Map<string, WorkspacePackageInfo> {
+  let map = packageByNameCache.get(packages);
+  if (!map) {
+    map = new Map<string, WorkspacePackageInfo>();
+    for (const pkg of packages) {
+      if (pkg.name && !map.has(pkg.name)) {
+        map.set(pkg.name, pkg);
+      }
+    }
+    packageByNameCache.set(packages, map);
+  }
+  return map;
+}
+
+function extractPackageNameFromSpecifier(specifier: string): string | null {
+  if (!specifier || specifier.startsWith('.') || specifier.startsWith('/')) return null;
+  if (specifier.startsWith('@')) {
+    const firstSlash = specifier.indexOf('/');
+    if (firstSlash === -1) return null;
+    const secondSlash = specifier.indexOf('/', firstSlash + 1);
+    return secondSlash === -1 ? specifier : specifier.slice(0, secondSlash);
+  }
+  const firstSlash = specifier.indexOf('/');
+  return firstSlash === -1 ? specifier : specifier.slice(0, firstSlash);
+}
+
 /**
  * Resolves a workspace package import (e.g. "@acme/ui" or "@acme/ui/BaseButton.vue")
  * directly to its canonical source file path.
+ * When `fileSet` is provided, uses O(1) in-memory Set lookups instead of filesystem stat syscalls.
  */
 export function resolveWorkspacePackageImport(
   specifier: string,
-  packages: readonly WorkspacePackageInfo[]
+  packages: readonly WorkspacePackageInfo[],
+  fileSet?: ReadonlySet<string>
 ): string | null {
-  const tryFile = (candidate: string): string | null => {
-    const exts = ['', '.ts', '.tsx', '.vue', '.svelte', '.astro', '.js', '.jsx'];
-    for (const ext of exts) {
-      const full = candidate + ext;
-      if (existsSync(full) && statSync(full).isFile()) return canonicalizePath(full);
-    }
-    for (const ext of ['.ts', '.tsx', '.js', '.jsx', '.vue']) {
-      const idx = join(candidate, `index${ext}`);
-      if (existsSync(idx) && statSync(idx).isFile()) return canonicalizePath(idx);
-    }
-    return null;
-  };
+  const pkgName = extractPackageNameFromSpecifier(specifier);
+  if (!pkgName) return null;
 
-  for (const pkg of packages) {
-    if (!pkg.name) continue;
-    if (specifier === pkg.name) {
-      const target = pkg.exportsMap['.'];
-      if (target) {
-        const hit = tryFile(resolve(pkg.rootPath, target));
-        if (hit) return hit;
-      }
-      return tryFile(join(pkg.rootPath, 'src', 'index'));
+  const pkg = getPackageByNameMap(packages).get(pkgName);
+  if (!pkg || !pkg.name) return null;
+
+  if (specifier === pkg.name) {
+    const target = pkg.exportsMap['.'];
+    if (target) {
+      const hit = tryResolveCandidateFile(resolve(pkg.rootPath, target), fileSet);
+      if (hit) return hit;
     }
-    if (specifier.startsWith(`${pkg.name}/`)) {
-      const subpath = `./${specifier.slice(pkg.name.length + 1)}`;
-      const exact = pkg.exportsMap[subpath];
-      if (exact) {
-        const hit = tryFile(resolve(pkg.rootPath, exact));
-        if (hit) return hit;
-      }
-      // Wildcard export e.g. "./*": "./src/*"
-      for (const [expKey, expVal] of Object.entries(pkg.exportsMap)) {
-        if (expKey.endsWith('/*') && expVal.endsWith('/*')) {
-          const prefix = expKey.slice(0, -1);
-          if (subpath.startsWith(prefix)) {
-            const rest = subpath.slice(prefix.length);
-            const hit = tryFile(resolve(pkg.rootPath, expVal.slice(0, -1) + rest));
-            if (hit) return hit;
-          }
+    return tryResolveCandidateFile(join(pkg.rootPath, 'src', 'index'), fileSet);
+  }
+  if (specifier.startsWith(`${pkg.name}/`)) {
+    const subpath = `./${specifier.slice(pkg.name.length + 1)}`;
+    const exact = pkg.exportsMap[subpath];
+    if (exact) {
+      const hit = tryResolveCandidateFile(resolve(pkg.rootPath, exact), fileSet);
+      if (hit) return hit;
+    }
+    // Wildcard export e.g. "./*": "./src/*"
+    for (const [expKey, expVal] of Object.entries(pkg.exportsMap)) {
+      if (expKey.endsWith('/*') && expVal.endsWith('/*')) {
+        const prefix = expKey.slice(0, -1);
+        if (subpath.startsWith(prefix)) {
+          const rest = subpath.slice(prefix.length);
+          const hit = tryResolveCandidateFile(resolve(pkg.rootPath, expVal.slice(0, -1) + rest), fileSet);
+          if (hit) return hit;
         }
       }
-      // Fallback: package root or src/
-      const direct = tryFile(resolve(pkg.rootPath, subpath)) ?? tryFile(resolve(pkg.rootPath, 'src', subpath.slice(2)));
-      if (direct) return direct;
     }
+    // Fallback: package root or src/
+    const direct =
+      tryResolveCandidateFile(resolve(pkg.rootPath, subpath), fileSet) ??
+      tryResolveCandidateFile(resolve(pkg.rootPath, 'src', subpath.slice(2)), fileSet);
+    if (direct) return direct;
   }
   return null;
 }
@@ -438,18 +563,65 @@ export function matchOwningPackage(
 
 /**
  * Resolves a relative import specifier from `containingFile` to a canonical file path.
+ * When `fileSet` is provided, uses O(1) in-memory Set lookups instead of filesystem stat syscalls.
  */
-export function resolveRelativeModuleFile(containingFile: string, specifier: string): string | null {
+export function resolveRelativeModuleFile(
+  containingFile: string,
+  specifier: string,
+  fileSet?: ReadonlySet<string>
+): string | null {
   if (!specifier.startsWith('.')) return null;
   const base = resolve(dirname(containingFile), specifier);
-  const exts = extname(base) ? [''] : ['', '.ts', '.tsx', '.vue', '.svelte', '.astro', '.js', '.jsx'];
-  for (const ext of exts) {
-    const candidate = base + ext;
-    if (existsSync(candidate) && statSync(candidate).isFile()) return canonicalizePath(candidate);
+  return tryResolveCandidateFile(base, fileSet);
+}
+
+/**
+ * SSOT alias resolver for tsconfig/jsconfig `compilerOptions.paths` and common bundler
+ * prefixes (`@/...`, `~/...`) within a workspace package.
+ * Handles extensionless imports, `.vue`/`.svelte`/`.astro`/`.ts`/`.tsx` targets, and `/index.*`.
+ */
+export function resolvePackageAliasImport(
+  specifier: string,
+  pkg: WorkspacePackageInfo,
+  fileSet?: ReadonlySet<string>
+): string | null {
+  const base = pkg.aliasBaseUrl ?? pkg.rootPath;
+
+  if (pkg.pathAliases) {
+    for (const [pattern, targets] of Object.entries(pkg.pathAliases)) {
+      if (pattern === specifier) {
+        for (const t of targets) {
+          const hit = tryResolveCandidateFile(resolve(base, t), fileSet);
+          if (hit) return hit;
+        }
+      } else if (pattern.includes('*')) {
+        const starIdx = pattern.indexOf('*');
+        const prefix = pattern.slice(0, starIdx);
+        const suffix = pattern.slice(starIdx + 1);
+        if (specifier.startsWith(prefix) && specifier.endsWith(suffix)) {
+          const matched = specifier.slice(prefix.length, specifier.length - suffix.length);
+          for (const t of targets) {
+            const candidate = t.includes('*') ? t.replace('*', matched) : t + matched;
+            const hit = tryResolveCandidateFile(resolve(base, candidate), fileSet);
+            if (hit) return hit;
+          }
+        }
+      }
+    }
   }
-  for (const ext of ['.ts', '.tsx', '.js', '.jsx', '.vue']) {
-    const idx = join(base, `index${ext}`);
-    if (existsSync(idx) && statSync(idx).isFile()) return canonicalizePath(idx);
+
+  // Fallback for Vite/Webpack `@/` or `~/` aliases when tsconfig paths are absent or incomplete
+  if (specifier.startsWith('@/') || specifier.startsWith('~/')) {
+    const rest = specifier.slice(2);
+    const candidates = [
+      resolve(pkg.rootPath, 'src', rest),
+      resolve(pkg.rootPath, rest),
+    ];
+    for (const candidate of candidates) {
+      const hit = tryResolveCandidateFile(candidate, fileSet);
+      if (hit) return hit;
+    }
   }
+
   return null;
 }

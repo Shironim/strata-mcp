@@ -5,7 +5,7 @@ import { resolveProjectOwnership } from './project-ownership';
 import type { ResolveRouteEntryResult, RouteFramework, RouteInfo, RouteManifestResult, ScanRoutesOptions } from '../types';
 import { extractRouteParams } from './routing/shared';
 import { nextAppFileType, scanNextAppRouter } from './routing/next';
-import { scanNuxtPages, scanNuxtNitroRoutes } from './routing/nuxt';
+import { scanNuxtPages, scanNuxtWorkspaceRoutes } from './routing/nuxt';
 import { scanAstroPages, scanSvelteKitRoutes, scanInertiaPages } from './routing/filesystem';
 import { scanVueRouterPages } from './routing/vue-router';
 
@@ -93,7 +93,8 @@ export async function detectRouteFramework(
       existsSync(join(normTarget, 'server', 'api')) ||
       existsSync(join(normTarget, 'server', 'routes')) ||
       existsSync(join(normTarget, 'src', 'server', 'api')) ||
-      existsSync(join(normTarget, 'src', 'server', 'routes'))
+      existsSync(join(normTarget, 'src', 'server', 'routes')) ||
+      existsSync(join(normTarget, 'layers'))
     ) {
       return { framework: 'nuxt', baseDir: normTarget };
     }
@@ -325,10 +326,11 @@ export async function scanRoutes(options: ScanRoutesOptions): Promise<RouteManif
       routes = await scanNextAppRouter(baseDir);
       break;
     case 'nuxt': {
-      routes = baseDir !== effectiveScanTarget || basename(baseDir) === 'pages'
-        ? await scanNuxtPages(baseDir, effectiveScanTarget) : [];
-      const nitroRoutes = await scanNuxtNitroRoutes(effectiveScanTarget);
-      routes.push(...nitroRoutes);
+      if (baseDir === effectiveScanTarget && basename(baseDir) === 'pages') {
+        routes = await scanNuxtPages(baseDir, effectiveScanTarget);
+      } else {
+        routes = await scanNuxtWorkspaceRoutes(effectiveScanTarget);
+      }
       break;
     }
     case 'astro':

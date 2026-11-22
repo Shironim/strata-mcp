@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from 'node:fs';
-import { getSourcePosition } from '../../utils/source-position';
+import { lineStarts, positionFromLineStarts } from '../../utils/source-position';
 import { canonicalizePath } from '../path-resolver';
 import {
   paginateItems,
@@ -7,7 +7,7 @@ import {
   type ServiceRuntimeOptions,
 } from './contracts';
 import { ValidationError } from './errors';
-import { syncWorkspaceV3 } from './fast-sync';
+import { defaultSyncCoordinator } from './sync-coordinator';
 import { defaultWarmDbPool } from './schema-v3';
 import { formatSourceRef, shortHash, shortHashFromFull } from './source-ref';
 
@@ -72,7 +72,7 @@ export async function searchCode(
   const absRoot = canonicalizePath(request.workspaceRoot);
   const db = request.db ?? defaultWarmDbPool.get(absRoot, { dbFilename: request.dbFilename });
   if (!request.skipSync) {
-    await syncWorkspaceV3(absRoot, { db, packageKey: request.packageKey });
+    await defaultSyncCoordinator.ensureSynced(absRoot, { db, packageKey: request.packageKey });
   }
 
   const limit = request.limit ?? 30;
@@ -113,7 +113,8 @@ export async function searchCode(
     const kindFilter = request.symbolKinds?.length ? new Set(request.symbolKinds) : null;
     const filtered = kindFilter ? rows.filter((r) => kindFilter.has(r.kind)) : rows;
 
-    const matches: CodeSearchMatchItem[] = filtered.map((r) => ({
+    const { page: pagedRows, pagination } = paginateItems(filtered, limit, request.cursor);
+    const page: CodeSearchMatchItem[] = pagedRows.map((r) => ({
       packageKey: r.package_key,
       filePath: r.file_path,
       relPath: r.rel_path,
@@ -131,7 +132,6 @@ export async function searchCode(
       ),
     }));
 
-    const { page, pagination } = paginateItems(matches, limit, request.cursor);
     return {
       scope,
       verification: 'graph',
@@ -143,45 +143,93 @@ export async function searchCode(
   }
 
   if (kind === 'componentUsage' || kind === 'propUsage') {
-    const rows = db
-      .query(
-        `SELECT e.target_name, e.line_number, e.start_offset, e.end_offset, e.payload_json,
-                f.path AS file_path, f.rel_path, f.content_hash, p.package_key
-         FROM symbol_edges e
-         JOIN files f ON f.id = e.source_file_id
-         JOIN packages p ON p.id = f.package_id
-         WHERE e.edge_kind = 'renders'
-           AND (? IS NULL OR p.package_key = ?)
-           AND (? IS NULL OR f.rel_path LIKE ? || '%')
-         ORDER BY p.package_key ASC, f.rel_path ASC, e.line_number ASC`
-      )
-      .all(request.packageKey ?? null, request.packageKey ?? null, prefix, prefix) as Array<{
-      target_name: string;
-      line_number: number;
-      start_offset: number;
-      end_offset: number;
-      payload_json: string | null;
-      file_path: string;
-      rel_path: string;
-      content_hash: string;
-      package_key: string;
-    }>;
+    const pascalQuery = query.includes('-')
+      ? query
+          .split('-')
+          .filter(Boolean)
+          .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+          .join('')
+      : query;
 
-    const matches: CodeSearchMatchItem[] = [];
-    for (const r of rows) {
-      const payload = r.payload_json
-        ? (JSON.parse(r.payload_json) as { props?: string[]; events?: string[]; tagName?: string })
-        : {};
-      const isHit =
-        kind === 'componentUsage'
-          ? r.target_name.toLowerCase() === query.toLowerCase() ||
-            (payload.tagName ?? '').toLowerCase() === query.toLowerCase()
-          : (payload.props ?? []).includes(query) || (payload.events ?? []).includes(query);
-      if (!isHit) continue;
+    const rows =
+      kind === 'componentUsage'
+        ? (db
+            .query(
+              `SELECT e.target_name, e.line_number, e.start_offset, e.end_offset, e.payload_json,
+                      f.path AS file_path, f.rel_path, f.content_hash, p.package_key
+               FROM symbol_edges e
+               JOIN files f ON f.id = e.source_file_id
+               JOIN packages p ON p.id = f.package_id
+               WHERE e.edge_kind = 'renders'
+                 AND (e.target_name = ? COLLATE NOCASE OR e.target_name = ? COLLATE NOCASE)
+                 AND (? IS NULL OR p.package_key = ?)
+                 AND (? IS NULL OR f.rel_path LIKE ? || '%')
+               ORDER BY p.package_key ASC, f.rel_path ASC, e.line_number ASC`
+            )
+            .all(
+              query,
+              pascalQuery,
+              request.packageKey ?? null,
+              request.packageKey ?? null,
+              prefix,
+              prefix
+            ) as Array<{
+            target_name: string;
+            line_number: number;
+            start_offset: number;
+            end_offset: number;
+            payload_json: string | null;
+            file_path: string;
+            rel_path: string;
+            content_hash: string;
+            package_key: string;
+          }>)
+        : (db
+            .query(
+              `SELECT e.target_name, e.line_number, e.start_offset, e.end_offset, e.payload_json,
+                      f.path AS file_path, f.rel_path, f.content_hash, p.package_key
+               FROM symbol_edges e
+               JOIN files f ON f.id = e.source_file_id
+               JOIN packages p ON p.id = f.package_id
+               WHERE e.edge_kind = 'renders'
+                 AND e.payload_json LIKE '%' || ? || '%'
+                 AND (? IS NULL OR p.package_key = ?)
+                 AND (? IS NULL OR f.rel_path LIKE ? || '%')
+               ORDER BY p.package_key ASC, f.rel_path ASC, e.line_number ASC`
+            )
+            .all(query, request.packageKey ?? null, request.packageKey ?? null, prefix, prefix) as Array<{
+            target_name: string;
+            line_number: number;
+            start_offset: number;
+            end_offset: number;
+            payload_json: string | null;
+            file_path: string;
+            rel_path: string;
+            content_hash: string;
+            package_key: string;
+          }>);
 
-      const raw = existsSync(r.file_path) ? readFileSync(r.file_path, 'utf8') : '';
-      const lineText = raw ? (raw.split('\n')[r.line_number - 1] ?? '').trim().slice(0, 140) : r.target_name;
-      matches.push({
+    const hitRows =
+      kind === 'componentUsage'
+        ? rows
+        : rows.filter((r) => {
+            if (!r.payload_json || !r.payload_json.includes(query)) return false;
+            const payload = JSON.parse(r.payload_json) as { props?: string[]; events?: string[] };
+            return (payload.props ?? []).includes(query) || (payload.events ?? []).includes(query);
+          });
+
+    const { page: pagedRows, pagination } = paginateItems(hitRows, limit, request.cursor);
+    const linesCache = new Map<string, string[]>();
+    const page: CodeSearchMatchItem[] = pagedRows.map((r) => {
+      let lines = linesCache.get(r.file_path);
+      if (!lines) {
+        const raw = existsSync(r.file_path) ? readFileSync(r.file_path, 'utf8') : '';
+        lines = raw ? raw.split('\n') : [];
+        linesCache.set(r.file_path, lines);
+      }
+      const lineText =
+        lines.length > 0 ? (lines[r.line_number - 1] ?? '').trim().slice(0, 140) : r.target_name;
+      return {
         packageKey: r.package_key,
         filePath: r.file_path,
         relPath: r.rel_path,
@@ -196,10 +244,9 @@ export async function searchCode(
           r.start_offset,
           r.end_offset
         ),
-      });
-    }
+      };
+    });
 
-    const { page, pagination } = paginateItems(matches, limit, request.cursor);
     return {
       scope,
       verification: 'graph',
@@ -238,8 +285,9 @@ export async function searchCode(
 
     const hash8 = shortHash(raw);
     const lines = raw.split('\n');
+    const starts = lineStarts(raw);
     while (idx !== -1) {
-      const pos = getSourcePosition(raw, idx);
+      const pos = positionFromLineStarts(starts, idx);
       matches.push({
         packageKey: file.package_key,
         filePath: file.file_path,

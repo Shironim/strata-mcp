@@ -4,6 +4,7 @@ import ts from 'typescript';
 import { defaultPluginRegistry } from '../../../plugins';
 import { canonicalizePath } from '../../path-resolver';
 import {
+  resolvePackageAliasImport,
   resolveRelativeModuleFile,
   resolveWorkspacePackageImport,
   type WorkspacePackageInfo,
@@ -111,6 +112,7 @@ function loadCompilerOptions(pkg: WorkspacePackageInfo): {
           moduleResolution: parsed.options.moduleResolution ?? ts.ModuleResolutionKind.Bundler,
           target: parsed.options.target ?? ts.ScriptTarget.ESNext,
           module: parsed.options.module ?? ts.ModuleKind.ESNext,
+          strictNullChecks: parsed.options.strictNullChecks ?? parsed.options.strict ?? true,
         },
         configRootFiles: parsed.fileNames.map((f) => canonicalizePath(f)),
       };
@@ -124,6 +126,7 @@ function loadCompilerOptions(pkg: WorkspacePackageInfo): {
       module: ts.ModuleKind.ESNext,
       moduleResolution: ts.ModuleResolutionKind.Bundler,
       checkJs: false,
+      strictNullChecks: true,
       ...baseOverrides,
     },
     configRootFiles: [],
@@ -244,31 +247,9 @@ export function createStrataLanguageServiceHost(params: CreateLanguageHostParams
       return resolved;
     }
 
-    // 4. Fallback for tsconfig paths pointing to SFC files without .ts extension
-    if (compilerOptions.paths) {
-      const base = compilerOptions.baseUrl ? resolve(pkg.rootPath, compilerOptions.baseUrl) : pkg.rootPath;
-      for (const [pattern, targets] of Object.entries(compilerOptions.paths)) {
-        if (pattern.endsWith('/*')) {
-          const prefix = pattern.slice(0, -1);
-          if (specifier.startsWith(prefix)) {
-            const rest = specifier.slice(prefix.length);
-            for (const t of targets) {
-              const candidate = resolve(base, t.replace(/\*$/, '') + rest);
-              if (existsSync(candidate) && statSync(candidate).isFile()) {
-                return toResolvedModule(canonicalizePath(candidate));
-              }
-            }
-          }
-        } else if (pattern === specifier) {
-          for (const t of targets) {
-            const candidate = resolve(base, t);
-            if (existsSync(candidate) && statSync(candidate).isFile()) {
-              return toResolvedModule(canonicalizePath(candidate));
-            }
-          }
-        }
-      }
-    }
+    // 4. SSOT alias fallback for tsconfig paths & @/ ~/ pointing to SFC or extensionless TS/JS files
+    const aliasTarget = resolvePackageAliasImport(specifier, pkg);
+    if (aliasTarget) return toResolvedModule(aliasTarget);
 
     return undefined;
   };

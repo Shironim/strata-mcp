@@ -3,13 +3,18 @@ import { existsSync } from 'node:fs';
 import { dirname, join, normalize, relative, resolve } from 'node:path';
 import ts from 'typescript';
 import { collectFiles } from '../collector';
+import { canonicalizePath } from '../path-resolver';
+import { discoverWorkspacePackages, matchOwningPackage, resolvePackageAliasImport } from '../v2/workspace-packages';
 import type { RouteInfo } from '../../types';
 import { extractRouteParams } from './shared';
 
 /**
  * Scans a Vue Router configuration file (e.g. src/router/index.ts) using TypeScript AST.
  */
-export async function scanVueRouterFromConfig(routerConfigFile: string): Promise<RouteInfo[] | null> {
+export async function scanVueRouterFromConfig(
+  routerConfigFile: string,
+  projectRoot?: string
+): Promise<RouteInfo[] | null> {
   let content: string;
   try {
     content = await readSourceFile(routerConfigFile);
@@ -24,6 +29,10 @@ export async function scanVueRouterFromConfig(routerConfigFile: string): Promise
   }
   const routes: RouteInfo[] = [];
   const dir = dirname(routerConfigFile);
+  const absConfig = canonicalizePath(routerConfigFile);
+  const rootHint = projectRoot ? canonicalizePath(projectRoot) : dirname(dir);
+  const packages = discoverWorkspacePackages(rootHint);
+  const ownerPkg = matchOwningPackage(absConfig, packages) ?? packages[0];
 
   const importMap = new Map<string, string>();
   for (const statement of sf.statements) {
@@ -41,15 +50,36 @@ export async function scanVueRouterFromConfig(routerConfigFile: string): Promise
   }
 
   function resolveComponentPath(specifier: string): string {
+    if (!specifier.startsWith('.') && ownerPkg) {
+      const aliased = resolvePackageAliasImport(specifier, ownerPkg);
+      if (aliased) return normalize(aliased);
+    }
     const candidate = resolve(dir, specifier);
     for (const ext of ['', '.vue', '.ts', '.js', '.tsx', '.jsx']) {
       const p = candidate + ext;
-      if (existsSync(p)) return normalize(p);
+      if (existsSync(p)) return normalize(canonicalizePath(p));
     }
     return normalize(candidate);
   }
 
-  function parseRouteNode(node: ts.ObjectLiteralExpression, parentPath = ''): void {
+  function findDynamicImportSpecifier(node: ts.Node): string | undefined {
+    let found: string | undefined;
+    const walk = (n: ts.Node) => {
+      if (found) return;
+      if (ts.isCallExpression(n) && n.expression.kind === ts.SyntaxKind.ImportKeyword && n.arguments.length > 0) {
+        const arg = n.arguments[0];
+        if (ts.isStringLiteral(arg) || ts.isNoSubstitutionTemplateLiteral(arg)) {
+          found = arg.text;
+          return;
+        }
+      }
+      ts.forEachChild(n, walk);
+    };
+    walk(node);
+    return found;
+  }
+
+  function parseRouteNode(node: ts.ObjectLiteralExpression, parentPath = ''): boolean {
     let pathVal: string | undefined;
     let compVal: string | undefined;
     let redirectVal: string | undefined;
@@ -59,10 +89,10 @@ export async function scanVueRouterFromConfig(routerConfigFile: string): Promise
     for (const prop of node.properties) {
       if (!ts.isPropertyAssignment(prop)) continue;
       const propName = prop.name.getText(sf).replace(/['"]/g, '');
-      if (propName === 'path' && ts.isStringLiteral(prop.initializer)) {
+      if (propName === 'path' && (ts.isStringLiteral(prop.initializer) || ts.isNoSubstitutionTemplateLiteral(prop.initializer))) {
         pathVal = prop.initializer.text;
         isRouteObj = true;
-      } else if (propName === 'redirect' && ts.isStringLiteral(prop.initializer)) {
+      } else if (propName === 'redirect' && (ts.isStringLiteral(prop.initializer) || ts.isNoSubstitutionTemplateLiteral(prop.initializer))) {
         redirectVal = prop.initializer.text;
         isRouteObj = true;
       } else if (propName === 'component') {
@@ -71,16 +101,7 @@ export async function scanVueRouterFromConfig(routerConfigFile: string): Promise
           const mod = importMap.get(prop.initializer.text);
           if (mod) compVal = mod;
         } else {
-          prop.initializer.forEachChild((child) => {
-            if (ts.isCallExpression(child)) {
-              if (child.expression.kind === ts.SyntaxKind.ImportKeyword && child.arguments.length > 0) {
-                const arg = child.arguments[0];
-                if (ts.isStringLiteral(arg)) {
-                  compVal = arg.text;
-                }
-              }
-            }
-          });
+          compVal = findDynamicImportSpecifier(prop.initializer);
         }
       } else if (propName === 'children' && ts.isArrayLiteralExpression(prop.initializer)) {
         childrenNode = prop.initializer;
@@ -91,7 +112,7 @@ export async function scanVueRouterFromConfig(routerConfigFile: string): Promise
       const fullPath = parentPath
         ? (parentPath.endsWith('/') ? parentPath : parentPath + '/') + (pathVal.startsWith('/') ? pathVal.slice(1) : pathVal)
         : pathVal;
-      const resolvedFile = compVal ? resolveComponentPath(compVal) : normalize(routerConfigFile);
+      const resolvedFile = compVal ? resolveComponentPath(compVal) : normalize(absConfig);
 
       routes.push({
         path: fullPath,
@@ -109,12 +130,14 @@ export async function scanVueRouterFromConfig(routerConfigFile: string): Promise
           }
         }
       }
+      return true;
     }
+    return false;
   }
 
   function visit(node: ts.Node): void {
-    if (ts.isObjectLiteralExpression(node)) {
-      parseRouteNode(node);
+    if (ts.isObjectLiteralExpression(node) && parseRouteNode(node)) {
+      return;
     }
     node.forEachChild(visit);
   }
@@ -138,7 +161,7 @@ export async function scanVueRouterPages(baseDir: string, projectRoot?: string):
   ];
   for (const cfg of routerConfigFiles) {
     if (existsSync(cfg)) {
-      const fromConfig = await scanVueRouterFromConfig(cfg);
+      const fromConfig = await scanVueRouterFromConfig(cfg, normRoot);
       if (fromConfig && fromConfig.length > 0) {
         return fromConfig;
       }

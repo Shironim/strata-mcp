@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { canonicalizePath } from '../path-resolver';
 
-export const SCHEMA_V3_VERSION = 3;
+export const SCHEMA_V3_VERSION = 4;
 
 export interface WarmDbOptions {
   /** Defaults to 'graph.db' (Schema v3). */
@@ -26,7 +26,11 @@ export function initSchemaV3(db: Database): void {
           )
           .get() as { c: number } | null
       )?.c ?? 0;
-    if (count === 8) return;
+    if (count === 8) {
+      db.exec('CREATE INDEX IF NOT EXISTS idx_edges_kind ON symbol_edges(edge_kind);');
+      db.exec('CREATE INDEX IF NOT EXISTS idx_routes_file ON routes(file_id);');
+      return;
+    }
   }
 
   db.transaction(() => {
@@ -107,8 +111,8 @@ export function initSchemaV3(db: Database): void {
         id               INTEGER PRIMARY KEY AUTOINCREMENT,
         source_file_id   INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
         source_symbol_id INTEGER REFERENCES symbols(id) ON DELETE CASCADE,
-        target_file_id   INTEGER REFERENCES files(id) ON DELETE CASCADE,
-        target_symbol_id INTEGER REFERENCES symbols(id) ON DELETE CASCADE,
+        target_file_id   INTEGER REFERENCES files(id) ON DELETE SET NULL,
+        target_symbol_id INTEGER REFERENCES symbols(id) ON DELETE SET NULL,
         target_name      TEXT,
         edge_kind        TEXT NOT NULL CHECK (edge_kind IN (
                            'imports', 'reexports', 'renders', 'calls',
@@ -160,7 +164,9 @@ export function initSchemaV3(db: Database): void {
       CREATE INDEX IF NOT EXISTS idx_edges_target_file    ON symbol_edges(target_file_id, edge_kind);
       CREATE INDEX IF NOT EXISTS idx_edges_target_symbol  ON symbol_edges(target_symbol_id, edge_kind);
       CREATE INDEX IF NOT EXISTS idx_edges_target_name    ON symbol_edges(target_name, edge_kind);
+      CREATE INDEX IF NOT EXISTS idx_edges_kind           ON symbol_edges(edge_kind);
       CREATE INDEX IF NOT EXISTS idx_routes_package       ON routes(package_id);
+      CREATE INDEX IF NOT EXISTS idx_routes_file          ON routes(file_id);
       CREATE INDEX IF NOT EXISTS idx_file_deps_dep_path   ON file_dependencies(dependency_path);
 
       PRAGMA user_version = ${SCHEMA_V3_VERSION};

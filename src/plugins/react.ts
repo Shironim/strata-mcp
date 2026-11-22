@@ -22,7 +22,7 @@ function extractReactTier1Facts(filePath: string, rawContent: string): Tier1File
     filePath,
     rawContent,
     ts.ScriptTarget.Latest,
-    true,
+    false,
     isJsx ? ts.ScriptKind.TSX : ts.ScriptKind.TS
   );
 
@@ -108,6 +108,7 @@ function extractReactTier1Facts(filePath: string, rawContent: string): Tier1File
     componentUsages,
     slots: [],
     omissions,
+    sourceFile: sf,
   };
 }
 

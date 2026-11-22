@@ -1,7 +1,7 @@
 import { parseTypeScript } from '../source-parser';
 import { readSourceFile } from '../source-file';
-import { existsSync } from 'node:fs';
-import { extname, join, normalize, relative } from 'node:path';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { extname, join, normalize, relative, resolve } from 'node:path';
 import ts from 'typescript';
 import { unwrapExpression, staticPropertyName } from '../parsers/ts-syntax';
 import { parseSfc } from '../splitter';
@@ -66,19 +66,30 @@ export function extractNuxtPageMeta(content: string): NuxtPageMetaContract | und
 /**
  * Scans a Nuxt 3/4 pages directory and builds its route manifest.
  */
-export async function scanNuxtPages(baseDir: string, projectRoot: string): Promise<RouteInfo[]> {
+export async function scanNuxtPages(
+  baseDir: string,
+  projectRoot: string,
+  layoutRoots: readonly string[] = [projectRoot]
+): Promise<RouteInfo[]> {
   if (!existsSync(baseDir)) return [];
   const files = await collectFiles(baseDir);
   const routes: RouteInfo[] = [];
 
-  // Check default layout
-  const defaultLayoutCandidates = [
-    join(projectRoot, 'app', 'layouts', 'default.vue'),
-    join(projectRoot, 'src', 'app', 'layouts', 'default.vue'),
-    join(projectRoot, 'layouts', 'default.vue'),
-    join(projectRoot, 'src', 'layouts', 'default.vue'),
-  ];
-  const defaultLayout = defaultLayoutCandidates.find((c) => existsSync(c));
+  const findLayoutFile = (layoutName: string): string | undefined => {
+    for (const root of layoutRoots) {
+      const candidates = [
+        join(root, 'app', 'layouts', `${layoutName}.vue`),
+        join(root, 'src', 'app', 'layouts', `${layoutName}.vue`),
+        join(root, 'layouts', `${layoutName}.vue`),
+        join(root, 'src', 'layouts', `${layoutName}.vue`),
+      ];
+      const match = candidates.find((c) => existsSync(c));
+      if (match) return match;
+    }
+    return undefined;
+  };
+
+  const defaultLayout = findLayoutFile('default');
   const hasDefaultLayout = Boolean(defaultLayout);
 
   for (const file of files) {
@@ -105,13 +116,7 @@ export async function scanNuxtPages(baseDir: string, projectRoot: string): Promi
       } else {
         const layoutName = typeof pageMeta?.layout === 'string' ? pageMeta.layout : undefined;
         if (layoutName) {
-          const customCandidates = [
-            join(projectRoot, 'app', 'layouts', `${layoutName}.vue`),
-            join(projectRoot, 'src', 'app', 'layouts', `${layoutName}.vue`),
-            join(projectRoot, 'layouts', `${layoutName}.vue`),
-            join(projectRoot, 'src', 'layouts', `${layoutName}.vue`),
-          ];
-          const customLayout = customCandidates.find((c) => existsSync(c));
+          const customLayout = findLayoutFile(layoutName);
           if (customLayout) {
             pageLayouts = [normalize(customLayout)];
           }
@@ -207,6 +212,136 @@ export async function scanNuxtNitroRoutes(projectRoot: string): Promise<RouteInf
         handlers,
       });
     }
+  }
+
+  return routes;
+}
+
+const NUXT_CONFIG_FILES = [
+  'nuxt.config.ts',
+  'nuxt.config.js',
+  'nuxt.config.mjs',
+  'nuxt.config.mts',
+  'nuxt.config.cjs',
+];
+
+function extractExtendsPathsFromConfig(projectRoot: string): string[] {
+  const configName = NUXT_CONFIG_FILES.find((f) => existsSync(join(projectRoot, f)));
+  if (!configName) return [];
+
+  const configPath = join(projectRoot, configName);
+  let content = '';
+  try {
+    content = readFileSync(configPath, 'utf8');
+  } catch {
+    return [];
+  }
+  if (!content.includes('extends')) return [];
+
+  const sf = parseTypeScript(configName, content, ts.ScriptKind.TS);
+  const found: string[] = [];
+
+  const collectStrings = (node: ts.Expression): void => {
+    const unwrapped = unwrapExpression(node);
+    if (ts.isStringLiteral(unwrapped) || ts.isNoSubstitutionTemplateLiteral(unwrapped)) {
+      found.push(unwrapped.text);
+    } else if (ts.isArrayLiteralExpression(unwrapped)) {
+      for (const el of unwrapped.elements) {
+        if (ts.isExpression(el)) collectStrings(el);
+      }
+    }
+  };
+
+  const visit = (node: ts.Node): void => {
+    if (ts.isPropertyAssignment(node) && staticPropertyName(node.name) === 'extends') {
+      collectStrings(node.initializer);
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+
+  return found;
+}
+
+/**
+ * Discovers local Nuxt Layer root directories from `nuxt.config.*` `extends`
+ * and Nuxt's auto-scanned `layers/*` convention.
+ */
+export function discoverNuxtLayerRoots(projectRoot: string): string[] {
+  const normRoot = normalize(resolve(projectRoot));
+  const seen = new Set<string>([normRoot]);
+  const layers: string[] = [];
+
+  const addCandidate = (candidateDir: string): void => {
+    const resolved = normalize(resolve(candidateDir));
+    if (seen.has(resolved) || !existsSync(resolved)) return;
+    try {
+      if (!statSync(resolved).isDirectory()) return;
+    } catch {
+      return;
+    }
+    seen.add(resolved);
+    layers.push(resolved);
+  };
+
+  // 1. Explicit local layers from nuxt.config.* `extends`
+  for (const extEntry of extractExtendsPathsFromConfig(normRoot)) {
+    if (!extEntry || /^[a-z]+:/i.test(extEntry) || extEntry.startsWith('@')) continue;
+    addCandidate(resolve(normRoot, extEntry));
+  }
+
+  // 2. Auto-discovered local layers in `<projectRoot>/layers/*`
+  const layersDir = join(normRoot, 'layers');
+  if (existsSync(layersDir)) {
+    try {
+      const entries = readdirSync(layersDir, { withFileTypes: true })
+        .filter((e) => e.isDirectory() && !e.name.startsWith('.') && e.name !== 'node_modules')
+        .sort((a, b) => a.name.localeCompare(b.name));
+      for (const entry of entries) {
+        addCandidate(join(layersDir, entry.name));
+      }
+    } catch {
+      // ignore unreadable layers directory
+    }
+  }
+
+  return layers;
+}
+
+/**
+ * Scans all page and Nitro API routes across a Nuxt project root and its local Nuxt Layers.
+ * Root project routes take precedence over layer routes when paths collide.
+ */
+export async function scanNuxtWorkspaceRoutes(projectRoot: string): Promise<RouteInfo[]> {
+  const normRoot = normalize(resolve(projectRoot));
+  const layerRoots = discoverNuxtLayerRoots(normRoot);
+  const allRoots = [normRoot, ...layerRoots];
+
+  const routes: RouteInfo[] = [];
+  const seenKeys = new Set<string>();
+
+  const pushUnique = (items: RouteInfo[]): void => {
+    for (const item of items) {
+      const key = `${item.type}:${item.path}`;
+      if (seenKeys.has(key)) continue;
+      seenKeys.add(key);
+      routes.push(item);
+    }
+  };
+
+  for (const root of allRoots) {
+    const pageDirCandidates = [
+      join(root, 'app', 'pages'),
+      join(root, 'src', 'app', 'pages'),
+      join(root, 'pages'),
+      join(root, 'src', 'pages'),
+    ];
+    const pagesDir = pageDirCandidates.find((c) => existsSync(c));
+    if (pagesDir) {
+      pushUnique(await scanNuxtPages(pagesDir, root, allRoots));
+    }
+    pushUnique(await scanNuxtNitroRoutes(root));
   }
 
   return routes;

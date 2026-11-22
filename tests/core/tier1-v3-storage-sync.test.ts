@@ -7,6 +7,7 @@ import {
   discoverWorkspacePackages,
   resolveWorkspacePackageImport,
   syncWorkspaceV3,
+  WorkspaceSyncCoordinator,
 } from '../../src/engine/v2';
 
 describe('Fase 2: Tier 1 SQLite v3 Storage, Package Partitioning & Fast Sync', () => {
@@ -205,6 +206,159 @@ describe('Fase 2: Tier 1 SQLite v3 Storage, Package Partitioning & Fast Sync', (
       expect(nextSync.added).toBe(2);
       defaultWarmDbPool.close(fullstackNext);
     } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test('emits 4-stage sync progress and maintains incremental FTS5 integrity across add/modify/delete', async () => {
+    const tmp = await mkdtemp(join(tmpdir(), 'strata-fts-incr-'));
+    try {
+      await mkdir(join(tmp, 'src'), { recursive: true });
+      await writeFile(join(tmp, 'package.json'), JSON.stringify({ name: 'fts-app', dependencies: { react: '^19.0.0' } }));
+      for (let i = 0; i < 6; i++) {
+        await writeFile(join(tmp, `src/mod${i}.ts`), `export function alphaFn${i}() { return ${i}; }\n`);
+      }
+
+      const completedStages: string[] = [];
+      const first = await syncWorkspaceV3(tmp, {
+        onProgress: (ev) => {
+          if (ev.status === 'done') completedStages.push(ev.stage);
+        },
+      });
+      expect(first.added).toBe(6);
+      expect(completedStages).toEqual(['scan', 'parse', 'resolve', 'commit']);
+
+      // Incremental modify of 1 file (<= 50% of files -> triggers incremental FTS5 path, not full rebuild)
+      await new Promise((r) => setTimeout(r, 20));
+      await writeFile(join(tmp, 'src/mod0.ts'), 'export function betaRenamedFn0() { return 42; }\n');
+      // Incremental add of 1 file
+      await writeFile(join(tmp, 'src/mod6.ts'), 'export function gammaAddedFn6() { return 6; }\n');
+      // Incremental delete of 1 file
+      await rm(join(tmp, 'src/mod5.ts'));
+
+      const incr = await syncWorkspaceV3(tmp);
+      expect(incr.mode).toBe('incremental');
+      expect(incr.added).toBe(1);
+      expect(incr.modified).toBe(1);
+      expect(incr.deleted).toBe(1);
+
+      const db = defaultWarmDbPool.get(tmp);
+      // FTS5 built-in integrity check throws if external content table is out of sync
+      expect(() => db.run("INSERT INTO symbols_fts(symbols_fts) VALUES ('integrity-check')")).not.toThrow();
+
+      const oldHit = db.query("SELECT name FROM symbols_fts WHERE symbols_fts MATCH 'alphaFn0'").all();
+      const deletedHit = db.query("SELECT name FROM symbols_fts WHERE symbols_fts MATCH 'alphaFn5'").all();
+      const renamedHit = db.query("SELECT name FROM symbols_fts WHERE symbols_fts MATCH 'betaRenamedFn0'").all();
+      const addedHit = db.query("SELECT name FROM symbols_fts WHERE symbols_fts MATCH 'gammaAddedFn6'").all();
+
+      expect(oldHit).toHaveLength(0);
+      expect(deletedHit).toHaveLength(0);
+      expect(renamedHit).toHaveLength(1);
+      expect(addedHit).toHaveLength(1);
+
+      defaultWarmDbPool.close(tmp);
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test('parallel CPU worker pool produces identical symbol/edge counts to single-thread parse', async () => {
+    const tmp = await mkdtemp(join(tmpdir(), 'strata-parallel-eq-'));
+    try {
+      await mkdir(join(tmp, 'src'), { recursive: true });
+      await writeFile(join(tmp, 'package.json'), JSON.stringify({ name: 'par-app', dependencies: { vue: '^3.5.0' } }));
+      for (let i = 0; i < 120; i++) {
+        await writeFile(
+          join(tmp, `src/Comp${i}.vue`),
+          `<script setup lang="ts">\nimport { helper0 } from "./util0";\nexport function run${i}() { return helper0(); }\n</script>\n<template><div>{{ run${i}() }}</div></template>\n`
+        );
+      }
+      await writeFile(join(tmp, 'src/util0.ts'), 'export function helper0() { return 1; }\n');
+
+      const seq = await syncWorkspaceV3(tmp, {
+        force: true,
+        parallelThreshold: 10000,
+        dbFilename: 'seq.db',
+      });
+      const par = await syncWorkspaceV3(tmp, {
+        force: true,
+        parallelThreshold: 50,
+        dbFilename: 'par.db',
+      });
+
+      expect(par.added).toBe(seq.added);
+      expect(par.symbolsIndexed).toBe(seq.symbolsIndexed);
+      expect(par.edgesIndexed).toBe(seq.edgesIndexed);
+      expect(par.workersUsed).toBeGreaterThanOrEqual(1);
+
+      defaultWarmDbPool.close(tmp, 'seq.db');
+      defaultWarmDbPool.close(tmp, 'par.db');
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test('WorkspaceSyncCoordinator: single-flight coalescing, watcher-clean, O(|dirty|) targeted sync, and background warmup', async () => {
+    const tmp = await mkdtemp(join(tmpdir(), 'strata-coord-'));
+    const coordinator = new WorkspaceSyncCoordinator();
+    try {
+      await mkdir(join(tmp, 'src'), { recursive: true });
+      await writeFile(join(tmp, 'package.json'), JSON.stringify({ name: 'coord-app', dependencies: { react: '^19.0.0' } }));
+      for (let i = 0; i < 5; i++) {
+        await writeFile(join(tmp, `src/file${i}.ts`), `export function initialFn${i}() { return ${i}; }\n`);
+      }
+
+      // Uninitialized workspace -> warmupInBackground returns null
+      expect(coordinator.warmupInBackground(tmp)).toBeNull();
+
+      // Single-flight coalescing across 3 concurrent callers
+      let syncRuns = 0;
+      const onProgress = (ev: { stage: string; status: string }) => {
+        if (ev.stage === 'scan' && ev.status === 'start') syncRuns++;
+      };
+      const [r1, r2, r3] = await Promise.all([
+        coordinator.ensureSynced(tmp, { onProgress }),
+        coordinator.ensureSynced(tmp, { onProgress }),
+        coordinator.ensureSynced(tmp, { onProgress }),
+      ]);
+      expect(syncRuns).toBe(1);
+      expect(r1.added).toBe(5);
+      expect(r2).toEqual(r1);
+      expect(r3).toEqual(r1);
+
+      // Now .strata/graph.db exists -> warmupInBackground activates watcher & warms cleanly
+      const warmPromise = coordinator.warmupInBackground(tmp);
+      expect(warmPromise).not.toBeNull();
+      await warmPromise;
+      expect(coordinator.isWatching(tmp)).toBe(true);
+
+      // With active watcher and no dirty files -> O(1) watcher-clean fast path
+      const clean = await coordinator.ensureSynced(tmp);
+      expect(clean.mode).toBe('watcher-clean');
+      expect(clean.durationMs).toBe(0);
+
+      // Edit 1 file & mark dirty -> O(|dirty|) watcher-dirty targeted sync with incremental FTS5
+      await new Promise((r) => setTimeout(r, 20));
+      const targetFile = join(tmp, 'src/file0.ts');
+      await writeFile(targetFile, 'export function updatedDirtyFn0() { return 99; }\n');
+      coordinator.markDirty(tmp, targetFile);
+
+      const dirtyRes = await coordinator.ensureSynced(tmp);
+      expect(dirtyRes.mode).toBe('watcher-dirty');
+      expect(dirtyRes.modified).toBe(1);
+
+      const db = defaultWarmDbPool.get(tmp);
+      expect(() => db.run("INSERT INTO symbols_fts(symbols_fts) VALUES ('integrity-check')")).not.toThrow();
+      const hit = db.query("SELECT name FROM symbols_fts WHERE symbols_fts MATCH 'updatedDirtyFn0'").all();
+      const stale = db.query("SELECT name FROM symbols_fts WHERE symbols_fts MATCH 'initialFn0'").all();
+      expect(hit).toHaveLength(1);
+      expect(stale).toHaveLength(0);
+
+      coordinator.closeAll();
+      expect(coordinator.isWatching(tmp)).toBe(false);
+      defaultWarmDbPool.close(tmp);
+    } finally {
+      coordinator.closeAll();
       await rm(tmp, { recursive: true, force: true });
     }
   });

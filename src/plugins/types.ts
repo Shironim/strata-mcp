@@ -83,6 +83,8 @@ export interface Tier1FileFacts {
   componentUsages: Tier1TemplateComponentUsage[];
   slots: string[];
   omissions: ProjectionOmission[];
+  /** Optional pre-parsed TypeScript AST when doc.isIdentity is true, to avoid duplicate parsing. */
+  sourceFile?: ts.SourceFile;
 }
 
 export interface EnrichedPropInfo {

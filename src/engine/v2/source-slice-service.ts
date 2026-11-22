@@ -7,7 +7,7 @@ import { getSourcePosition } from '../../utils/source-position';
 import { canonicalizePath } from '../path-resolver';
 import type { QueryEnvelope, ServiceRuntimeOptions } from './contracts';
 import { NotFoundError, StaleSourceError, ValidationError } from './errors';
-import { syncWorkspaceV3 } from './fast-sync';
+import { defaultSyncCoordinator } from './sync-coordinator';
 import { defaultWarmDbPool } from './schema-v3';
 import {
   formatSourceRef,
@@ -66,7 +66,7 @@ export async function readSlice(
   } else if (request.symbolId) {
     const db = request.db ?? defaultWarmDbPool.get(absRoot, { dbFilename: request.dbFilename });
     if (!request.skipSync) {
-      await syncWorkspaceV3(absRoot, { db });
+      await defaultSyncCoordinator.ensureSynced(absRoot, { db });
     }
     const row = db
       .query(
@@ -93,7 +93,7 @@ export async function readSlice(
     if (request.symbol) {
       const db = request.db ?? defaultWarmDbPool.get(absRoot, { dbFilename: request.dbFilename });
       if (!request.skipSync) {
-        await syncWorkspaceV3(absRoot, { db });
+        await defaultSyncCoordinator.ensureSynced(absRoot, { db });
       }
       const row = db
         .query(
@@ -156,13 +156,16 @@ export async function readSlice(
 
   let sliceStartLine: number;
   let sliceEndLine: number;
+  let targetStartLine: number;
 
   if (explicitLines) {
     sliceStartLine = Math.max(1, explicitLines[0]);
     sliceEndLine = Math.min(totalLines, explicitLines[1]);
+    targetStartLine = sliceStartLine;
   } else {
     const sPos = getSourcePosition(rawContent, startOffset ?? 0);
     const ePos = getSourcePosition(rawContent, endOffset ?? startOffset ?? 0);
+    targetStartLine = sPos.line;
     sliceStartLine = Math.max(1, sPos.line - contextLines);
     sliceEndLine = Math.min(totalLines, Math.max(sPos.line, ePos.line) + contextLines);
   }
@@ -173,13 +176,49 @@ export async function readSlice(
     truncated = true;
   }
 
+  const MAX_LINE_CHARS = 1200;
   const numberedLines: string[] = [];
+  let minifiedWindowed = false;
+  const targetLineStartOffset =
+    startOffset !== null ? computeLineStartOffset(allLines, targetStartLine) : 0;
+
   for (let lineNum = sliceStartLine; lineNum <= sliceEndLine; lineNum++) {
-    numberedLines.push(`${lineNum}: ${allLines[lineNum - 1] ?? ''}`);
+    const rawLine = allLines[lineNum - 1] ?? '';
+    if (rawLine.length > MAX_LINE_CHARS) {
+      minifiedWindowed = true;
+      const focusCol =
+        lineNum === targetStartLine && startOffset !== null
+          ? Math.max(0, Math.min(rawLine.length, startOffset - targetLineStartOffset))
+          : 0;
+      const half = Math.floor(MAX_LINE_CHARS / 2);
+      const winStart = Math.max(0, focusCol - half);
+      const winEnd = Math.min(rawLine.length, winStart + MAX_LINE_CHARS);
+      const prefix = winStart > 0 ? '... [minified prefix omitted] ... ' : '';
+      const suffix = winEnd < rawLine.length ? ' ... [minified suffix omitted]' : '';
+      numberedLines.push(`${lineNum}: ${prefix}${rawLine.slice(winStart, winEnd)}${suffix}`);
+    } else {
+      numberedLines.push(`${lineNum}: ${rawLine}`);
+    }
   }
 
   const outStartOffset = startOffset ?? computeLineStartOffset(allLines, sliceStartLine);
   const outEndOffset = endOffset ?? computeLineEndOffset(allLines, sliceEndLine);
+
+  const diagnostics = [];
+  if (truncated) {
+    diagnostics.push({
+      code: 'SLICE_TRUNCATED',
+      message: `Output capped at ${maxLines} lines (${sliceStartLine}-${sliceEndLine} of ${totalLines}). Pass lines=[${sliceEndLine + 1}, ${Math.min(totalLines, sliceEndLine + maxLines)}] to continue.`,
+      filePath: targetFile,
+    });
+  }
+  if (minifiedWindowed) {
+    diagnostics.push({
+      code: 'MINIFIED_LINE_WINDOWED',
+      message: `One or more lines exceeded ${MAX_LINE_CHARS} characters and were windowed around the target offset.`,
+      filePath: targetFile,
+    });
+  }
 
   return {
     scope: targetFile,
@@ -194,15 +233,7 @@ export async function readSlice(
       content: numberedLines.join('\n'),
     },
     omissions: [],
-    diagnostics: truncated
-      ? [
-          {
-            code: 'SLICE_TRUNCATED',
-            message: `Output capped at ${maxLines} lines (${sliceStartLine}-${sliceEndLine} of ${totalLines}). Pass lines=[${sliceEndLine + 1}, ${Math.min(totalLines, sliceEndLine + maxLines)}] to continue.`,
-            filePath: targetFile,
-          },
-        ]
-      : [],
+    diagnostics,
   };
 }
 

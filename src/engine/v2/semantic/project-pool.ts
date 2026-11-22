@@ -1,6 +1,6 @@
 import { extname } from 'node:path';
 import ts from 'typescript';
-import { getSourcePosition } from '../../../utils/source-position';
+import { assertSafeOffset, positionFromLineStarts } from '../../../utils/source-position';
 import { canonicalizePath } from '../../path-resolver';
 import {
   discoverWorkspacePackages,
@@ -170,7 +170,8 @@ export class SemanticProjectPool {
     const mapped = entry.doc.toOriginalSpan(textSpan.start, textSpan.start + textSpan.length);
     if (!mapped) return null;
 
-    const pos = getSourcePosition(entry.rawContent, mapped.start);
+    assertSafeOffset(entry.rawContent, mapped.start);
+    const pos = positionFromLineStarts(entry.getLineStarts(), mapped.start);
     return {
       filePath: entry.doc.originalPath,
       startOffset: mapped.start,
@@ -345,6 +346,41 @@ export class SemanticProjectPool {
       };
       visit(sf);
     } else if (ext === '.tsx' || ext === '.jsx') {
+      const resolveReactWrapperPropsType = (expr: ts.Expression): ts.Type | undefined => {
+        if (ts.isArrowFunction(expr) || ts.isFunctionExpression(expr)) {
+          if (expr.parameters.length > 0) {
+            const firstParam = expr.parameters[0]!;
+            return firstParam.type
+              ? checker.getTypeFromTypeNode(firstParam.type)
+              : checker.getTypeAtLocation(firstParam);
+          }
+          return undefined;
+        }
+        if (ts.isCallExpression(expr)) {
+          const calleeName = ts.isIdentifier(expr.expression)
+            ? expr.expression.text
+            : ts.isPropertyAccessExpression(expr.expression)
+              ? expr.expression.name.text
+              : '';
+          if (calleeName === 'forwardRef') {
+            if (expr.typeArguments && expr.typeArguments.length >= 2) {
+              return checker.getTypeFromTypeNode(expr.typeArguments[1]!);
+            }
+            if (expr.arguments.length > 0) {
+              return resolveReactWrapperPropsType(expr.arguments[0]!);
+            }
+          } else if (calleeName === 'memo') {
+            if (expr.typeArguments && expr.typeArguments.length >= 1) {
+              return checker.getTypeFromTypeNode(expr.typeArguments[0]!);
+            }
+            if (expr.arguments.length > 0) {
+              return resolveReactWrapperPropsType(expr.arguments[0]!);
+            }
+          }
+        }
+        return undefined;
+      };
+
       for (const stmt of sf.statements) {
         if (propsType) break;
         if (
@@ -353,7 +389,7 @@ export class SemanticProjectPool {
           /^[A-Z]/.test(stmt.name.text) &&
           stmt.parameters.length > 0
         ) {
-          const firstParam = stmt.parameters[0];
+          const firstParam = stmt.parameters[0]!;
           propsType = firstParam.type
             ? checker.getTypeFromTypeNode(firstParam.type)
             : checker.getTypeAtLocation(firstParam);
@@ -362,17 +398,14 @@ export class SemanticProjectPool {
             if (
               ts.isIdentifier(decl.name) &&
               /^[A-Z]/.test(decl.name.text) &&
-              decl.initializer &&
-              (ts.isArrowFunction(decl.initializer) || ts.isFunctionExpression(decl.initializer)) &&
-              decl.initializer.parameters.length > 0
+              decl.initializer
             ) {
-              const firstParam = decl.initializer.parameters[0];
-              propsType = firstParam.type
-                ? checker.getTypeFromTypeNode(firstParam.type)
-                : checker.getTypeAtLocation(firstParam);
-              break;
+              propsType = resolveReactWrapperPropsType(decl.initializer);
+              if (propsType) break;
             }
           }
+        } else if (ts.isExportAssignment(stmt) && !stmt.isExportEquals) {
+          propsType = resolveReactWrapperPropsType(stmt.expression);
         }
       }
     } else if (ext === '.svelte') {
@@ -401,6 +434,57 @@ export class SemanticProjectPool {
 
     if (!propsType) return [];
     return extractPropsFromType(propsType);
+  }
+
+  /**
+   * Expands Vue `defineEmits<T>()` event names using TypeScript's TypeChecker,
+   * supporting imported interfaces and type aliases.
+   */
+  expandComponentEmits(workspaceRoot: string, filePath: string): string[] {
+    const absFile = canonicalizePath(filePath);
+    if (extname(absFile).toLowerCase() !== '.vue') return [];
+
+    const project = this.acquireProject(workspaceRoot, absFile);
+    if (!project) return [];
+    const entry = this.virtualRegistry.getForOriginal(absFile);
+    if (!entry) return [];
+    const program = project.languageService.getProgram();
+    if (!program) return [];
+    const sf = program.getSourceFile(entry.doc.virtualPath);
+    if (!sf) return [];
+
+    const checker = program.getTypeChecker();
+    const emits = new Set<string>();
+
+    const visit = (node: ts.Node): void => {
+      if (
+        ts.isCallExpression(node) &&
+        ts.isIdentifier(node.expression) &&
+        node.expression.text === 'defineEmits' &&
+        node.typeArguments?.length
+      ) {
+        const emitsType = checker.getTypeFromTypeNode(node.typeArguments[0]!);
+        for (const prop of checker.getPropertiesOfType(emitsType)) {
+          emits.add(prop.getName());
+        }
+        for (const sig of emitsType.getCallSignatures()) {
+          const firstParam = sig.getParameters()[0];
+          if (firstParam) {
+            const paramType = checker.getTypeOfSymbolAtLocation(firstParam, sf);
+            if (paramType.isStringLiteral()) {
+              emits.add(paramType.value);
+            } else if (paramType.isUnion()) {
+              for (const t of paramType.types) {
+                if (t.isStringLiteral()) emits.add(t.value);
+              }
+            }
+          }
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sf);
+    return [...emits];
   }
 
   /**

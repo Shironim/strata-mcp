@@ -286,6 +286,60 @@ export class StrataTelemetry {
     }
   }
 
+  /**
+   * Records index sync stage timings and totals to .strata/strata.log (silent, file-only).
+   */
+  public static recordSync(
+    workspaceRoot: string,
+    payload: {
+      source: 'strata_init' | 'strata_sync' | 'mcp';
+      mode: string;
+      files: number;
+      symbols: number;
+      edges: number;
+      packages: number;
+      durationMs: number;
+      workersUsed?: number;
+      stages?: Record<string, number>;
+    }
+  ): void {
+    try {
+      const logPath = this.getLogPath(workspaceRoot);
+      const logDir = dirname(logPath);
+      if (!existsSync(logDir)) return;
+
+      const record = {
+        timestamp: new Date().toISOString(),
+        event: 'index_sync_completed',
+        source: payload.source,
+        mode: payload.mode,
+        duration_ms: Math.round(payload.durationMs),
+        workers_used: payload.workersUsed ?? 1,
+        files: payload.files,
+        symbols: payload.symbols,
+        edges: payload.edges,
+        packages: payload.packages,
+        ...(payload.stages ? { stages_ms: payload.stages } : {}),
+      };
+      const jsonLine = JSON.stringify(record);
+
+      if (existsSync(logPath)) {
+        try {
+          const stats = statSync(logPath);
+          if (stats.size + Buffer.byteLength(jsonLine) + 1 > this.MAX_LOG_SIZE_BYTES) {
+            renameSync(logPath, `${logPath}.1`);
+          }
+        } catch {
+          return;
+        }
+      }
+
+      appendFileSync(logPath, `${jsonLine}\n`, { encoding: 'utf8', mode: 0o600 });
+    } catch {
+      // Non-fatal: telemetry writes must never interrupt indexing
+    }
+  }
+
   private static emptySummary(): ObservabilitySummary {
     return {
       totalCalls: 0,
@@ -337,6 +391,9 @@ export class StrataTelemetry {
     for (const line of lines.slice(-limit)) {
       try {
         const ev = JSON.parse(line) as StrataToolCallEvent;
+        if (ev.event !== 'tool_call_completed' && ev.event !== 'tool_call_failed') {
+          continue;
+        }
         if (!toolFilter || ev.tool === toolFilter) {
           events.push(ev);
         }

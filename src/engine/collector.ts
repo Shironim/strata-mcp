@@ -130,6 +130,43 @@ export interface CollectFilesReport {
 
 export const INDEX_CONFIG_FILES = new Set(['package.json', 'tsconfig.json', 'jsconfig.json', '.gitignore', '.strataignore', 'nuxt.config.mjs', 'next.config.mjs', 'astro.config.mjs']);
 
+const DOC_DIR_NAMES = new Set(['docs', 'doc', 'documentation']);
+const CODE_DOMAIN_PARENTS = new Set([
+  'app',
+  'src',
+  'pages',
+  'components',
+  'composables',
+  'layouts',
+  'middleware',
+  'plugins',
+  'server',
+  'routes',
+  'views',
+  'api',
+]);
+
+/**
+ * Returns true when a `docs`/`doc`/`documentation` folder is nested inside an
+ * application source/routing directory (e.g. `app/pages/docs`, `server/api/docs`)
+ * rather than being a standalone repository documentation folder.
+ */
+function isCodeDomainDocsDir(scanRoot: string, relativePath: string): boolean {
+  const parts = relativePath.replace(/\\/g, '/').split('/').filter(Boolean);
+  for (let i = 0; i < parts.length - 1; i++) {
+    if (CODE_DOMAIN_PARENTS.has(parts[i]!.toLowerCase())) {
+      return true;
+    }
+  }
+  const scanParts = scanRoot.replace(/\\/g, '/').split('/').filter(Boolean);
+  for (let i = scanParts.length - 1; i >= Math.max(0, scanParts.length - 3); i--) {
+    if (CODE_DOMAIN_PARENTS.has(scanParts[i]!.toLowerCase())) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /**
  * Returns true if the file is a project configuration file affecting build,
  * path aliases (e.g. tsconfig.*.json, jsconfig.*.json), or framework setup.
@@ -184,8 +221,8 @@ async function* iterateFilesInternal(
       // Allowed via explicit option
     } else if (options?.includeScripts && lower === 'scripts') {
       // Allowed via explicit option
-    } else if (options?.includeDocs && (['docs', 'doc', 'documentation'].includes(lower))) {
-      // Allowed via explicit option
+    } else if (DOC_DIR_NAMES.has(lower) && (options?.includeDocs || isCodeDomainDocsDir(dirPath, relativePath))) {
+      // Allowed via explicit option or when nested inside an application code/routing directory
     } else if (IGNORED_DIRS.has(entryName) || IGNORED_DIRS.has(lower)) {
       return entryName.startsWith('.') ? 'hidden' : 'default-ignore';
     }
@@ -198,7 +235,15 @@ async function* iterateFilesInternal(
   }
 
   type IgnoreContext = { base: string; matcher: Ignore };
+  function hasActiveIgnoreRules(rules: string[]): boolean {
+    for (const r of rules) {
+      const t = r.trim();
+      if (t && !t.startsWith('#')) return true;
+    }
+    return false;
+  }
   function isIgnored(fullPath: string, directory: boolean, contexts: IgnoreContext[]): boolean {
+    if (contexts.length === 0) return false;
     let ignored = false;
     for (const { base, matcher } of contexts) {
       const path = relative(base, fullPath).replace(/\\/g, '/') + (directory ? '/' : '');
@@ -221,7 +266,10 @@ async function* iterateFilesInternal(
     }
     for (const base of ancestors) {
       if (inherited.length && isIgnored(base, true, inherited)) return;
-      inherited.push({ base, matcher: ignore().add(await loadIgnoreRules(base, options?.failOnReadError)) });
+      const rules = await loadIgnoreRules(base, options?.failOnReadError);
+      if (hasActiveIgnoreRules(rules)) {
+        inherited.push({ base, matcher: ignore().add(rules) });
+      }
     }
     if (inherited.length && isIgnored(dirPath, stat.isDirectory(), inherited)) {
       if (stat.isDirectory()) excludedDirs?.push({ path: '.', reason: 'ignore-file' });
@@ -255,10 +303,6 @@ async function* iterateFilesInternal(
   }
 
   async function* walk(currentDir: string, inherited: IgnoreContext[] = []): AsyncGenerator<string> {
-    const contexts = [...inherited];
-    if (options?.respectIgnoreFiles !== false) {
-      contexts.push({ base: currentDir, matcher: ignore().add(await loadIgnoreRules(currentDir, options?.failOnReadError)) });
-    }
     let entries: Dirent[];
     try {
       entries = await fs.readdir(currentDir, { withFileTypes: true });
@@ -270,6 +314,23 @@ async function* iterateFilesInternal(
         return;
       }
       throw err;
+    }
+
+    let contexts = inherited;
+    if (options?.respectIgnoreFiles !== false) {
+      let hasIgnoreFile = false;
+      for (const entry of entries) {
+        if ((entry.name === '.gitignore' || entry.name === '.strataignore') && entry.isFile()) {
+          hasIgnoreFile = true;
+          break;
+        }
+      }
+      if (hasIgnoreFile) {
+        const rules = await loadIgnoreRules(currentDir, options?.failOnReadError);
+        if (hasActiveIgnoreRules(rules)) {
+          contexts = [...inherited, { base: currentDir, matcher: ignore().add(rules) }];
+        }
+      }
     }
     for (const entry of entries) {
       const fullPath = join(currentDir, entry.name);

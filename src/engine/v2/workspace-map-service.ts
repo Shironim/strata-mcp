@@ -5,7 +5,7 @@ import {
   type ServiceRuntimeOptions,
 } from './contracts';
 import { ValidationError } from './errors';
-import { syncWorkspaceV3 } from './fast-sync';
+import { defaultSyncCoordinator } from './sync-coordinator';
 import { defaultWarmDbPool } from './schema-v3';
 
 export type WorkspaceMapView = 'overview' | 'packages' | 'routes' | 'files' | 'health';
@@ -101,7 +101,7 @@ export async function mapWorkspace(
   const db = request.db ?? defaultWarmDbPool.get(absRoot, { dbFilename: request.dbFilename });
 
   if (!request.skipSync) {
-    await syncWorkspaceV3(absRoot, {
+    await defaultSyncCoordinator.ensureSynced(absRoot, {
       db,
       packageKey: request.packageKey,
     });
@@ -206,7 +206,8 @@ export async function mapWorkspace(
       layout_chain_json: string | null;
     }>;
 
-    const items: RouteSummaryItem[] = rows.map((r) => ({
+    const { page: pagedRows, pagination } = paginateItems(rows, limit, request.cursor);
+    const page: RouteSummaryItem[] = pagedRows.map((r) => ({
       packageKey: r.package_key,
       urlPath: r.url_path,
       filePath: r.file_path,
@@ -216,8 +217,6 @@ export async function mapWorkspace(
       params: r.params_json ? (JSON.parse(r.params_json) as string[]) : [],
       layouts: r.layout_chain_json ? (JSON.parse(r.layout_chain_json) as string[]) : [],
     }));
-
-    const { page, pagination } = paginateItems(items, limit, request.cursor);
 
     return {
       scope,
@@ -262,7 +261,8 @@ export async function mapWorkspace(
       render_boundary: string | null;
     }>;
 
-    const items: FileInventoryItem[] = rows.map((r) => ({
+    const { page: pagedRows, pagination } = paginateItems(rows, limit, request.cursor);
+    const page: FileInventoryItem[] = pagedRows.map((r) => ({
       packageKey: r.package_key,
       filePath: r.file_path,
       relPath: r.rel_path,
@@ -271,8 +271,6 @@ export async function mapWorkspace(
       isLayout: r.is_layout === 1,
       renderBoundary: r.render_boundary,
     }));
-
-    const { page, pagination } = paginateItems(items, limit, request.cursor);
 
     return {
       scope,
@@ -301,10 +299,17 @@ export async function mapWorkspace(
        WHERE s.kind = 'component'
          AND f.is_page = 0
          AND f.is_layout = 0
+         AND NOT EXISTS (SELECT 1 FROM routes r WHERE r.file_id = f.id)
          AND (? IS NULL OR p.package_key = ?)
          AND NOT EXISTS (
            SELECT 1 FROM symbol_edges e
-           WHERE (e.target_file_id = f.id OR e.target_name = s.name)
+           WHERE e.target_file_id = f.id
+             AND e.source_file_id != f.id
+             AND e.edge_kind IN ('imports', 'reexports', 'renders')
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM symbol_edges e
+           WHERE e.target_name = s.name
              AND e.source_file_id != f.id
              AND e.edge_kind IN ('imports', 'reexports', 'renders')
          )
@@ -320,17 +325,31 @@ export async function mapWorkspace(
     start_line: number;
   }>;
 
-  const unusedComponents: HealthCandidateItem[] = unusedCompRows.map((r) => ({
-    packageKey: r.package_key,
-    symbolId: r.symbol_uid,
-    name: r.name,
-    kind: r.kind,
-    filePath: r.file_path,
-    relPath: r.rel_path,
-    line: r.start_line,
-    reason: 'No static import, re-export, or render edge found across indexed workspace files.',
-    confidence: 'medium',
-  }));
+  const isFrameworkRootEntry = (relPath: string): boolean => {
+    const norm = relPath.replace(/\\/g, '/').toLowerCase();
+    if (/^(?:layers\/[^/]+\/)?(?:src\/)?(?:app\/)?(?:app|error)\.(?:vue|tsx|jsx|svelte|astro)$/.test(norm)) {
+      return true;
+    }
+    // Next.js App Router convention files & API route handlers
+    if (/(?:^|\/)(?:src\/)?app\/(?:.+\/)?(?:route|loading|error|global-error|not-found|template|default|opengraph-image|twitter-image)\.(?:ts|tsx|js|jsx)$/.test(norm)) {
+      return true;
+    }
+    return false;
+  };
+
+  const unusedComponents: HealthCandidateItem[] = unusedCompRows
+    .filter((r) => !isFrameworkRootEntry(r.rel_path))
+    .map((r) => ({
+      packageKey: r.package_key,
+      symbolId: r.symbol_uid,
+      name: r.name,
+      kind: r.kind,
+      filePath: r.file_path,
+      relPath: r.rel_path,
+      line: r.start_line,
+      reason: 'No static import, re-export, or render edge found across indexed workspace files.',
+      confidence: 'medium',
+    }));
 
   return {
     scope,
@@ -343,11 +362,15 @@ export async function mapWorkspace(
       },
     },
     omissions: [],
-    diagnostics: [
-      {
-        code: 'STATIC_CANDIDATE_ONLY',
-        message: 'Health candidates reflect static graph edges; dynamically registered or externally consumed components require manual confirmation.',
-      },
-    ],
+    diagnostics:
+      unusedComponents.length > 0
+        ? [
+            {
+              code: 'STATIC_CANDIDATE_ONLY',
+              message:
+                'Health candidates reflect static graph edges; dynamically registered or externally consumed components require manual confirmation.',
+            },
+          ]
+        : [],
   };
 }

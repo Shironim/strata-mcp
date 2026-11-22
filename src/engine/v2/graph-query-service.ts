@@ -1,6 +1,5 @@
 import type { Database } from 'bun:sqlite';
 import { existsSync, readFileSync } from 'node:fs';
-import { getSourcePosition } from '../../utils/source-position';
 import { canonicalizePath } from '../path-resolver';
 import {
   paginateItems,
@@ -11,13 +10,14 @@ import {
   type VerificationTier,
 } from './contracts';
 import { NotFoundError, ValidationError } from './errors';
-import { syncWorkspaceV3 } from './fast-sync';
+import { defaultSyncCoordinator } from './sync-coordinator';
 import { defaultWarmDbPool } from './schema-v3';
 import { defaultSemanticPool } from './semantic';
 import {
   formatSourceRef,
   resolvePathWithinWorkspace,
   shortHash,
+  shortHashFromFull,
 } from './source-ref';
 
 export type GraphQueryKind =
@@ -261,7 +261,9 @@ function resolveTarget(
   throw new ValidationError('target must specify at least one of: symbolId, file, or symbol.');
 }
 
-function summarizeByPackage(items: readonly GraphLocationItem[]): PackageGroupSummary[] {
+function summarizeByPackage<T extends { packageKey: string; filePath: string }>(
+  items: readonly T[]
+): PackageGroupSummary[] {
   const counts = new Map<string, { count: number; files: Set<string> }>();
   for (const item of items) {
     const entry = counts.get(item.packageKey) ?? { count: 0, files: new Set<string>() };
@@ -309,38 +311,120 @@ function findCandidatePackagesForTarget(
   return [...pkgSet].sort();
 }
 
-function toLocationItem(
-  db: Database,
-  filePath: string,
-  line: number,
-  column: number,
-  startOffset: number,
-  endOffset: number,
-  kind: string,
-  extra?: { isDefinition?: boolean; isWriteAccess?: boolean }
-): GraphLocationItem {
-  const row = db
-    .query(
-      `SELECT f.rel_path, p.package_key
-       FROM files f
-       JOIN packages p ON p.id = f.package_id
-       WHERE f.path = ?`
-    )
-    .get(filePath) as { rel_path: string; package_key: string } | null;
+interface RawLocationDescriptor {
+  packageKey: string;
+  filePath: string;
+  relPath?: string;
+  contentHash?: string;
+  line: number;
+  column: number;
+  startOffset: number;
+  endOffset: number;
+  kind: string;
+  isDefinition?: boolean;
+  isWriteAccess?: boolean;
+}
 
-  const raw = existsSync(filePath) ? readFileSync(filePath, 'utf8') : '';
-  const hash8 = shortHash(raw);
-  return {
-    packageKey: row?.package_key ?? '.',
-    filePath,
-    relPath: row?.rel_path ?? filePath,
-    line,
-    column,
-    kind,
-    snippet: raw ? lineSnippet(raw, line) : '',
-    sourceRef: formatSourceRef(filePath, hash8, startOffset, endOffset),
-    ...extra,
+interface CachedLocationFileInfo {
+  packageKey: string;
+  relPath: string;
+  lines: string[];
+  hash8: string;
+}
+
+interface FileMetaRow {
+  packageKey: string;
+  relPath: string;
+  contentHash?: string;
+}
+
+function createLocationItemBuilder(db: Database) {
+  const fileMetaStmt = db.prepare(
+    `SELECT f.rel_path, f.content_hash, p.package_key
+     FROM files f
+     JOIN packages p ON p.id = f.package_id
+     WHERE f.path = ?`
+  );
+  const metaCache = new Map<string, FileMetaRow>();
+  const fileCache = new Map<string, CachedLocationFileInfo>();
+
+  const getFileMeta = (filePath: string): FileMetaRow => {
+    let meta = metaCache.get(filePath);
+    if (!meta) {
+      const row = fileMetaStmt.get(filePath) as
+        | { rel_path: string; content_hash: string | null; package_key: string }
+        | null;
+      meta = {
+        packageKey: row?.package_key ?? '.',
+        relPath: row?.rel_path ?? filePath,
+        contentHash: row?.content_hash ?? undefined,
+      };
+      metaCache.set(filePath, meta);
+    }
+    return meta;
   };
+
+  const toLocationItem = (
+    filePath: string,
+    line: number,
+    column: number,
+    startOffset: number,
+    endOffset: number,
+    kind: string,
+    extra?: {
+      isDefinition?: boolean;
+      isWriteAccess?: boolean;
+      packageKey?: string;
+      relPath?: string;
+      contentHash?: string;
+    }
+  ): GraphLocationItem => {
+    let cached = fileCache.get(filePath);
+    if (!cached) {
+      const meta =
+        extra?.packageKey !== undefined && extra?.relPath !== undefined
+          ? {
+              packageKey: extra.packageKey,
+              relPath: extra.relPath,
+              contentHash: extra.contentHash,
+            }
+          : getFileMeta(filePath);
+      const raw = existsSync(filePath) ? readFileSync(filePath, 'utf8') : '';
+      cached = {
+        packageKey: meta.packageKey,
+        relPath: meta.relPath,
+        lines: raw ? raw.split('\n') : [],
+        hash8: meta.contentHash ? shortHashFromFull(meta.contentHash) : shortHash(raw),
+      };
+      fileCache.set(filePath, cached);
+    }
+    const snippet =
+      cached.lines.length > 0 ? (cached.lines[Math.max(0, line - 1)] ?? '').trim().slice(0, 140) : '';
+    const result: GraphLocationItem = {
+      packageKey: cached.packageKey,
+      filePath,
+      relPath: cached.relPath,
+      line,
+      column,
+      kind,
+      snippet,
+      sourceRef: formatSourceRef(filePath, cached.hash8, startOffset, endOffset),
+    };
+    if (extra?.isDefinition !== undefined) result.isDefinition = extra.isDefinition;
+    if (extra?.isWriteAccess !== undefined) result.isWriteAccess = extra.isWriteAccess;
+    return result;
+  };
+
+  const buildFromDescriptor = (d: RawLocationDescriptor): GraphLocationItem =>
+    toLocationItem(d.filePath, d.line, d.column, d.startOffset, d.endOffset, d.kind, {
+      isDefinition: d.isDefinition,
+      isWriteAccess: d.isWriteAccess,
+      packageKey: d.packageKey,
+      relPath: d.relPath,
+      contentHash: d.contentHash,
+    });
+
+  return { getFileMeta, toLocationItem, buildFromDescriptor };
 }
 
 /**
@@ -360,10 +444,11 @@ export async function queryGraph(
   const absRoot = canonicalizePath(request.workspaceRoot);
   const db = request.db ?? defaultWarmDbPool.get(absRoot, { dbFilename: request.dbFilename });
   if (!request.skipSync) {
-    await syncWorkspaceV3(absRoot, { db });
+    await defaultSyncCoordinator.ensureSynced(absRoot, { db });
   }
 
   const semanticPool = request.semanticPool ?? defaultSemanticPool;
+  const { getFileMeta, toLocationItem, buildFromDescriptor } = createLocationItemBuilder(db);
   const limit = request.limit ?? 30;
   const omissions: OmissionRecord[] = [];
   const diagnostics: DiagnosticRecord[] = [];
@@ -376,44 +461,88 @@ export async function queryGraph(
     }
 
     const scopePkgs = request.scope?.packages;
-    const rows = db
-      .query(
-        `SELECT f.path AS file_path, f.rel_path, p.package_key,
-                e.edge_kind, e.line_number, e.start_offset, e.end_offset
-         FROM symbol_edges e
-         JOIN files f ON f.id = e.source_file_id
-         JOIN packages p ON p.id = f.package_id
-         WHERE e.target_name = ?
-           AND e.edge_kind IN ('reads_state', 'writes_state', 'watches_state', 'calls')
-         ORDER BY p.package_key ASC, f.rel_path ASC, e.line_number ASC`
-      )
-      .all(stateName) as Array<{
+    const stateEdgeQuery = db.query(
+      `SELECT f.path AS file_path, f.rel_path, f.content_hash, p.package_key,
+              e.edge_kind, e.line_number, e.start_offset, e.end_offset
+       FROM symbol_edges e
+       JOIN files f ON f.id = e.source_file_id
+       JOIN packages p ON p.id = f.package_id
+       WHERE e.target_name = ?
+         AND e.edge_kind IN ('reads_state', 'writes_state', 'watches_state', 'calls', 'provides_context', 'consumes_context')
+       ORDER BY p.package_key ASC, f.rel_path ASC, e.line_number ASC`
+    );
+    type StateEdgeRow = {
       file_path: string;
       rel_path: string;
+      content_hash: string;
       package_key: string;
       edge_kind: string;
       line_number: number;
       start_offset: number;
       end_offset: number;
-    }>;
+    };
+
+    let resolvedStateKey = stateName;
+    let rows = stateEdgeQuery.all(stateName) as StateEdgeRow[];
+
+    if (rows.length === 0) {
+      const aliasRow = db
+        .query(
+          `SELECT e.target_name AS state_key
+           FROM symbol_edges e
+           JOIN files f ON f.id = e.source_file_id
+           WHERE e.edge_kind IN ('reads_state', 'writes_state')
+             AND json_extract(e.payload_json, '$.stateVar') = ?
+             AND (? IS NULL OR f.path = ?)
+           LIMIT 1`
+        )
+        .get(
+          stateName,
+          request.target.file ? resolvePathWithinWorkspace(absRoot, request.target.file) : null,
+          request.target.file ? resolvePathWithinWorkspace(absRoot, request.target.file) : null
+        ) as { state_key: string } | null;
+
+      if (aliasRow?.state_key) {
+        resolvedStateKey = aliasRow.state_key;
+        rows = stateEdgeQuery.all(resolvedStateKey) as StateEdgeRow[];
+      }
+    }
 
     const filtered = scopePkgs?.length
       ? rows.filter((r) => scopePkgs.includes(r.package_key))
       : rows;
 
-    const items = filtered.map((r) =>
-      toLocationItem(db, r.file_path, r.line_number, 1, r.start_offset, r.end_offset, r.edge_kind)
-    );
-    const { page, pagination } = paginateItems(items, limit, request.cursor);
+    const descriptors: RawLocationDescriptor[] = filtered.map((r) => ({
+      packageKey: r.package_key,
+      filePath: r.file_path,
+      relPath: r.rel_path,
+      contentHash: r.content_hash,
+      line: r.line_number,
+      column: 1,
+      startOffset: r.start_offset,
+      endOffset: r.end_offset,
+      kind: r.edge_kind,
+      isWriteAccess: r.edge_kind === 'writes_state',
+    }));
+    if (descriptors.length === 0) {
+      diagnostics.push({
+        code: 'STATE_FLOW_NO_MATCHES',
+        message: `No indexed state reads, writes, context providers/consumers, or store calls found for "${stateName}". Static stateFlow tracks Pinia stores (use*Store), Nuxt useState(), React Context (createContext/Provider/useContext), and Vue provide/inject.`,
+      });
+    }
+    const { page, pagination } = paginateItems(descriptors, limit, request.cursor);
 
     return {
       scope: absRoot,
       verification: 'graph',
       data: {
         query: 'stateFlow',
-        targetSummary: `state:${stateName}`,
-        items: page,
-        summaryByPackage: summarizeByPackage(items),
+        targetSummary:
+          resolvedStateKey !== stateName
+            ? `state:${stateName} -> key:${resolvedStateKey}`
+            : `state:${stateName}`,
+        items: page.map(buildFromDescriptor),
+        summaryByPackage: summarizeByPackage(descriptors),
       },
       pagination,
       omissions,
@@ -426,7 +555,7 @@ export async function queryGraph(
   if (request.query === 'definition') {
     const defs = semanticPool.getDefinitionsAtOffset(absRoot, resolved.filePath, resolved.offset);
     const items = defs.map((d) =>
-      toLocationItem(db, d.filePath, d.line, d.column, d.startOffset, d.endOffset, d.kind ?? 'definition', {
+      toLocationItem(d.filePath, d.line, d.column, d.startOffset, d.endOffset, d.kind ?? 'definition', {
         isDefinition: true,
       })
     );
@@ -451,13 +580,71 @@ export async function queryGraph(
       resolved.offset,
       candidatePackages
     );
-    const allItems = refs.map((r) =>
-      toLocationItem(db, r.filePath, r.line, r.column, r.startOffset, r.endOffset, r.kind ?? 'reference', {
+    const descriptors: RawLocationDescriptor[] = refs.map((r) => {
+      const meta = getFileMeta(r.filePath);
+      return {
+        packageKey: meta.packageKey,
+        filePath: r.filePath,
+        relPath: meta.relPath,
+        contentHash: meta.contentHash,
+        line: r.line,
+        column: r.column,
+        startOffset: r.startOffset,
+        endOffset: r.endOffset,
+        kind: r.kind ?? 'reference',
         isDefinition: r.isDefinition,
         isWriteAccess: r.isWriteAccess,
-      })
-    );
-    const { page, pagination } = paginateItems(allItems, limit, request.cursor);
+      };
+    });
+
+    // Supplement semantic references with indexed graph edges (captures Nuxt auto-imports without .nuxt/imports.d.ts)
+    if (resolved.symbolKind !== 'position' && resolved.symbolKind !== 'file') {
+      const seenLineKeys = new Set(descriptors.map((item) => `${item.filePath}:${item.line}`));
+      const candidatePkgSet = new Set(candidatePackages);
+      const graphRows = db
+        .query(
+          `SELECT f.path AS file_path, f.rel_path, f.content_hash, p.package_key,
+                  e.edge_kind, e.line_number, e.start_offset, e.end_offset
+           FROM symbol_edges e
+           JOIN files f ON f.id = e.source_file_id
+           JOIN packages p ON p.id = f.package_id
+           WHERE (e.target_file_id = ? OR (e.target_file_id IS NULL AND e.target_name = ?))
+             AND e.source_file_id != ?
+             AND e.edge_kind IN ('calls', 'renders', 'reads_state', 'writes_state')
+           ORDER BY p.package_key ASC, f.rel_path ASC, e.line_number ASC`
+        )
+        .all(resolved.fileId, resolved.symbolName, resolved.fileId) as Array<{
+        file_path: string;
+        rel_path: string;
+        content_hash: string;
+        package_key: string;
+        edge_kind: string;
+        line_number: number;
+        start_offset: number;
+        end_offset: number;
+      }>;
+
+      for (const row of graphRows) {
+        if (!candidatePkgSet.has(row.package_key)) continue;
+        const key = `${row.file_path}:${row.line_number}`;
+        if (seenLineKeys.has(key)) continue;
+        seenLineKeys.add(key);
+        descriptors.push({
+          packageKey: row.package_key,
+          filePath: row.file_path,
+          relPath: row.rel_path,
+          contentHash: row.content_hash,
+          line: row.line_number,
+          column: 1,
+          startOffset: row.start_offset,
+          endOffset: row.end_offset,
+          kind: `graph:${row.edge_kind}`,
+          isWriteAccess: row.edge_kind === 'writes_state',
+        });
+      }
+    }
+
+    const { page, pagination } = paginateItems(descriptors, limit, request.cursor);
 
     return {
       scope: `${absRoot} (${candidatePackages.length} candidate package(s): ${candidatePackages.join(', ')})`,
@@ -465,8 +652,8 @@ export async function queryGraph(
       data: {
         query: 'references',
         targetSummary: `${resolved.symbolName} (${resolved.symbolKind})`,
-        items: page,
-        summaryByPackage: summarizeByPackage(allItems),
+        items: page.map(buildFromDescriptor),
+        summaryByPackage: summarizeByPackage(descriptors),
       },
       pagination,
       omissions,
@@ -480,7 +667,7 @@ export async function queryGraph(
     const scopePkgs = request.scope?.packages ? new Set(request.scope.packages) : null;
 
     const getFileInfo = db.prepare(
-      `SELECT f.id, f.path, f.rel_path, f.is_page, p.package_key,
+      `SELECT f.id, f.path, f.rel_path, f.framework, f.is_page, p.package_key,
               (SELECT s.name FROM symbols s WHERE s.file_id = f.id AND s.kind = 'component' LIMIT 1) AS comp_name
        FROM files f
        JOIN packages p ON p.id = f.package_id
@@ -488,13 +675,13 @@ export async function queryGraph(
     );
 
     const getParents = db.prepare(
-      `SELECT DISTINCT e.source_file_id AS next_id
+      `SELECT DISTINCT e.source_file_id AS next_id, e.edge_kind
        FROM symbol_edges e
        WHERE e.target_file_id = ? AND e.edge_kind IN ('imports', 'reexports', 'renders')`
     );
 
     const getChildren = db.prepare(
-      `SELECT DISTINCT e.target_file_id AS next_id
+      `SELECT DISTINCT e.target_file_id AS next_id, e.edge_kind
        FROM symbol_edges e
        WHERE e.source_file_id = ? AND e.target_file_id IS NOT NULL AND e.edge_kind IN ('imports', 'reexports', 'renders')`
     );
@@ -506,15 +693,83 @@ export async function queryGraph(
        WHERE e.target_file_id IS NULL AND e.target_name = ? AND e.edge_kind = 'renders'`
     );
 
-    const buildNode = (fileId: number, depth: number, visited: Set<number>): ComponentTreeNodeItem => {
-      const info = getFileInfo.get(fileId) as {
-        id: number;
-        path: string;
-        rel_path: string;
-        is_page: number;
-        package_key: string;
-        comp_name: string | null;
+    type FileInfoRow = {
+      id: number;
+      path: string;
+      rel_path: string;
+      framework: string;
+      is_page: number;
+      package_key: string;
+      comp_name: string | null;
+    };
+    const fileInfoCache = new Map<number, FileInfoRow | null>();
+    const readFileInfo = (id: number): FileInfoRow | null => {
+      if (fileInfoCache.has(id)) return fileInfoCache.get(id)!;
+      const row = (getFileInfo.get(id) as FileInfoRow | null) ?? null;
+      fileInfoCache.set(id, row);
+      return row;
+    };
+
+    const isRenderableComponentFile = (info: FileInfoRow): boolean => {
+      if (info.comp_name || info.is_page === 1) return true;
+      return /\.(?:vue|tsx|jsx|svelte|astro)$/i.test(info.rel_path);
+    };
+
+    // Respect request.limit when provided; cap total nodes to keep responses within MCP byte budgets
+    const maxChildrenPerNode = request.limit !== undefined ? Math.max(1, request.limit) : 50;
+    const MAX_COMPONENT_TREE_NODES = request.limit !== undefined ? Math.max(1, Math.min(500, request.limit * 10)) : 500;
+    const expanded = new Set<number>();
+    let totalNodes = 0;
+    let truncated = false;
+
+    const collectDirectComponentNeighbors = (
+      fileId: number,
+      dir: 'up' | 'down',
+      info: FileInfoRow
+    ): number[] => {
+      const result = new Set<number>();
+      const queue: Array<{ id: number; barrelHops: number }> = [];
+
+      const enqueueNeighbors = (curId: number, curInfo: FileInfoRow, hops: number) => {
+        if (dir === 'up') {
+          for (const row of getParents.all(curId) as Array<{ next_id: number; edge_kind: string }>) {
+            queue.push({ id: row.next_id, barrelHops: hops });
+          }
+          if (curInfo.comp_name) {
+            for (const row of getAutoParents.all(curInfo.comp_name) as Array<{ next_id: number }>) {
+              queue.push({ id: row.next_id, barrelHops: hops });
+            }
+          }
+        } else {
+          for (const row of getChildren.all(curId) as Array<{ next_id: number; edge_kind: string }>) {
+            queue.push({ id: row.next_id, barrelHops: hops });
+          }
+        }
       };
+
+      enqueueNeighbors(fileId, info, 0);
+      const visited = new Set<number>([fileId]);
+
+      while (queue.length > 0) {
+        const item = queue.shift()!;
+        if (visited.has(item.id)) continue;
+        visited.add(item.id);
+        const nInfo = readFileInfo(item.id);
+        if (!nInfo) continue;
+
+        if (isRenderableComponentFile(nInfo)) {
+          result.add(item.id);
+        } else if (item.barrelHops < 1) {
+          // Transparently traverse through barrel/re-export files without emitting them as component nodes
+          enqueueNeighbors(item.id, nInfo, item.barrelHops + 1);
+        }
+      }
+      return [...result];
+    };
+
+    const buildNode = (fileId: number, depth: number, pathVisited: Set<number>): ComponentTreeNodeItem => {
+      const info = readFileInfo(fileId)!;
+      totalNodes++;
       const node: ComponentTreeNodeItem = {
         packageKey: info.package_key,
         filePath: info.path,
@@ -524,38 +779,44 @@ export async function queryGraph(
         isPage: info.is_page === 1,
         children: [],
       };
-      if (depth >= maxDepth) return node;
+      if (depth >= maxDepth || expanded.has(fileId)) return node;
+      expanded.add(fileId);
 
       const nextIds = new Set<number>();
       if (direction === 'up' || direction === 'both') {
-        for (const row of getParents.all(fileId) as Array<{ next_id: number }>) {
-          nextIds.add(row.next_id);
-        }
-        if (info.comp_name) {
-          for (const row of getAutoParents.all(info.comp_name) as Array<{ next_id: number }>) {
-            nextIds.add(row.next_id);
-          }
+        for (const id of collectDirectComponentNeighbors(fileId, 'up', info)) {
+          nextIds.add(id);
         }
       }
       if (direction === 'down' || direction === 'both') {
-        for (const row of getChildren.all(fileId) as Array<{ next_id: number }>) {
-          nextIds.add(row.next_id);
+        for (const id of collectDirectComponentNeighbors(fileId, 'down', info)) {
+          nextIds.add(id);
         }
       }
 
       for (const nextId of nextIds) {
-        if (visited.has(nextId)) continue;
-        const nextInfo = getFileInfo.get(nextId) as { package_key: string } | null;
+        if (pathVisited.has(nextId)) continue;
+        if (node.children.length >= maxChildrenPerNode || totalNodes >= MAX_COMPONENT_TREE_NODES) {
+          truncated = true;
+          break;
+        }
+        const nextInfo = readFileInfo(nextId);
         if (!nextInfo) continue;
         if (scopePkgs && !scopePkgs.has(nextInfo.package_key)) continue;
-        const nextVisited = new Set(visited);
-        nextVisited.add(nextId);
-        node.children.push(buildNode(nextId, depth + 1, nextVisited));
+        pathVisited.add(nextId);
+        node.children.push(buildNode(nextId, depth + 1, pathVisited));
+        pathVisited.delete(nextId);
       }
       return node;
     };
 
     const tree = buildNode(resolved.fileId, 0, new Set([resolved.fileId]));
+    if (truncated) {
+      diagnostics.push({
+        code: 'COMPONENT_TREE_TRUNCATED',
+        message: `Component tree traversal reached the ${MAX_COMPONENT_TREE_NODES}-node cap; narrow scope.packages or reduce maxDepth for a focused view.`,
+      });
+    }
 
     return {
       scope: absRoot,
@@ -572,46 +833,68 @@ export async function queryGraph(
 
   if (request.query === 'callHierarchy') {
     const direction = request.direction ?? 'up';
-    const items: GraphLocationItem[] = [];
+    const descriptors: RawLocationDescriptor[] = [];
 
     if (direction === 'up' || direction === 'both') {
       const callerRows = db
         .query(
-          `SELECT f.path AS file_path, e.line_number, e.start_offset, e.end_offset, e.edge_kind
+          `SELECT f.path AS file_path, f.rel_path, f.content_hash, p.package_key,
+                  e.line_number, e.start_offset, e.end_offset, e.edge_kind
            FROM symbol_edges e
            JOIN files f ON f.id = e.source_file_id
-           WHERE (e.target_file_id = ? OR e.target_name = ?)
-             AND e.source_file_id != ?
-             AND e.edge_kind IN ('calls', 'renders', 'reads_state', 'writes_state')
+           JOIN packages p ON p.id = f.package_id
+           WHERE (e.target_file_id = ? OR (e.target_file_id IS NULL AND e.target_name = ?))
+             AND (e.source_file_id != ? OR (e.target_name = ? AND e.edge_kind IN ('calls', 'listens_event')))
+             AND e.edge_kind IN ('calls', 'renders', 'reads_state', 'writes_state', 'listens_event')
            ORDER BY f.path ASC, e.line_number ASC`
         )
-        .all(resolved.fileId, resolved.symbolName, resolved.fileId) as Array<{
+        .all(resolved.fileId, resolved.symbolName, resolved.fileId, resolved.symbolName) as Array<{
         file_path: string;
+        rel_path: string;
+        content_hash: string;
+        package_key: string;
         line_number: number;
         start_offset: number;
         end_offset: number;
         edge_kind: string;
       }>;
       for (const r of callerRows) {
-        items.push(
-          toLocationItem(db, r.file_path, r.line_number, 1, r.start_offset, r.end_offset, `caller:${r.edge_kind}`)
-        );
+        descriptors.push({
+          packageKey: r.package_key,
+          filePath: r.file_path,
+          relPath: r.rel_path,
+          contentHash: r.content_hash,
+          line: r.line_number,
+          column: 1,
+          startOffset: r.start_offset,
+          endOffset: r.end_offset,
+          kind: `caller:${r.edge_kind}`,
+        });
       }
     }
 
     if (direction === 'down' || direction === 'both') {
       const calleeRows = db
         .query(
-          `SELECT COALESCE(tf.path, sf.path) AS file_path, e.line_number, e.start_offset, e.end_offset, e.edge_kind, e.target_name
+          `SELECT COALESCE(tf.path, sf.path) AS file_path,
+                  COALESCE(tf.rel_path, sf.rel_path) AS rel_path,
+                  COALESCE(tf.content_hash, sf.content_hash) AS content_hash,
+                  COALESCE(tp.package_key, sp.package_key) AS package_key,
+                  e.line_number, e.start_offset, e.end_offset, e.edge_kind, e.target_name
            FROM symbol_edges e
            JOIN files sf ON sf.id = e.source_file_id
+           JOIN packages sp ON sp.id = sf.package_id
            LEFT JOIN files tf ON tf.id = e.target_file_id
+           LEFT JOIN packages tp ON tp.id = tf.package_id
            WHERE e.source_file_id = ?
              AND e.edge_kind IN ('calls', 'renders', 'outbound_http', 'reads_state', 'writes_state')
            ORDER BY e.line_number ASC`
         )
         .all(resolved.fileId) as Array<{
         file_path: string;
+        rel_path: string;
+        content_hash: string;
+        package_key: string;
         line_number: number;
         start_offset: number;
         end_offset: number;
@@ -619,21 +902,29 @@ export async function queryGraph(
         target_name: string;
       }>;
       for (const r of calleeRows) {
-        items.push(
-          toLocationItem(db, r.file_path, r.line_number, 1, r.start_offset, r.end_offset, `callee:${r.edge_kind}:${r.target_name}`)
-        );
+        descriptors.push({
+          packageKey: r.package_key,
+          filePath: r.file_path,
+          relPath: r.rel_path,
+          contentHash: r.content_hash,
+          line: r.line_number,
+          column: 1,
+          startOffset: r.start_offset,
+          endOffset: r.end_offset,
+          kind: `callee:${r.edge_kind}:${r.target_name}`,
+        });
       }
     }
 
-    const { page, pagination } = paginateItems(items, limit, request.cursor);
+    const { page, pagination } = paginateItems(descriptors, limit, request.cursor);
     return {
       scope: absRoot,
       verification: 'graph',
       data: {
         query: 'callHierarchy',
         targetSummary: `${resolved.symbolName} (${direction})`,
-        items: page,
-        summaryByPackage: summarizeByPackage(items),
+        items: page.map(buildFromDescriptor),
+        summaryByPackage: summarizeByPackage(descriptors),
       },
       pagination,
       omissions,
@@ -644,97 +935,93 @@ export async function queryGraph(
   // query === 'impact': verified consumer sites + explicit dynamic spread omissions
   const member = request.target.member;
   const candidatePackages = findCandidatePackagesForTarget(db, resolved, request.scope?.packages);
+  const candidatePkgSet = new Set(candidatePackages);
 
-  // Collect all consumer files across candidate packages (follows barrel re-exports via recursive CTE)
-  const consumerRows = db
+  // 1. Single-SQL batch CTE: collect consumer render edges & surface DYNAMIC_SPREAD omissions without touching disk
+  const impactRenderRows = db
     .query(
       `WITH RECURSIVE consumers(file_id, depth) AS (
          SELECT ?, 0
+         UNION
+         SELECT e.source_file_id, 1
+         FROM symbol_edges e
+         WHERE e.target_file_id IS NULL
+           AND e.target_name = ?
+           AND e.edge_kind = 'renders'
          UNION
          SELECT e.source_file_id, c.depth + 1
          FROM symbol_edges e
          JOIN consumers c ON e.target_file_id = c.file_id
          WHERE c.depth < 3 AND e.edge_kind IN ('imports', 'reexports', 'renders')
        )
-       SELECT DISTINCT f.id, f.path, f.rel_path, f.content_hash, f.contract_json, p.package_key
-       FROM consumers c
+       SELECT f.id AS file_id, f.path, f.rel_path, f.content_hash, p.package_key,
+              e.line_number, e.start_offset, e.end_offset, e.is_dynamic, e.payload_json
+       FROM (SELECT DISTINCT file_id FROM consumers WHERE file_id != ?) c
        JOIN files f ON f.id = c.file_id
        JOIN packages p ON p.id = f.package_id
-       WHERE f.id != ?`
+       JOIN symbol_edges e ON e.source_file_id = f.id
+       WHERE e.edge_kind = 'renders'
+         AND (e.target_file_id = ? OR e.target_name = ?)
+       ORDER BY p.package_key ASC, f.rel_path ASC, e.line_number ASC`
     )
-    .all(resolved.fileId, resolved.fileId) as Array<{
-    id: number;
+    .all(resolved.fileId, resolved.symbolName, resolved.fileId, resolved.fileId, resolved.symbolName) as Array<{
+    file_id: number;
     path: string;
     rel_path: string;
     content_hash: string;
-    contract_json: string | null;
     package_key: string;
+    line_number: number;
+    start_offset: number;
+    end_offset: number;
+    is_dynamic: number;
+    payload_json: string | null;
   }>;
 
-  const impactItems: GraphLocationItem[] = [];
+  const impactDescriptors: RawLocationDescriptor[] = [];
   let verification: VerificationTier = 'graph';
 
-  // 1. Check indexed render edges & surface DYNAMIC_SPREAD omissions on consumer files
-  for (const consumer of consumerRows) {
-    if (!candidatePackages.includes(consumer.package_key)) continue;
+  for (const edge of impactRenderRows) {
+    if (!candidatePkgSet.has(edge.package_key)) continue;
 
-    const renderEdges = db
-      .query(
-        `SELECT line_number, start_offset, end_offset, is_dynamic, payload_json
-         FROM symbol_edges
-         WHERE source_file_id = ? AND edge_kind = 'renders' AND target_name = ?`
-      )
-      .all(consumer.id, resolved.symbolName) as Array<{
-      line_number: number;
-      start_offset: number;
-      end_offset: number;
-      is_dynamic: number;
-      payload_json: string | null;
-    }>;
+    const payload = edge.payload_json
+      ? (JSON.parse(edge.payload_json) as {
+          props?: string[];
+          events?: string[];
+          hasDynamicSpread?: boolean;
+        })
+      : {};
 
-    const raw = existsSync(consumer.path) ? readFileSync(consumer.path, 'utf8') : '';
-    const hash8 = shortHash(raw);
+    const matchesMember =
+      !member ||
+      (payload.props ?? []).includes(member) ||
+      (payload.events ?? []).includes(member);
+    const isDynamicSpread = Boolean(payload.hasDynamicSpread || edge.is_dynamic === 1);
+    if (!matchesMember && !isDynamicSpread) continue;
 
-    for (const edge of renderEdges) {
-      const payload = edge.payload_json
-        ? (JSON.parse(edge.payload_json) as {
-            props?: string[];
-            events?: string[];
-            hasDynamicSpread?: boolean;
-          })
-        : {};
+    if (matchesMember) {
+      impactDescriptors.push({
+        packageKey: edge.package_key,
+        filePath: edge.path,
+        relPath: edge.rel_path,
+        contentHash: edge.content_hash,
+        line: edge.line_number,
+        column: 1,
+        startOffset: edge.start_offset,
+        endOffset: edge.end_offset,
+        kind: member ? `component-member:${member}` : 'component-render',
+      });
+    }
 
-      const matchesMember =
-        !member ||
-        (payload.props ?? []).includes(member) ||
-        (payload.events ?? []).includes(member);
-
-      if (matchesMember) {
-        const pos = getSourcePosition(raw, edge.start_offset);
-        impactItems.push(
-          toLocationItem(
-            db,
-            consumer.path,
-            pos.line,
-            pos.column,
-            edge.start_offset,
-            edge.end_offset,
-            member ? `component-member:${member}` : 'component-render'
-          )
-        );
-      }
-
-      if (payload.hasDynamicSpread || edge.is_dynamic === 1) {
-        const pos = getSourcePosition(raw, edge.start_offset);
-        omissions.push({
-          code: 'DYNAMIC_SPREAD',
-          filePath: consumer.path,
-          line: pos.line,
-          column: pos.column,
-          reason: `Dynamic attribute spread on <${resolved.symbolName}> may pass or override "${member ?? 'props'}" at runtime.`,
-          sourceRef: formatSourceRef(consumer.path, hash8, edge.start_offset, edge.end_offset),
-        });
-      }
+    if (isDynamicSpread) {
+      const hash8 = edge.content_hash ? shortHashFromFull(edge.content_hash) : shortHash('');
+      omissions.push({
+        code: 'DYNAMIC_SPREAD',
+        filePath: edge.path,
+        line: edge.line_number,
+        column: 1,
+        reason: `Dynamic attribute spread on <${resolved.symbolName}> may pass or override "${member ?? 'props'}" at runtime.`,
+        sourceRef: formatSourceRef(edge.path, hash8, edge.start_offset, edge.end_offset),
+      });
     }
   }
 
@@ -749,15 +1036,23 @@ export async function queryGraph(
     verification = 'semantic';
     for (const r of refs) {
       if (r.isDefinition) continue;
-      impactItems.push(
-        toLocationItem(db, r.filePath, r.line, r.column, r.startOffset, r.endOffset, 'semantic-reference', {
-          isWriteAccess: r.isWriteAccess,
-        })
-      );
+      const meta = getFileMeta(r.filePath);
+      impactDescriptors.push({
+        packageKey: meta.packageKey,
+        filePath: r.filePath,
+        relPath: meta.relPath,
+        contentHash: meta.contentHash,
+        line: r.line,
+        column: r.column,
+        startOffset: r.startOffset,
+        endOffset: r.endOffset,
+        kind: 'semantic-reference',
+        isWriteAccess: r.isWriteAccess,
+      });
     }
   }
 
-  const { page, pagination } = paginateItems(impactItems, limit, request.cursor);
+  const { page, pagination } = paginateItems(impactDescriptors, limit, request.cursor);
 
   return {
     scope: `${absRoot} (${candidatePackages.length} candidate package(s): ${candidatePackages.join(', ')})`,
@@ -765,8 +1060,8 @@ export async function queryGraph(
     data: {
       query: 'impact',
       targetSummary: member ? `${resolved.symbolName}#${member}` : resolved.symbolName,
-      items: page,
-      summaryByPackage: summarizeByPackage(impactItems),
+      items: page.map(buildFromDescriptor),
+      summaryByPackage: summarizeByPackage(impactDescriptors),
     },
     pagination,
     omissions,

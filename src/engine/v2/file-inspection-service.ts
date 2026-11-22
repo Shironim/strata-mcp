@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import ts from 'typescript';
 import { defaultPluginRegistry } from '../../plugins';
-import { getSourcePosition } from '../../utils/source-position';
+import { assertSafeOffset, lineStarts, positionFromLineStarts } from '../../utils/source-position';
 import { canonicalizePath } from '../path-resolver';
 import type {
   DiagnosticRecord,
@@ -11,7 +11,7 @@ import type {
   VerificationTier,
 } from './contracts';
 import { NotFoundError, ValidationError } from './errors';
-import { syncWorkspaceV3 } from './fast-sync';
+import { defaultSyncCoordinator } from './sync-coordinator';
 import { defaultWarmDbPool } from './schema-v3';
 import { defaultSemanticPool, type SemanticPropInfo } from './semantic';
 import {
@@ -41,6 +41,13 @@ export interface OutlineSymbolItem {
   sourceRef: string;
 }
 
+export interface BoundaryBackendTargetHint {
+  endpoint: string;
+  method: string;
+  filePath: string;
+  relPath: string;
+}
+
 export interface OutboundHttpBoundaryItem {
   client: string;
   method: string;
@@ -49,6 +56,7 @@ export interface OutboundHttpBoundaryItem {
   line: number;
   source: 'inline' | 'composable';
   viaSymbol?: string;
+  backendTargetHint?: BoundaryBackendTargetHint;
 }
 
 export interface ImportSummaryItem {
@@ -56,6 +64,12 @@ export interface ImportSummaryItem {
   resolvedFilePath: string | null;
   isTypeOnly: boolean;
   line: number;
+}
+
+export interface VueModelContractItem {
+  name: string;
+  type?: string;
+  required: boolean;
 }
 
 export interface FileInspectionData {
@@ -67,6 +81,8 @@ export interface FileInspectionData {
   outline?: OutlineSymbolItem[];
   contract?: {
     props: SemanticPropInfo[];
+    emits: string[];
+    models: VueModelContractItem[];
     slots: string[];
     renderedComponents: string[];
   };
@@ -78,10 +94,19 @@ export interface FileInspectionData {
 
 const VALID_SECTIONS = new Set<InspectSection>(['outline', 'contract', 'boundaries', 'imports']);
 
-function extractHttpMethodFromCall(rawContent: string, startOffset: number, endOffset: number): string {
+function extractHttpMethodFromCall(
+  rawContent: string,
+  startOffset: number,
+  endOffset: number,
+  payloadMethod?: string
+): string {
+  if (payloadMethod && typeof payloadMethod === 'string') {
+    return payloadMethod.toUpperCase();
+  }
   const snippet = rawContent.slice(startOffset, endOffset);
-  const methodMatch = /\bmethod\s*:\s*['"`](GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)['"`]/i.exec(snippet);
-  if (methodMatch) return methodMatch[1].toUpperCase();
+  const literalMatch = /\bmethod\s*:\s*['"`](GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)['"`]/i.exec(snippet);
+  if (literalMatch) return literalMatch[1].toUpperCase();
+  if (/\bmethod\s*:/i.test(snippet)) return 'DYNAMIC';
   return 'GET';
 }
 
@@ -122,7 +147,7 @@ export async function inspectFile(
 
   const db = request.db ?? defaultWarmDbPool.get(absRoot, { dbFilename: request.dbFilename });
   if (!request.skipSync) {
-    await syncWorkspaceV3(absRoot, { db });
+    await defaultSyncCoordinator.ensureSynced(absRoot, { db });
   }
 
   const fileRow = db
@@ -163,20 +188,27 @@ export async function inspectFile(
   const parsedContract = fileRow.contract_json
     ? (JSON.parse(fileRow.contract_json) as {
         slots?: string[];
+        emits?: string[];
+        models?: VueModelContractItem[];
         omissions?: Array<{ code: string; originalStart: number; originalEnd: number; reason: string }>;
       })
     : {};
 
-  for (const om of parsedContract.omissions ?? []) {
-    const pos = getSourcePosition(rawContent, om.originalStart);
-    omissions.push({
-      code: om.code,
-      filePath: targetFile,
-      line: pos.line,
-      column: pos.column,
-      reason: om.reason,
-      sourceRef: formatSourceRef(targetFile, hash8, om.originalStart, om.originalEnd),
-    });
+  const rawOmissions = parsedContract.omissions ?? [];
+  if (rawOmissions.length > 0) {
+    const rawStarts = lineStarts(rawContent);
+    for (const om of rawOmissions) {
+      assertSafeOffset(rawContent, om.originalStart);
+      const pos = positionFromLineStarts(rawStarts, om.originalStart);
+      omissions.push({
+        code: om.code,
+        filePath: targetFile,
+        line: pos.line,
+        column: pos.column,
+        reason: om.reason,
+        sourceRef: formatSourceRef(targetFile, hash8, om.originalStart, om.originalEnd),
+      });
+    }
   }
 
   const data: FileInspectionData = {
@@ -224,9 +256,13 @@ export async function inspectFile(
 
   if (sections.includes('contract')) {
     let props: SemanticPropInfo[] = [];
+    let emits: string[] = parsedContract.emits ?? [];
     if (resolveTypes) {
       try {
         props = semanticPool.expandComponentProps(absRoot, targetFile);
+        if (emits.length === 0 && fileRow.framework === 'vue') {
+          emits = semanticPool.expandComponentEmits(absRoot, targetFile);
+        }
         verification = 'semantic';
       } catch (err) {
         verification = 'syntax-fallback';
@@ -236,6 +272,12 @@ export async function inspectFile(
           filePath: targetFile,
         });
       }
+    } else {
+      diagnostics.push({
+        code: 'CONTRACT_TYPES_UNRESOLVED',
+        message: 'resolve_types is false; set resolve_types=true to expand TypeScript component prop and emit types.',
+        filePath: targetFile,
+      });
     }
 
     const renderedRows = db
@@ -249,6 +291,8 @@ export async function inspectFile(
 
     data.contract = {
       props,
+      emits,
+      models: parsedContract.models ?? [],
       slots: parsedContract.slots ?? [],
       renderedComponents: renderedRows.map((r) => r.target_name),
     };
@@ -275,12 +319,21 @@ export async function inspectFile(
     }>;
 
     for (const row of inlineRows) {
-      const payload = row.payload_json ? (JSON.parse(row.payload_json) as { client?: string; url?: string }) : {};
-      const method = extractHttpMethodFromCall(rawContent, row.start_offset, row.end_offset);
+      const payload = row.payload_json
+        ? (JSON.parse(row.payload_json) as { client?: string; url?: string; method?: string; isDynamicMethod?: boolean })
+        : {};
+      const method = extractHttpMethodFromCall(rawContent, row.start_offset, row.end_offset, payload.method);
       const url = normalizeHttpUrl(payload.url ?? row.target_name);
       const key = `${method}:${url}:${targetFile}:${row.line_number}`;
       if (seenBoundary.has(key)) continue;
       seenBoundary.add(key);
+      if (method === 'DYNAMIC' || payload.isDynamicMethod) {
+        diagnostics.push({
+          code: 'DYNAMIC_HTTP_METHOD',
+          message: `HTTP method for "${url}" at line ${row.line_number} is determined dynamically at runtime.`,
+          filePath: targetFile,
+        });
+      }
       outboundHttp.push({
         client: payload.client ?? 'fetch',
         method,
@@ -291,7 +344,93 @@ export async function inspectFile(
       });
     }
 
-    // 2. 1-hop semantic tracing through imported OR auto-imported composables/functions
+    // 2. Graph-first 1-hop tracing through imported OR auto-imported composables/functions
+    const graphCoveredCalls = new Set<string>();
+    const calleeRawCache = new Map<string, string>();
+    const getCalleeRaw = (calleePath: string): string => {
+      let cached = calleeRawCache.get(calleePath);
+      if (cached === undefined) {
+        cached = existsSync(calleePath) ? readFileSync(calleePath, 'utf8') : '';
+        calleeRawCache.set(calleePath, cached);
+      }
+      return cached;
+    };
+
+    const graphComposableRows = db
+      .query(
+        `SELECT DISTINCT
+           ce.target_name AS via_symbol,
+           tf.id AS callee_file_id,
+           tf.path AS callee_path,
+           he.target_name AS http_target,
+           he.line_number,
+           he.start_offset,
+           he.end_offset,
+           he.payload_json
+         FROM symbol_edges ce
+         JOIN files tf ON tf.id = COALESCE(
+           ce.target_file_id,
+           (SELECT s.file_id FROM symbols s WHERE s.name = ce.target_name AND s.is_exported = 1 LIMIT 1)
+         )
+         JOIN symbol_edges he ON he.source_file_id = tf.id AND he.edge_kind = 'outbound_http'
+         WHERE ce.source_file_id = ?
+           AND ce.edge_kind IN ('calls', 'reads_state')
+           AND tf.id != ?
+         ORDER BY he.line_number ASC`
+      )
+      .all(fileRow.id, fileRow.id) as Array<{
+      via_symbol: string;
+      callee_file_id: number;
+      callee_path: string;
+      http_target: string;
+      line_number: number;
+      start_offset: number;
+      end_offset: number;
+      payload_json: string | null;
+    }>;
+
+    for (const row of graphComposableRows) {
+      graphCoveredCalls.add(row.via_symbol);
+      const payload = row.payload_json
+        ? (JSON.parse(row.payload_json) as {
+            client?: string;
+            url?: string;
+            method?: string;
+            isDynamicMethod?: boolean;
+          })
+        : {};
+      let method: string;
+      if (payload.method) {
+        method = payload.method.toUpperCase();
+      } else {
+        const calleeRaw = getCalleeRaw(row.callee_path);
+        method = calleeRaw
+          ? extractHttpMethodFromCall(calleeRaw, row.start_offset, row.end_offset)
+          : 'GET';
+      }
+      const url = normalizeHttpUrl(payload.url ?? row.http_target);
+      const key = `${method}:${url}:${row.callee_path}:${row.line_number}`;
+      if (seenBoundary.has(key)) continue;
+      seenBoundary.add(key);
+      if (method === 'DYNAMIC' || payload.isDynamicMethod) {
+        diagnostics.push({
+          code: 'DYNAMIC_HTTP_METHOD',
+          message: `HTTP method for "${url}" via ${row.via_symbol} (${row.callee_path}:${row.line_number}) is determined dynamically at runtime.`,
+          filePath: row.callee_path,
+        });
+      }
+      outboundHttp.push({
+        client: payload.client ?? 'fetch',
+        method,
+        url,
+        filePath: row.callee_path,
+        line: row.line_number,
+        source: 'composable',
+        viaSymbol: row.via_symbol,
+      });
+    }
+
+    // 2b. Semantic fallback only for called identifiers not already covered by SQLite graph edges
     if (resolveTypes) {
       const doc = defaultPluginRegistry.projectFile(targetFile, rawContent, fileRow.content_hash);
       if (doc) {
@@ -307,7 +446,11 @@ export async function inspectFile(
         const collectCalls = (node: ts.Node) => {
           if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)) {
             const name = node.expression.text;
-            if (!visitedNames.has(name) && !['fetch', '$fetch', 'defineProps', 'defineEmits', 'withDefaults'].includes(name)) {
+            if (
+              !visitedNames.has(name) &&
+              !graphCoveredCalls.has(name) &&
+              !['fetch', '$fetch', 'defineProps', 'defineEmits', 'withDefaults'].includes(name)
+            ) {
               const mapped = doc.toOriginalSpan(node.expression.getStart(sf), node.expression.getEnd());
               if (mapped) {
                 visitedNames.add(name);
@@ -349,19 +492,31 @@ export async function inspectFile(
             }>;
 
             if (calleeHttpRows.length === 0) continue;
-            const calleeRaw = existsSync(calleeFileRow.path) ? readFileSync(calleeFileRow.path, 'utf8') : '';
             for (const row of calleeHttpRows) {
               const payload = row.payload_json
-                ? (JSON.parse(row.payload_json) as { client?: string; url?: string })
+                ? (JSON.parse(row.payload_json) as { client?: string; url?: string; method?: string; isDynamicMethod?: boolean })
                 : {};
-              const method = calleeRaw
-                ? extractHttpMethodFromCall(calleeRaw, row.start_offset, row.end_offset)
-                : 'GET';
+              let method: string;
+              if (payload.method) {
+                method = payload.method.toUpperCase();
+              } else {
+                const calleeRaw = getCalleeRaw(calleeFileRow.path);
+                method = calleeRaw
+                  ? extractHttpMethodFromCall(calleeRaw, row.start_offset, row.end_offset)
+                  : 'GET';
+              }
               const url = normalizeHttpUrl(payload.url ?? row.target_name);
               const key = `${method}:${url}:${calleeFileRow.path}:${row.line_number}`;
               if (seenBoundary.has(key)) continue;
               seenBoundary.add(key);
               verification = 'semantic';
+              if (method === 'DYNAMIC' || payload.isDynamicMethod) {
+                diagnostics.push({
+                  code: 'DYNAMIC_HTTP_METHOD',
+                  message: `HTTP method for "${url}" via ${call.name} (${calleeFileRow.path}:${row.line_number}) is determined dynamically at runtime.`,
+                  filePath: calleeFileRow.path,
+                });
+              }
               outboundHttp.push({
                 client: payload.client ?? 'fetch',
                 method,
@@ -374,6 +529,81 @@ export async function inspectFile(
             }
           }
         }
+      }
+    }
+
+    if (outboundHttp.length > 0) {
+      const apiRoutes = db
+        .query(
+          `SELECT r.url_path, r.handlers_json, f.path AS file_path, f.rel_path
+           FROM routes r
+           JOIN files f ON f.id = r.file_id
+           WHERE r.route_type = 'api'`
+        )
+        .all() as Array<{
+        url_path: string;
+        handlers_json: string | null;
+        file_path: string;
+        rel_path: string;
+      }>;
+
+      const matchApiRoute = (rawUrl: string, method: string): BoundaryBackendTargetHint | undefined => {
+        const cleanUrl = rawUrl.split('?')[0]!.replace(/\/+$/, '') || '/';
+        if (!cleanUrl.startsWith('/')) return undefined;
+        const upperMethod = method.toUpperCase();
+
+        const matchesMethod = (handlersJson: string | null): boolean => {
+          if (upperMethod === 'DYNAMIC') return true;
+          if (!handlersJson) return true;
+          const handlers = JSON.parse(handlersJson) as string[];
+          return handlers.length === 0 || handlers.includes('ALL') || handlers.includes(upperMethod);
+        };
+
+        // 1. Exact path match
+        for (const r of apiRoutes) {
+          const normRoute = r.url_path.replace(/\/+$/, '') || '/';
+          if (normRoute === cleanUrl && matchesMethod(r.handlers_json)) {
+            return {
+              endpoint: r.url_path,
+              method: upperMethod,
+              filePath: r.file_path,
+              relPath: r.rel_path,
+            };
+          }
+        }
+
+        // 2. Parameterized Nitro/Next API route match (e.g. /api/users/[id] or /api/docs/[...slug])
+        const urlSegs = cleanUrl.split('/').filter(Boolean);
+        for (const r of apiRoutes) {
+          if (!matchesMethod(r.handlers_json)) continue;
+          const routeSegs = r.url_path.split('/').filter(Boolean);
+          const hasCatchAll = routeSegs.some((s) => s.startsWith('[...'));
+          if (!hasCatchAll && routeSegs.length !== urlSegs.length) continue;
+          let matched = true;
+          for (let i = 0; i < routeSegs.length; i++) {
+            const rs = routeSegs[i]!;
+            if (rs.startsWith('[...')) break;
+            if (rs.startsWith('[')) continue;
+            if (rs !== urlSegs[i]) {
+              matched = false;
+              break;
+            }
+          }
+          if (matched) {
+            return {
+              endpoint: r.url_path,
+              method: upperMethod,
+              filePath: r.file_path,
+              relPath: r.rel_path,
+            };
+          }
+        }
+        return undefined;
+      };
+
+      for (const item of outboundHttp) {
+        const hint = matchApiRoute(item.url, item.method);
+        if (hint) item.backendTargetHint = hint;
       }
     }
 
