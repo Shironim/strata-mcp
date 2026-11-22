@@ -12,4 +12,5 @@ Static AST and TypeScript semantic analysis for Vue, Nuxt, React, Next.js, Svelt
 - **Grouped Summaries**: On large workspaces, inspect \`SUMMARY BY PACKAGE\` first and narrow with \`scope.packages\` or \`cursor\`.
 - **Evidence Transparency**: Check \`VERIFICATION: tier=graph|semantic|syntax-fallback\` and manually verify every item listed under \`OMISSIONS\` (such as dynamic spreads \`v-bind\` / \`{...props}\`).
 - **Default Format**: \`format: "text"\` is compact and token-efficient; pass \`format: "json"\` only when structured JSON is required.
+- **Resources & Prompts**: Workspace snapshots are available at \`strata://apps\`, \`strata://project/overview\`, \`strata://components/index\`, and \`strata://component/{name}\`; workflow playbooks at prompts \`open-apps\`, \`onboard-workspace\`, \`trace-bug\`, and \`safe-refactor\`.
 `.trim();

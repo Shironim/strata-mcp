@@ -71,7 +71,7 @@ export function buildEnvelopeResponse<T>(
 ): ToolCallResponse {
   if (format === 'json') {
     return {
-      content: [{ type: 'text', text: JSON.stringify(env, null, 2) }],
+      content: [{ type: 'text', text: JSON.stringify(env) }],
       structuredContent: env as unknown as Record<string, unknown>,
     };
   }
@@ -145,6 +145,16 @@ export function formatFileInspectionText(env: QueryEnvelope<FileInspectionData>)
     for (const p of data.contract.props) {
       lines.push(`- ${p.name}${p.required ? '' : '?'}: ${p.type}`);
     }
+    if (data.contract.emits && data.contract.emits.length > 0) {
+      lines.push(`EMITS: ${data.contract.emits.join(', ')}`);
+    }
+    if (data.contract.models && data.contract.models.length > 0) {
+      lines.push(
+        `MODELS: ${data.contract.models
+          .map((m) => `${m.name}${m.required ? '' : '?'}${m.type ? `: ${m.type}` : ''}`)
+          .join(', ')}`
+      );
+    }
     if (data.contract.slots.length > 0) {
       lines.push(`SLOTS: ${data.contract.slots.join(', ')}`);
     }
@@ -167,7 +177,8 @@ export function formatFileInspectionText(env: QueryEnvelope<FileInspectionData>)
     lines.push(`OUTBOUND HTTP (${data.boundaries.outboundHttp.length}):`);
     for (const b of data.boundaries.outboundHttp) {
       const via = b.viaSymbol ? ` via ${b.viaSymbol}` : '';
-      lines.push(`- ${b.method} ${b.url} [${b.client}, ${b.source}${via}] @ ${b.filePath}:${b.line}`);
+      const targetHint = b.backendTargetHint ? ` -> [Backend: ${b.backendTargetHint.relPath}]` : '';
+      lines.push(`- ${b.method} ${b.url} [${b.client}, ${b.source}${via}] @ ${b.filePath}:${b.line}${targetHint}`);
     }
   }
 

@@ -1,5 +1,7 @@
 #!/usr/bin/env bun
 import { randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import {
@@ -23,6 +25,7 @@ import { AnalysisSupervisor } from './analysis-supervisor';
 import { STRATA_INSTRUCTIONS } from './instructions';
 import { STRATA_VERSION } from './version';
 import { StrataTelemetry, runWithTelemetryStage } from './engine/telemetry';
+import { defaultSyncCoordinator } from './engine/v2';
 import { enforceResponseLimit } from './engine/context-budget';
 import {
   getLastKnownProjectRoot,
@@ -62,7 +65,7 @@ export function createMcpServer(): Server {
   const runner = new AnalysisSupervisor();
   const server = new Server(
     {
-      name: 'strata-mcp',
+      name: 'strata',
       version: STRATA_VERSION,
     },
     {
@@ -79,24 +82,37 @@ export function createMcpServer(): Server {
   server.setRequestHandler(ListResourceTemplatesRequestSchema, async () =>
     listStrataResourceTemplates()
   );
-  server.setRequestHandler(ReadResourceRequestSchema, async (request) =>
-    readStrataResource(request.params.uri)
-  );
+  server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+    const rootHint = getLastKnownProjectRoot();
+    return await runWithRequestProjectRoot(rootHint, () =>
+      readStrataResource(request.params.uri, rootHint)
+    );
+  });
   server.setRequestHandler(ListPromptsRequestSchema, async () => listStrataPrompts());
   server.setRequestHandler(GetPromptRequestSchema, async (request) =>
     getStrataPrompt(request.params.name, request.params.arguments)
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: TOOLS.map(({ name, description, inputSchema, annotations }) => ({
+    tools: TOOLS.map(({ name, description, inputSchema, annotations, _meta }) => ({
       name,
       description,
       inputSchema,
       annotations,
+      ...(_meta ? { _meta } : {}),
     })),
   }));
 
+  const MAX_SESSION_ROOTS = 64;
   const sessionRoots = new Map<string, string>();
+  const rememberSessionRoot = (sid: string, rootPath: string) => {
+    if (sessionRoots.has(sid)) sessionRoots.delete(sid);
+    sessionRoots.set(sid, rootPath);
+    if (sessionRoots.size > MAX_SESSION_ROOTS) {
+      const oldest = sessionRoots.keys().next().value;
+      if (oldest !== undefined) sessionRoots.delete(oldest);
+    }
+  };
 
   server.setRequestHandler(CallToolRequestSchema, async (request, extra): Promise<any> => {
     const name = request.params.name;
@@ -146,7 +162,9 @@ export function createMcpServer(): Server {
       return publicResponse;
     }
 
-    const wantsStructured = args.format === 'json' || Boolean(args.include_structured);
+    const hasUiResource = Boolean((tool._meta?.ui as { resourceUri?: string } | undefined)?.resourceUri);
+    const wantsStructured =
+      args.format === 'json' || Boolean(args.include_structured) || hasUiResource;
     const progressToken = (request.params as { _meta?: { progressToken?: string | number } } | undefined)
       ?._meta?.progressToken;
     const onProgress =
@@ -176,8 +194,11 @@ export function createMcpServer(): Server {
         if (!response?.isError) {
           const resolvedRoot = explicitRoot ?? response?.projectRoot;
           if (resolvedRoot) {
-            if (sessionId) sessionRoots.set(sessionId, resolvedRoot);
+            if (sessionId) rememberSessionRoot(sessionId, resolvedRoot);
             else setLastKnownProjectRoot(resolvedRoot);
+            if (existsSync(join(resolvedRoot, '.strata', 'graph.db'))) {
+              defaultSyncCoordinator.startWatching(resolvedRoot);
+            }
           }
         }
 
@@ -280,6 +301,7 @@ export async function startMcpServer(): Promise<void> {
   process.on('SIGINT', () => void shutdown());
   process.on('SIGTERM', () => void shutdown());
   await server.connect(transport);
+  defaultSyncCoordinator.warmupInBackground(process.cwd());
 }
 
 if (import.meta.main) {

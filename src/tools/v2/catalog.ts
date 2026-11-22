@@ -10,7 +10,10 @@ export type StrataToolName =
 export type StrataToolSpec = Tool & {
   name: StrataToolName;
   description: string;
+  _meta?: Record<string, unknown>;
 };
+
+export const STRATA_EXPLORER_UI_URI = 'ui://strata/explorer.html';
 
 const READ_ONLY_ANNOTATIONS = {
   readOnlyHint: true,
@@ -19,12 +22,30 @@ const READ_ONLY_ANNOTATIONS = {
   openWorldHint: false,
 } as const;
 
+const MAX_BYTES_PROPERTY = {
+  type: 'integer',
+  minimum: 512,
+  description: 'Optional maximum UTF-8 response byte budget (defaults to 16384). Increase when retrying after BUDGET_RESPONSE_TOO_LARGE.',
+} as const;
+
 export const V2_TOOL_CATALOG: readonly StrataToolSpec[] = [
   {
     name: 'map_workspace',
     description:
-      'Orient in a frontend workspace or monorepo before reading files. Returns package topology, frameworks, routes, file inventory, or static health candidates without file bodies.',
+      'Start here to orient in a frontend workspace or monorepo without reading file bodies. Returns package topology, frameworks, routes, file inventory, or unused component candidates (and opens the Strata Explorer UI when supported).',
     annotations: READ_ONLY_ANNOTATIONS,
+    _meta: {
+      ui: {
+        resourceUri: STRATA_EXPLORER_UI_URI,
+        visibility: ['model', 'app'],
+      },
+      'com.google.antigravity/ui': {
+        entrypoints: [
+          { type: 'aux_pane', title: 'Strata Explorer' },
+          { type: 'global', title: 'Strata' },
+        ],
+      },
+    },
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -37,7 +58,8 @@ export const V2_TOOL_CATALOG: readonly StrataToolSpec[] = [
           type: 'string',
           enum: ['overview', 'packages', 'routes', 'files', 'health'],
           default: 'overview',
-          description: 'Orientation view to render.',
+          description:
+            'View to return: "overview" (packages + totals), "packages" (monorepo topology), "routes" (pages & API routes), "files" (file list), or "health" (unused component candidates).',
         },
         package: {
           type: 'string',
@@ -64,14 +86,18 @@ export const V2_TOOL_CATALOG: readonly StrataToolSpec[] = [
           default: 'text',
           description: 'Output format (compact text by default).',
         },
+        max_bytes: MAX_BYTES_PROPERTY,
       },
     },
   },
   {
     name: 'inspect_file',
     description:
-      'Inspect a frontend file or component outline, TypeChecker-resolved props/slots contract, render boundary, outbound HTTP boundaries, and imports without reading implementation bodies.',
+      'Inspect a file or component outline, TypeChecker-resolved props/emits/slots contract, rendered children, outbound HTTP calls (with backendTargetHint), and imports without reading implementation bodies. Returns symbol_id and source_ref handles.',
     annotations: READ_ONLY_ANNOTATIONS,
+    _meta: {
+      ui: { visibility: ['model', 'app'] },
+    },
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -104,14 +130,18 @@ export const V2_TOOL_CATALOG: readonly StrataToolSpec[] = [
           default: 'text',
           description: 'Output format (compact text by default).',
         },
+        max_bytes: MAX_BYTES_PROPERTY,
       },
     },
   },
   {
     name: 'query_graph',
     description:
-      'Query code relationships and impact across files and monorepo packages: go-to-definition, find-all-references, call hierarchy, component tree, state flow, and refactor impact sites (with dynamic omissions).',
+      'Trace code relationships across files and monorepo packages: definition, references, call_hierarchy, component_tree, state_flow, and refactor impact sites. Check OMISSIONS (e.g. dynamic spreads) for sites requiring manual verification.',
     annotations: READ_ONLY_ANNOTATIONS,
+    _meta: {
+      ui: { visibility: ['model', 'app'] },
+    },
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -187,14 +217,18 @@ export const V2_TOOL_CATALOG: readonly StrataToolSpec[] = [
           default: 'text',
           description: 'Output format (compact text by default).',
         },
+        max_bytes: MAX_BYTES_PROPERTY,
       },
     },
   },
   {
     name: 'read_slice',
     description:
-      'Read a bounded, hash-verified source code slice by source_ref handle, symbol_id, symbol name, SFC block, or explicit line range.',
+      'Read a bounded, hash-verified source slice. Prefer source_ref or symbol_id from inspect_file, query_graph, or search_code; or pass path with symbol, block, or lines.',
     annotations: READ_ONLY_ANNOTATIONS,
+    _meta: {
+      ui: { visibility: ['model', 'app'] },
+    },
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -245,14 +279,18 @@ export const V2_TOOL_CATALOG: readonly StrataToolSpec[] = [
           type: 'string',
           description: 'Optional workspace root directory.',
         },
+        max_bytes: MAX_BYTES_PROPERTY,
       },
     },
   },
   {
     name: 'search_code',
     description:
-      'Discover symbols, component usages, prop/event usages, or scoped literal text across the workspace or a specific monorepo package. Returns symbol_id and source_ref handles.',
+      'Search symbols, component template usages, prop/event usages, or literal text across the workspace or a package. Returns symbol_id and source_ref handles for query_graph and read_slice.',
     annotations: READ_ONLY_ANNOTATIONS,
+    _meta: {
+      ui: { visibility: ['model', 'app'] },
+    },
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -266,7 +304,8 @@ export const V2_TOOL_CATALOG: readonly StrataToolSpec[] = [
           type: 'string',
           enum: ['symbol', 'component_usage', 'prop_usage', 'text'],
           default: 'symbol',
-          description: 'Search mode.',
+          description:
+            'Search mode: "symbol" (declarations), "component_usage" (template renders), "prop_usage" (prop/event bindings), or "text" (literal substring).',
         },
         symbol_kinds: {
           type: 'array',
@@ -302,6 +341,7 @@ export const V2_TOOL_CATALOG: readonly StrataToolSpec[] = [
           default: 'text',
           description: 'Output format (compact text by default).',
         },
+        max_bytes: MAX_BYTES_PROPERTY,
       },
     },
   },

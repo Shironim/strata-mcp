@@ -117,13 +117,10 @@ try {
 
     # 7. Move Executable into Place
     $TargetExe = Join-Path $InstallDir "strata.exe"
-    $TargetMcpExe = Join-Path $InstallDir "strata-mcp.exe"
 
     Copy-Item -Path $TempBinaryPath -Destination $TargetExe -Force
-    Copy-Item -Path $TempBinaryPath -Destination $TargetMcpExe -Force
 
     Write-Success "Installed binary to $TargetExe"
-    Write-Success "Created alias binary $TargetMcpExe"
 
     # 8. Check and Auto-Provision ast-grep.exe
     $AstGrepInstalled = Get-Command ast-grep -ErrorAction SilentlyContinue

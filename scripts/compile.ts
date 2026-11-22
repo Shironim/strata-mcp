@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { buildExplorerHtml } from './build-explorer';
 import { analysisBuildDefines } from '../src/analysis-source-fingerprint';
 
 const targets = [
@@ -52,7 +53,10 @@ const mockConsolidatePlugin = {
 };
 
 const root = resolve(import.meta.dir, '..');
-const define = analysisBuildDefines(root);
+const define = {
+  ...analysisBuildDefines(root),
+  STRATA_EMBEDDED_EXPLORER_HTML: JSON.stringify(await buildExplorerHtml(root)),
+};
 for (const { target, outfile } of targetsToBuild) {
   console.log(`Compiling ${target} -> ${outfile}...`);
   const result = await Bun.build({

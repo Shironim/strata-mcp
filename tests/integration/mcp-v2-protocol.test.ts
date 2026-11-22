@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { createMcpServer } from '../../src/mcp';
+import { ANALYSIS_LIMITS } from '../../src/analysis-supervisor';
 import { defaultSemanticPool, defaultWarmDbPool } from '../../src/engine/v2';
 
 describe('Fase 5: MCP Protocol Integration for 5 Cognitive Tools (0.11.0)', () => {
@@ -107,13 +108,84 @@ describe('Fase 5: MCP Protocol Integration for 5 Cognitive Tools (0.11.0)', () =
       expect(errRes.isError).toBe(true);
       expect((errRes.content as Array<{ text: string }>)[0].text).toContain('WORKSPACE_BOUNDARY_ERROR');
 
-      // 7. Prompts reflect new cognitive playbooks
+      // 7. Prompts reflect new cognitive playbooks (including open-apps)
       const { prompts } = await client.listPrompts();
       expect(prompts.map((p) => p.name)).toEqual([
+        'open-apps',
         'onboard-workspace',
         'trace-bug',
         'safe-refactor',
       ]);
+
+      const appsPrompt = await client.getPrompt({
+        name: 'open-apps',
+        arguments: { workspace_path: workDir },
+      });
+      const promptText = appsPrompt.messages
+        .filter((m) => m.content.type === 'text')
+        .map((m) => (m.content as { type: 'text'; text: string }).text)
+        .join('\n');
+      expect(promptText).toContain('map_workspace');
+      expect(promptText).toContain('Strata Explorer');
+      expect(promptText).toContain('Overview & Health tab');
+
+      // 8. All 5 tools expose max_bytes in schema, and max_bytes can be passed without schema rejection
+      for (const t of tools) {
+        expect((t.inputSchema as { properties?: Record<string, unknown> }).properties?.max_bytes).toBeDefined();
+      }
+      const budgetedInspect = await client.callTool({
+        name: 'inspect_file',
+        arguments: {
+          root: workDir,
+          path: 'packages/ui/src/OrderSummaryCard.vue',
+          sections: ['outline', 'contract'],
+          format: 'json',
+          max_bytes: 32768,
+        },
+      });
+      expect(budgetedInspect.isError).toBeFalsy();
+      expect(ANALYSIS_LIMITS.queued).toBeGreaterThanOrEqual(16);
+
+      // 9. Hybrid MCP App UI: map_workspace exposes ui://strata/explorer.html & entrypoints while headless tools stay lean
+      const mapToolSpec = tools.find((t) => t.name === 'map_workspace') as any;
+      expect(mapToolSpec?._meta?.ui?.resourceUri).toBe('ui://strata/explorer.html');
+      expect(mapToolSpec?._meta?.['com.google.antigravity/ui']?.entrypoints).toEqual([
+        { type: 'aux_pane', title: 'Strata Explorer' },
+        { type: 'global', title: 'Strata' },
+      ]);
+
+      const { resources } = await client.listResources();
+      const uiResMeta = resources.find((r) => r.uri === 'ui://strata/explorer.html');
+      expect(uiResMeta?.mimeType).toBe('text/html;profile=mcp-app');
+      expect(resources.some((r) => r.uri === 'strata://apps')).toBe(true);
+
+      const appsRes = await client.readResource({
+        uri: `strata://apps?workspace=${encodeURIComponent(workDir)}`,
+      });
+      const appsJson = JSON.parse((appsRes.contents[0] as { text?: string })?.text ?? '{}');
+      expect(appsJson.ui_resource).toBe('ui://strata/explorer.html');
+      expect(appsJson.open_via_tools).toEqual(['map_workspace']);
+      expect(Array.isArray(appsJson.actionable_actions)).toBe(true);
+
+      const uiHtmlRes = await client.readResource({ uri: 'ui://strata/explorer.html' });
+      const htmlContent = (uiHtmlRes.contents[0] as { text?: string; mimeType?: string })?.text ?? '';
+      expect(uiHtmlRes.contents[0]?.mimeType).toBe('text/html;profile=mcp-app');
+      expect(htmlContent).toContain('<!doctype html>');
+      expect(htmlContent).toContain('Strata Explorer');
+
+      const mapDefaultRes = await client.callTool({
+        name: 'map_workspace',
+        arguments: { root: workDir },
+      });
+      expect(mapDefaultRes.isError).toBeFalsy();
+      expect((mapDefaultRes as any).structuredContent?.data?.view).toBe('overview');
+
+      const inspectTextRes = await client.callTool({
+        name: 'inspect_file',
+        arguments: { root: workDir, path: 'packages/ui/src/OrderSummaryCard.vue', sections: ['contract'] },
+      });
+      expect(inspectTextRes.isError).toBeFalsy();
+      expect((inspectTextRes as any).structuredContent).toBeUndefined();
     } finally {
       await client.close();
       await server.close();

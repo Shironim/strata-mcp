@@ -145,13 +145,11 @@ if [ -f "${TMP_DIR}/checksums.txt" ] && [ -s "${TMP_DIR}/checksums.txt" ]; then
   fi
 fi
 
-# 8. Install Binary and Symlinks
+# 8. Install Binary
 chmod +x "${TMP_DIR}/${BINARY_NAME}"
 mv -f "${TMP_DIR}/${BINARY_NAME}" "${INSTALL_DIR}/strata"
-ln -sf "${INSTALL_DIR}/strata" "${INSTALL_DIR}/strata-mcp"
 
 print_success "Installed strata binary to ${INSTALL_DIR}/strata"
-print_success "Created symlink ${INSTALL_DIR}/strata-mcp"
 
 # 9. Verify or Assist with ast-grep Dependency
 if ! command -v ast-grep >/dev/null 2>&1 && ! command -v sg >/dev/null 2>&1; then

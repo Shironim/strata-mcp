@@ -288,12 +288,13 @@ export function measureResponseBytes(result: ToolCallResponse): number {
 /** Small, actionable rejection when mandatory evidence or one atomic item cannot fit. */
 function budgetRejection(code: string, maxBytes: number, requiredBytes: number, original?: ToolCallResponse): ToolCallResponse {
   const originalCode = original?.isError ? original.content[0]?.text.match(/\b[A-Z][A-Z_]+(?=:)/)?.[0]?.slice(0, 48) : undefined;
+  const retryMaxBytes = Math.min(Number.MAX_SAFE_INTEGER, requiredBytes + 128);
   const result: ToolCallResponse = {
     isError: true,
-    content: [{ type: 'text', text: `${code}: increase max_bytes or narrow scope; no complete analysis payload fits.${originalCode ? ` Original: ${originalCode}.` : ''}` }],
+    content: [{ type: 'text', text: `${code}: increase max_bytes (e.g. max_bytes=${retryMaxBytes}) or narrow scope; no complete analysis payload fits.${originalCode ? ` Original: ${originalCode}.` : ''}` }],
     structuredContent: {
-      decision: { status: (original?.structuredContent?.retrieval as any)?.freshness === 'stale' ? 'stale' : 'unknown', emptyOutcome: 'analysis-failed', next: [{ action: 'increase-budget-or-narrow-scope' }] },
-      budget: { maxBytes, requiredBytes, retryMaxBytes: Math.min(Number.MAX_SAFE_INTEGER, requiredBytes + 128), responseBytes: 0 },
+      decision: { status: (original?.structuredContent?.retrieval as any)?.freshness === 'stale' ? 'stale' : 'unknown', emptyOutcome: 'analysis-failed', next: [{ action: 'increase-budget-or-narrow-scope', arg: 'max_bytes', value: retryMaxBytes }] },
+      budget: { maxBytes, requiredBytes, retryMaxBytes, retryArg: 'max_bytes', responseBytes: 0 },
     },
   };
   const budget = result.structuredContent!.budget as { responseBytes: number };
