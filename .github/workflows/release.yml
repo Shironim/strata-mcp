@@ -22,6 +22,14 @@ jobs:
         with:
           bun-version: latest
 
+      - name: Verify Release Tag
+        run: |
+          expected_tag="v$(bun -p "require('./package.json').version")"
+          if [[ "$GITHUB_REF" != "refs/tags/$expected_tag" ]]; then
+            echo "::error::Run this workflow on tag $expected_tag. Received $GITHUB_REF."
+            exit 1
+          fi
+
       - name: Install Dependencies
         run: bun install --frozen-lockfile
 
@@ -33,6 +41,9 @@ jobs:
 
       - name: Compile Standalone Binaries
         run: bun run scripts/compile.ts
+
+      - name: Smoke Test Linux x64 Release Binary
+        run: bun scripts/smoke-release.ts "$GITHUB_WORKSPACE/dist/strata-linux-x64"
 
       - name: Generate Checksums
         working-directory: dist
