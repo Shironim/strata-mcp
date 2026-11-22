@@ -44,6 +44,12 @@ describe('CLI 0.11.0 commands', () => {
       expect(syncRes.code).toBe(0);
       expect(JSON.parse(syncRes.stdout).packagesSynced).toBe(4);
 
+      const syncUiRes = await runCli(['sync', workDir]);
+      expect(syncUiRes.code).toBe(0);
+      expect(syncUiRes.stdout).toContain('strata sync v');
+      expect(syncUiRes.stdout).toContain('Scanning files');
+      expect(syncUiRes.stdout).toContain('Sync complete.');
+
       const mapRes = await runCli(['map', workDir, '--view', 'overview']);
       expect(mapRes.code).toBe(0);
       expect(mapRes.stdout).toContain('4 package(s)');

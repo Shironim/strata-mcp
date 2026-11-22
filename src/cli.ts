@@ -3,7 +3,6 @@ import { resolve } from 'node:path';
 import {
   defaultSemanticPool,
   defaultWarmDbPool,
-  syncWorkspaceV3,
 } from './engine/v2';
 import {
   inspectFileTool,
@@ -13,6 +12,7 @@ import {
   searchCodeTool,
 } from './tools';
 import { handleStrataInit } from './cli/commands/init';
+import { handleStrataSync } from './cli/commands/sync';
 import { parseSafePositiveInt, parseStringList } from './engine/path-resolver';
 import { STRATA_VERSION } from './version';
 import { StrataTelemetry, formatSummaryAsText } from './engine/telemetry';
@@ -74,17 +74,12 @@ export async function main(argv: string[] = process.argv.slice(2)) {
 
       case 'sync': {
         const targetDir = resolve(parseStringFlag(flags.path ?? flags.p) ?? positional[1] ?? process.cwd());
-        const stats = await syncWorkspaceV3(targetDir, {
+        await handleStrataSync({
+          cwd: targetDir,
           packageKey: parseStringFlag(flags.package),
           force: Boolean(flags.force || flags.f),
+          json: isJson,
         });
-        if (isJson) {
-          console.log(JSON.stringify(stats, null, 2));
-        } else {
-          console.log(
-            `Synced ${stats.packagesSynced} package(s) [${stats.mode}] in ${stats.durationMs}ms — added=${stats.added}, modified=${stats.modified}, unchanged=${stats.unchanged}, deleted=${stats.deleted}, symbols=${stats.symbolsIndexed}, edges=${stats.edgesIndexed}`
-          );
-        }
         break;
       }
 

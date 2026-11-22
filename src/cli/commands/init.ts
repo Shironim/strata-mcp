@@ -3,10 +3,16 @@ import { existsSync, promises as fs } from 'node:fs';
 import { extname, join, resolve } from 'node:path';
 import * as readline from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
-import { collectFiles } from '../../engine/collector';
+import { iterateFiles } from '../../engine/collector';
 import { defaultWarmDbPool, syncWorkspaceV3 } from '../../engine/v2';
+import { StrataTelemetry } from '../../engine/telemetry';
 import { setupHarnessConfigs, setupHarnessArtifacts, type AgentHarness } from '../mcp-configs';
 import { STRATA_VERSION } from '../../version';
+import {
+  classifySyncError,
+  createSyncProgressReporter,
+  formatSyncDuration,
+} from '../ui/sync-progress';
 
 export interface StrataInitOptions {
   cwd?: string;
@@ -106,8 +112,7 @@ export async function detectProjectProfile(projectRoot: string): Promise<Detecte
   let hasUiFiles = false;
   let hasScriptFiles = false;
   try {
-    const files = await collectFiles(projectRoot);
-    for (const file of files) {
+    for await (const file of iterateFiles(projectRoot)) {
       const ext = extname(file).toLowerCase();
       if (UI_SOURCE_EXTENSIONS.has(ext)) {
         hasUiFiles = true;
@@ -348,28 +353,27 @@ export async function handleStrataInit(options: StrataInitOptions = {}): Promise
   console.log(`${cyan}│${reset}`);
   console.log(`${cyan}◇${reset}  ${profile.isUiProject ? 'Indexing frontend components:' : 'Indexing workspace source files:'}`);
   try {
-    const stats = await syncWorkspaceV3(cwd, { force: true });
+    const { onProgress, stageDurationsMs } = createSyncProgressReporter();
+
+    const stats = await syncWorkspaceV3(cwd, { force: true, onProgress });
     defaultWarmDbPool.close(cwd);
     const totalFiles = stats.added + stats.modified + stats.unchanged;
-    console.log(`${cyan}│${reset}  ${green}✔${reset} Indexed ${totalFiles} files (${stats.symbolsIndexed} symbols, ${stats.packagesSynced} package(s)) into .strata/graph.db in ${stats.durationMs}ms`);
+    StrataTelemetry.recordSync(cwd, {
+      source: 'strata_init',
+      mode: stats.mode,
+      files: totalFiles,
+      symbols: stats.symbolsIndexed,
+      edges: stats.edgesIndexed,
+      packages: stats.packagesSynced,
+      durationMs: stats.durationMs,
+      workersUsed: stats.workersUsed,
+      stages: stageDurationsMs,
+    });
+    const durationLabel = formatSyncDuration(stats.durationMs);
+    console.log(`${cyan}│${reset}`);
+    console.log(`${cyan}│${reset}  ${green}✔${reset} Indexed ${totalFiles.toLocaleString()} files (${stats.symbolsIndexed.toLocaleString()} symbols, ${stats.edgesIndexed.toLocaleString()} edges, ${stats.packagesSynced} package(s)) into .strata/graph.db in ${durationLabel}`);
   } catch (err: unknown) {
-    const rawMessage = err instanceof Error ? err.message : String(err);
-    let failurePhase = 'AST Component Indexing';
-    let recoveryInstruction = "Inspect error trace, verify component syntax, then run 'strata sync' to rebuild graph cache.";
-
-    if (rawMessage.startsWith('INDEX_SCHEMA_TOO_NEW:')) {
-      failurePhase = 'Index Compatibility';
-      recoveryInstruction = "Use a Strata build that supports the existing SQLite index schema.";
-    } else if (rawMessage.includes('database') || rawMessage.includes('SQLite') || rawMessage.includes('locked') || rawMessage.includes('busy')) {
-      failurePhase = 'Database Access';
-      recoveryInstruction = "Ensure no other process is locking '.strata/graph.db', then run 'strata sync'.";
-    } else if (rawMessage.includes('parse') || rawMessage.includes('SyntaxError')) {
-      failurePhase = 'Component Parser';
-      recoveryInstruction = "Check invalid syntax in frontend templates, then run 'strata sync'.";
-    } else if (rawMessage.includes('EACCES') || rawMessage.includes('permission')) {
-      failurePhase = 'Filesystem Permissions';
-      recoveryInstruction = "Check read/write permissions for '.strata/' and project root, then re-run 'strata init'.";
-    }
+    const { failurePhase, recoveryInstruction, rawMessage } = classifySyncError(err);
 
     console.error(`${cyan}│${reset}`);
     console.error(`${cyan}│${reset}  \x1b[1;31m✕ Initial component indexing failed (${failurePhase})\x1b[0m`);
