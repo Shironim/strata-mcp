@@ -48,21 +48,21 @@ using that context. Successful calls can update the remembered root. The
 session ID is a tool argument and the root map lives in that server instance.
 SQLite data persists separately across process restarts.
 
-- **Concurrency and limits (`AnalysisSupervisor`).** One tool handler runs at a time in the server process, with up to four waiting requests by default. The 2 MiB limit applies to the serialized job (name, normalized arguments, and root hint). The 120-second timer starts when execution begins. Calls beyond queue capacity receive `SERVER_BUSY`. The defaults can be overridden when constructing a supervisor.
-- **Cancellation & shutdown:** Timeout or cancellation rejects the client response and aborts the request signal while retaining the execution slot until handler and database cleanup settle. Queued cancellations remove the request; shutdown rejects queued work, aborts active work, and waits for cleanup. Parallel audit/pool work settles all started siblings before returning a failure.
-- **Cooperative abort scope:** Source reads, sync checkpoints, and in-process scans cooperate with cancellation. Cancellation cannot preempt synchronous JavaScript or enforce a hard process memory limit. No separate analysis worker is launched.
-- **Progress notifications (`_meta.progressToken`).** If a client supplies a progress token, the dispatcher forwards updates emitted by the operation through `reportAnalysisProgress`. Current emitters include workspace sync, graph traversal, and selected search branches.
-- **Per-request syntax cache:** Retains at most 32 ASTs and at most 2 MiB of source text (UTF-16 accounting), keyed by filename, script kind, and exact source hash, and is discarded after the request. AST memory overhead is additional (not a heap/RSS limit), and source/dependency freshness checks still read disk.
+- **Concurrency and limits (`AnalysisSupervisor` in `src/analysis-supervisor.ts`).**
+  - **Fast Read-Only Lane (`maxConcurrentFast: 4`)**: Jobs classified by `isFastReadOnlyJob(name, args)`—`map_workspace`, `read_slice`, `search_code`, `inspect_file` with `resolve_types: false`, and `query_graph` with `query` in `call_hierarchy | component_tree | state_flow`—run up to **4 jobs concurrently** when no exclusive job is active, preventing head-of-line blocking behind cold TypeScript `TypeChecker` initialization.
+  - **Exclusive Semantic Serialization (`C = 1`)**: Jobs that invoke `SemanticProjectPool` (`inspect_file` with default `resolve_types: true`, and `query_graph` for `definition`, `references`, or `impact`) wait for active fast jobs to drain and execute exclusively (`activeExclusive = true`) so TypeScript `LanguageService` memory stays bounded within the 512 MB soft cap.
+  - **Per-Request Root & Signal Isolation**: Each active job executes inside `runWithRequestProjectRoot(effectiveRoot, ...)` (`AsyncLocalStorage` in `src/engine/path-resolver.ts`) so concurrent jobs across different workspaces never overwrite each other's `lastKnownProjectRoot`. Up to 16 requests can wait in the queue (`queued: 16`); serialized requests larger than 2 MiB (`requestBytes`) are rejected with `REQUEST_TOO_LARGE`, and each executing job has a 120-second timeout (`timeoutMs: 120000`).
+- **Cancellation & shutdown:** Each running job owns its own `AbortController` in `activeControllers`. Timeout or client cancellation rejects the caller response and aborts that job's signal while keeping its execution slot reserved until handler cleanup settles. Queued cancellations remove the request from the queue; `close()` aborts all active controllers, rejects queued jobs, waits for all active fast and exclusive slots to drain, and disposes `defaultSyncCoordinator`, `defaultSemanticPool`, and `defaultWarmDbPool`.
+- **Cooperative abort scope:** Source reads, sync checkpoints, and in-process scans cooperate with `AbortSignal`.
+- **Progress notifications (`_meta.progressToken`).** When a client supplies a progress token, the dispatcher forwards stage updates emitted through `reportAnalysisProgress`.
+- **Warm pools & virtual file cache:** `WarmDatabasePool` keeps SQLite connections open in WAL mode across requests; `SemanticProjectPool` caches up to 3 active `ts.LanguageService` projects (LRU) with `VirtualFileRegistry` caching projected SFC virtual TSX documents and `lineStarts` per file content hash.
 
-On completion the supervisor closes registered database connections. The
-dispatcher applies the [final response budget](retrieval-evidence-contract.md)
-and records [tool telemetry](tool-call-logging.md). Shutdown can start on
-`SIGINT`, `SIGTERM`, or stream or connection closure. The shutdown path waits
-for active analysis cleanup before closing the server and exiting.
+On completion the dispatcher applies the [final response budget](retrieval-evidence-contract.md) and records [tool telemetry](tool-call-logging.md). Shutdown starts on `SIGINT`, `SIGTERM`, or stdio stream closure and waits for active analysis cleanup before exiting.
 
 ## Verification
 
 - `tests/core/tier1-v3-storage-sync.test.ts`: incremental sync and SQLite Schema v3 preflight invariants.
 - `tests/core/v2-query-services.test.ts`: v2 workspace, inspection, graph, slice, and search service behavior.
+- `tests/core/scalability-optimizations.test.ts`: `AnalysisSupervisor` fast read-only concurrency, single-SQL `impact` pagination, `propUsage` SQL pre-filtering, and 1-hop graph HTTP boundary tracing.
 - `tests/cli/cli-v2.test.ts`: CLI v2 command dispatch and `init` artifact generation.
 - `tests/integration/mcp-v2-protocol.test.ts`: stdio JSON-RPC handshake, `_meta.progressToken` notifications, and text-mode `structuredContent` omission.

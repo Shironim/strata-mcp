@@ -29,7 +29,8 @@ Local logging contract for the five MCP tools (`map_workspace`, `inspect_file`, 
 - Logger uses synchronous I/O; no shutdown flush is required. Writes do not include an fsync durability guarantee or coordinate rotation across processes on the same root.
 - Serialization errors, synchronous stderr writes, and filesystem issues never fail a tool response. If stderr fails synchronously, the file sink is still attempted. Logging is best-effort: events may drop during I/O failures or process termination.
 - The `strata init` scaffolding writes `.strata/` to `.gitignore` and `*` to `.strata/.gitignore`; no scaffold modifications required.
-- Direct CLI/library function calls and SDK-rejected requests prior to dispatcher entry are not captured. The `strata stats` summary inspects the active log without merging `.1`.
+- Direct CLI/library function calls and SDK-rejected requests prior to dispatcher entry are not captured, except `strata init` index sync telemetry recorded via `StrataTelemetry.recordSync(...)` (`event: "index_sync_completed"`, containing `source`, `mode`, `duration_ms`, `workers_used`, `files`, `symbols`, `edges`, `packages`, and per-stage `stages_ms`). Per-stage timings are written only to `.strata/strata.log` (not printed to terminal stdout).
+- The `strata stats` summary (`StrataTelemetry.getSummary`) filters strictly to `tool_call_completed` and `tool_call_failed` events (so `index_sync_completed` entries never skew tool latency/error metrics) and inspects the active log without merging `.1`.
 
 ## Monitoring
 
@@ -38,6 +39,7 @@ tail -f .strata/strata.log
 jq 'select(.bloat_alert == true) | {tool, action, metrics}' .strata/strata.log
 jq 'select(.duration_ms >= 250) | {tool, action, duration_ms}' .strata/strata.log
 jq 'select(.status == "error") | {tool, error}' .strata/strata.log
+jq 'select(.event == "index_sync_completed") | {source, mode, duration_ms, workers_used, stages_ms}' .strata/strata.log
 strata stats . --json
 ```
 

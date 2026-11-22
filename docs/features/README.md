@@ -18,9 +18,9 @@ Strata MCP is a local static and semantic code analysis server and CLI for Vue, 
 
 ## Architecture & Platform Docs
 
-- **[storage-and-monorepo-sync.md](./storage-and-monorepo-sync.md)** — SQLite Schema v3 (`packages`, `files`, `symbols`, `symbol_edges`, `routes`, `symbols_fts`), warm connection pool, and incremental sync.
+- **[storage-and-monorepo-sync.md](./storage-and-monorepo-sync.md)** — SQLite Schema v3 (`packages`, `files`, `symbols`, `symbol_edges`, `routes`, `symbols_fts`), scoped cross-file graph linker, warm connection pool, and incremental sync.
 - **[semantic-engine-and-plugins.md](./semantic-engine-and-plugins.md)** — `FrameworkPlugin` contract, Virtual TSX projection + bidirectional offset mapping, and `SemanticProjectPool` LRU lifecycle.
-- **[resources-and-prompts.md](./resources-and-prompts.md)** — MCP Resources and workflow playbooks (`onboard-workspace`, `trace-bug`, `safe-refactor`).
-- **[retrieval-evidence-contract.md](./retrieval-evidence-contract.md)** — Evidence transparency (`tier`, `omissions`, `diagnostics`) and response budgets.
-- **[tool-call-logging.md](./tool-call-logging.md)** — Structured telemetry and local audit logs.
-- **[lifecycle-hooks.md](./lifecycle-hooks.md)** — Client lifecycle hook integration.
+- **[resources-and-prompts.md](./resources-and-prompts.md)** — Interactive Strata Explorer MCP App (`ui://strata/explorer.html`), MCP Resources (`strata://project/overview`, `strata://components/index`, `strata://apps`, `strata://component/{name}`), and workflow playbooks (`open-apps`, `onboard-workspace`, `trace-bug`, `safe-refactor`).
+- **[retrieval-evidence-contract.md](./retrieval-evidence-contract.md)** — `QueryEnvelope` contract (`verification`, `pagination`, `omissions`, `diagnostics`), hash-verified `sourceRef` handles, and `max_bytes` response budgets.
+- **[tool-call-logging.md](./tool-call-logging.md)** — Structured JSONL telemetry (`.strata/strata.log`) and `strata stats`.
+- **[lifecycle-hooks.md](./lifecycle-hooks.md)** — Client post-write hooks and `AnalysisSupervisor` fast-lane concurrency.

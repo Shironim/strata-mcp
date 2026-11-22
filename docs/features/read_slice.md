@@ -15,6 +15,7 @@ Read a bounded, hash-verified source code slice after orienting with `map_worksp
 | `context_lines` | `integer` (`0..20`) | `2` | Extra surrounding context lines. |
 | `max_lines` | `integer` (`1..400`) | `80` | Maximum lines returned in one call (emits `SLICE_TRUNCATED` diagnostic if exceeded). |
 | `root` | `string` | session root | Workspace root directory. |
+| `max_bytes` | `integer` (`>= 512`) | `16384` | Maximum UTF-8 response byte budget. Increase when retrying after `BUDGET_RESPONSE_TOO_LARGE`. |
 
 ## Safety & Freshness Guarantees
 

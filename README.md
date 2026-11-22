@@ -16,20 +16,20 @@ Strata is a local static and semantic analysis MCP server and CLI for Vue, Nuxt,
 
 Strata exposes **5 MCP tools** over the Model Context Protocol (MCP):
 
-- **Workspace Mapping (`map_workspace`):** Maps project packages, frameworks, routes, file inventories, and unused candidates without reading file bodies.
-- **File Outline & Contract (`inspect_file`):** Extracts body-free symbol outlines, type-resolved props, emits, slots, render boundaries, and outbound HTTP calls.
+- **Workspace Mapping (`map_workspace`):** Maps project packages, frameworks, routes, file inventories, and unused component candidates without reading file bodies (and opens the interactive **Strata Explorer** MCP App when supported).
+- **File Outline & Contract (`inspect_file`):** Extracts body-free symbol outlines, type-resolved props, emits, models, slots, render boundaries, and inline + 1-hop composable outbound HTTP calls (with `backendTargetHint`).
 - **Unified Graph & Impact (`query_graph`):** Traces `definition`, `references`, `call_hierarchy`, `component_tree`, `state_flow`, and `impact` across files and packages, grouping results by package and flagging dynamic omissions.
 - **Selective Source Reading (`read_slice`):** Reads bounded, SHA-256 hash-verified slices by `source_ref`, `symbol_id`, SFC block, or line range with stale-file and workspace-boundary guards.
-- **In-Process Code Discovery (`search_code`):** Searches workspace symbols, `component_usage`, `prop_usage`, and scoped literal text without spawning external processes.
+- **In-Process Code Discovery (`search_code`):** Searches workspace symbols (FTS5), `component_usage`, `prop_usage`, and scoped literal text without spawning external processes.
 
 ### Supported Frameworks
 
 | Framework | Extensions | Capabilities |
 |---|---|---|
-| **Vue.js (2 & 3)** | `.vue`, `.ts`, `.js` | Props, emits, slots, v-model, Composition & Options API, Pinia stores |
-| **Nuxt.js** | `.vue`, `.ts`, `.js` | File-system routing (`pages/`), layouts (`layouts/`), server routes (`server/api/`), composables (`$fetch`, `useAsyncData`) |
-| **React.js** | `.tsx`, `.jsx`, `.ts`, `.js` | Function & class components, JSX elements, React hooks (`useState`, `useReducer`), Context & Zustand stores |
-| **Next.js** | `.tsx`, `.jsx`, `.ts`, `.js` | App Router (`app/**`), Pages Router (`pages/**`), Server & Client components (`'use client'`), API routes |
+| **Vue.js (2 & 3)** | `.vue`, `.ts`, `.js` | Props, emits, models (`defineModel`), slots, Composition & Options API, `provide`/`inject`, Vue Router, Pinia stores |
+| **Nuxt.js** | `.vue`, `.ts`, `.js` | File-system routing (`pages/`, `app/pages/`, `layers/**/pages/`), layouts, server routes (`server/api/`), auto-imported components (`Lazy*`) & composables (`use*`, `useState`, `$fetch`, `useFetch`, `useAsyncData`) |
+| **React.js** | `.tsx`, `.jsx`, `.ts`, `.js` | Function & class components, JSX elements, hooks (`useState`, `useReducer`), Context (`createContext`/`useContext`), `useSWR`, `useQuery`, Zustand stores |
+| **Next.js** | `.tsx`, `.jsx`, `.ts`, `.js` | App Router (`app/**`), Pages Router (`pages/**`), Server & Client components (`'use client'`), API routes (`app/api/**`) |
 | **Astro** | `.astro`, `.ts`, `.js` | Islands architecture (`client:*` directives), component imports, frontmatter props & slots |
 | **Svelte (4 & 5)** | `.svelte`, `.ts`, `.js` | Svelte 5 Runes (`$state`, `$derived`, `$props`, `$bindable`), Svelte 4 reactive statements (`$:`), SvelteKit routes (`+page.svelte`, `+server.ts`) |
 
@@ -59,7 +59,7 @@ irm https://raw.githubusercontent.com/Shironim/strata-mcp/master/scripts/install
 bun add -g @dimassetoid/strata-mcp
 ```
 
-*(You can also run commands directly with `bunx @dimassetoid/strata-mcp <command>`)*
+*(You can also run commands directly with `bunx --package @dimassetoid/strata-mcp strata <command>`)*
 
 ---
 
@@ -109,9 +109,12 @@ strata init --harness agents        # Universal Agent Harness (.agents/)
 ## Documentation
 
 - [Feature Contracts & Limits](docs/features/README.md) — Tool specifications, index requirements, and static-analysis boundaries
-- [Retrieval Evidence & Response Budgets](docs/features/retrieval-evidence-contract.md) — Formats, `max_bytes` pagination, summary mode, and evidence metadata
-- [Storage & Monorepo Sync](docs/features/storage-and-monorepo-sync.md) — SQLite WAL cache (`.strata/graph.db`) and incremental sync
+- [Query Envelope, Evidence & Response Budgets](docs/features/retrieval-evidence-contract.md) — `QueryEnvelope` structure, `verification` tiers, `cursor` pagination, `max_bytes` budgets, and hash-bound `sourceRef` handles
+- [Storage, Graph Linker & Monorepo Sync](docs/features/storage-and-monorepo-sync.md) — SQLite WAL cache (`.strata/graph.db`), scoped incremental graph linking, and watcher-backed fast sync
 - [Semantic Engine & Plugins](docs/features/semantic-engine-and-plugins.md) — Framework plugins, Virtual TSX projection, and TypeScript Language Service lifecycle
+- [MCP Resources, Explorer App & Workflow Prompts](docs/features/resources-and-prompts.md) — Interactive Strata Explorer UI (`ui://strata/explorer.html`), read-only resources, and guided playbooks
+- [Lifecycle Hooks & Concurrency Supervisor](docs/features/lifecycle-hooks.md) — Post-write sync hooks, fast read-only concurrency lane, and cancellation guarantees
+- [Tool Call Telemetry & Logging](docs/features/tool-call-logging.md) — Local `.strata/strata.log` JSONL metrics, rotation, and `strata stats`
 
 ## Development
 
