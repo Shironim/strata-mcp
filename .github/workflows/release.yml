@@ -36,6 +36,9 @@ jobs:
       - name: Type Check
         run: bun run typecheck
 
+      - name: Build Package and Explorer
+        run: bun run build
+
       - name: Run Test Suite
         run: bun test
 

@@ -124,9 +124,9 @@ git clone https://github.com/Shironim/strata-mcp.git
 cd strata-mcp
 bun install
 
-# Run test suite & build
-bun test
+# Build the Explorer asset used by the MCP integration test
 bun run build
+bun test
 ```
 
 ---
