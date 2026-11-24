@@ -1,6 +1,6 @@
 {
   "name": "@dimassetoid/strata-mcp",
-  "version": "0.12.0",
+  "version": "0.12.1",
   "description": "Static and semantic code analysis MCP server and CLI for AI coding agents across Vue, Nuxt, React, Next.js, Svelte, and Astro codebases.",
   "type": "module",
   "main": "dist/index.js",
