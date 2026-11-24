@@ -95,103 +95,244 @@ ${renderPlaybooksForSkill()}
 export const STRATA_INSPECT_SKILL = USE_STRATA_SKILL_TEMPLATE;
 
 export const STRATA_POST_WRITE_HOOK = `#!/usr/bin/env bash
+# managed-marker: strata-post-write-v2
 # Strata-MCP Post-Write Delta Sync Hook
-# Automatically updates SQLite graph cache when frontend files are modified.
+# Automatically updates SQLite graph cache when frontend / TS / JS files are modified.
 
-set -e
+set -u
 
-FILE_PATH="$1"
-if [ -z "$FILE_PATH" ] && [ -n "$CLAUDE_FILE_PATH" ]; then
-  FILE_PATH="$CLAUDE_FILE_PATH"
+HARNESS_MODE=""
+case "\${1:-}" in
+  --antigravity|--claude|--codex|--opencode)
+    HARNESS_MODE="\${1#--}"
+    shift
+    ;;
+esac
+
+finish_ok() {
+  if [ "$HARNESS_MODE" = "antigravity" ]; then
+    printf '{}\\n'
+  fi
+  exit 0
+}
+
+# Determine workspace root from the hook script location (<harness>/hooks/..)
+HOOK_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
+WORKSPACE_ROOT="\${STRATA_WORKSPACE_ROOT:-$(CDPATH= cd -- "$HOOK_DIR/../.." && pwd -P)}"
+
+# Fail open if Strata is not initialized in this workspace
+if [ ! -d "$WORKSPACE_ROOT/.strata" ]; then
+  finish_ok
 fi
 
-if [ -z "$FILE_PATH" ]; then
-  if [ ! -t 0 ]; then
-    STDIN_DATA="$(cat)"
-    if [ -n "$STDIN_DATA" ]; then
-      if command -v node >/dev/null 2>&1; then
-        FILE_PATH="$(printf '%s' "$STDIN_DATA" | node -e '
+FILE_PATHS=""
+if [ -n "\${1:-}" ]; then
+  FILE_PATHS="$1"
+elif [ -n "\${CLAUDE_FILE_PATH:-}" ]; then
+  FILE_PATHS="$CLAUDE_FILE_PATH"
+fi
+
+if [ -z "$FILE_PATHS" ] && [ ! -t 0 ]; then
+  STDIN_DATA="$(cat 2>/dev/null || true)"
+  if [ -n "$STDIN_DATA" ]; then
+    if command -v node >/dev/null 2>&1; then
+      FILE_PATHS="$(printf '%s' "$STDIN_DATA" | node -e '
 let raw = "";
 process.stdin.on("data", c => raw += c);
 process.stdin.on("end", () => {
   try {
     const data = JSON.parse(raw);
-    const p = data?.tool_input?.file_path || data?.tool_input?.path || data?.file_path || data?.path || "";
-    if (p) process.stdout.write(String(p));
+    const paths = [];
+    const push = (v) => { if (typeof v === "string" && v.trim()) paths.push(v.trim()); };
+    const args = data?.toolCall?.args;
+    if (args && typeof args === "object") {
+      push(args.TargetFile);
+      push(args.Path);
+      push(args.file_path);
+      push(args.path);
+      push(args.filePath);
+      push(args.file);
+    }
+    const ti = data?.tool_input;
+    if (ti && typeof ti === "object") {
+      push(ti.file_path);
+      push(ti.path);
+      push(ti.filePath);
+      push(ti.file);
+      if (typeof ti.command === "string") {
+        for (const line of ti.command.split(/\\r?\\n/)) {
+          const m = line.match(/^\\*\\*\\* (?:Add|Update|Delete) File:\\s*(.+)$/) || line.match(/^\\*\\*\\* Move to:\\s*(.+)$/);
+          if (m && m[1]) push(m[1]);
+        }
+      }
+    }
+    push(data?.file_path);
+    push(data?.path);
+    push(data?.filePath);
+    if (paths.length) process.stdout.write(paths.join("\\n"));
   } catch {}
 });
 ' 2>/dev/null || true)"
-      elif command -v bun >/dev/null 2>&1; then
-        FILE_PATH="$(printf '%s' "$STDIN_DATA" | bun -e '
+    elif command -v bun >/dev/null 2>&1; then
+      FILE_PATHS="$(printf '%s' "$STDIN_DATA" | bun -e '
 const raw = await Bun.stdin.text();
 try {
   const data = JSON.parse(raw);
-  const p = data?.tool_input?.file_path || data?.tool_input?.path || data?.file_path || data?.path || "";
-  if (p) process.stdout.write(String(p));
+  const paths = [];
+  const push = (v) => { if (typeof v === "string" && v.trim()) paths.push(v.trim()); };
+  const args = data?.toolCall?.args;
+  if (args && typeof args === "object") {
+    push(args.TargetFile);
+    push(args.Path);
+    push(args.file_path);
+    push(args.path);
+    push(args.filePath);
+    push(args.file);
+  }
+  const ti = data?.tool_input;
+  if (ti && typeof ti === "object") {
+    push(ti.file_path);
+    push(ti.path);
+    push(ti.filePath);
+    push(ti.file);
+    if (typeof ti.command === "string") {
+      for (const line of ti.command.split(/\\r?\\n/)) {
+        const m = line.match(/^\\*\\*\\* (?:Add|Update|Delete) File:\\s*(.+)$/) || line.match(/^\\*\\*\\* Move to:\\s*(.+)$/);
+        if (m && m[1]) push(m[1]);
+      }
+    }
+  }
+  push(data?.file_path);
+  push(data?.path);
+  push(data?.filePath);
+  if (paths.length) process.stdout.write(paths.join("\\n"));
 } catch {}
 ' 2>/dev/null || true)"
-      elif command -v python3 >/dev/null 2>&1; then
-        FILE_PATH="$(printf '%s' "$STDIN_DATA" | python3 -c '
-import sys, json
+    elif command -v python3 >/dev/null 2>&1; then
+      FILE_PATHS="$(printf '%s' "$STDIN_DATA" | python3 -c '
+import sys, json, re
 try:
     d = json.load(sys.stdin)
-    ti = d.get("tool_input", {}) if isinstance(d, dict) else {}
-    p = ti.get("file_path") or ti.get("path") or d.get("file_path") or d.get("path") or ""
-    if p: sys.stdout.write(str(p))
-except Exception: pass
+    if not isinstance(d, dict):
+        sys.exit(0)
+    paths = []
+    def push(v):
+        if isinstance(v, str) and v.strip():
+            paths.append(v.strip())
+    args = d.get("toolCall", {}).get("args", {}) if isinstance(d.get("toolCall"), dict) else {}
+    if isinstance(args, dict):
+        for k in ("TargetFile", "Path", "file_path", "path", "filePath", "file"):
+            push(args.get(k))
+    ti = d.get("tool_input", {}) if isinstance(d.get("tool_input"), dict) else {}
+    for k in ("file_path", "path", "filePath", "file"):
+        push(ti.get(k))
+    cmd = ti.get("command")
+    if isinstance(cmd, str):
+        for line in cmd.splitlines():
+            m = re.match(r"^\\*\\*\\* (?:Add|Update|Delete) File:\\s*(.+)$", line) or re.match(r"^\\*\\*\\* Move to:\\s*(.+)$", line)
+            if m:
+                push(m.group(1))
+    for k in ("file_path", "path", "filePath"):
+        push(d.get(k))
+    if paths:
+        sys.stdout.write("\\n".join(paths))
+except Exception:
+    pass
 ' 2>/dev/null || true)"
-      fi
+    fi
 
-      if [ -z "$FILE_PATH" ]; then
-        FILE_PATH="$(printf '%s' "$STDIN_DATA" | sed -n 's/.*"\(file_path\|path\)"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\\2/p' | head -n 1)"
-      fi
+    if [ -z "$FILE_PATHS" ]; then
+      FILE_PATHS="$(printf '%s' "$STDIN_DATA" | sed -n 's/.*"\(TargetFile\|Path\|file_path\|path\)"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\\2/p' | head -n 1)"
     fi
   fi
 fi
 
-if [ -z "$FILE_PATH" ]; then
-  exit 0
+if [ -z "$FILE_PATHS" ]; then
+  finish_ok
 fi
 
-# Determine workspace root from the hook script location (.agents/hooks/..)
-HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
-WORKSPACE_ROOT="\${STRATA_WORKSPACE_ROOT:-$(cd "$HOOK_DIR/../.." && pwd)}"
+# Check if any modified file has a Strata-indexed extension
+NEEDS_SYNC=0
+while IFS= read -r FP; do
+  case "$FP" in
+    *.vue|*.astro|*.svelte|*.tsx|*.jsx|*.ts|*.js|*.mts|*.cts|*.mjs|*.cjs)
+      NEEDS_SYNC=1
+      break
+      ;;
+  esac
+done <<EOF
+$FILE_PATHS
+EOF
 
-# Check if file has frontend extension
-case "$FILE_PATH" in
-  *.vue|*.astro|*.svelte|*.tsx|*.jsx|*.ts|*.js)
-    if command -v strata >/dev/null 2>&1; then
-      strata sync "$WORKSPACE_ROOT" --json >/dev/null 2>&1 || true
-    elif command -v bun >/dev/null 2>&1 && [ -f "$WORKSPACE_ROOT/node_modules/.bin/strata" ]; then
-      "$WORKSPACE_ROOT/node_modules/.bin/strata" sync "$WORKSPACE_ROOT" --json >/dev/null 2>&1 || true
-    elif command -v npx >/dev/null 2>&1; then
-      npx --no-install strata sync "$WORKSPACE_ROOT" --json >/dev/null 2>&1 || true
-    elif command -v bunx >/dev/null 2>&1; then
-      bunx strata sync "$WORKSPACE_ROOT" --json >/dev/null 2>&1 || true
-    fi
-    ;;
-  *)
-    # Not a frontend file, skip
-    ;;
-esac
+log_hook_event() {
+  printf '%s harness=%s event=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)" "\${HARNESS_MODE:-default}" "$1" >> "$WORKSPACE_ROOT/.strata/hook.log" 2>/dev/null || true
+}
 
-exit 0
+if [ "$NEEDS_SYNC" -eq 0 ]; then
+  log_hook_event "skipped_unsupported_payload"
+  finish_ok
+fi
+
+# Resolve Strata CLI executable (fail open if unavailable)
+STRATA_BIN=""
+if command -v strata >/dev/null 2>&1; then
+  STRATA_BIN="strata"
+elif [ -x "$WORKSPACE_ROOT/node_modules/.bin/strata" ]; then
+  STRATA_BIN="$WORKSPACE_ROOT/node_modules/.bin/strata"
+elif command -v npx >/dev/null 2>&1 && [ -d "$WORKSPACE_ROOT/node_modules/strata-mcp" ]; then
+  STRATA_BIN="npx --no-install strata"
+elif command -v bunx >/dev/null 2>&1 && [ -d "$WORKSPACE_ROOT/node_modules/strata-mcp" ]; then
+  STRATA_BIN="bunx --no-install strata"
+fi
+
+if [ -z "$STRATA_BIN" ]; then
+  log_hook_event "skipped_missing_binary"
+  finish_ok
+fi
+
+# Detached burst-coalescing sync: pending-flag + atomic mkdir lock + PID liveness recovery
+LOCK_DIR="$WORKSPACE_ROOT/.strata/sync.lock"
+PENDING_FILE="$WORKSPACE_ROOT/.strata/sync.pending"
+
+: > "$PENDING_FILE" 2>/dev/null || true
+
+if [ -d "$LOCK_DIR" ] && [ -f "$LOCK_DIR/pid" ]; then
+  LOCK_PID="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
+  if [ -n "$LOCK_PID" ] && ! kill -0 "$LOCK_PID" 2>/dev/null; then
+    rm -rf "$LOCK_DIR" 2>/dev/null || true
+  fi
+fi
+
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+  log_hook_event "coalesced"
+  finish_ok
+fi
+
+log_hook_event "synced"
+(
+  trap 'rm -rf "$LOCK_DIR" 2>/dev/null || true' EXIT INT TERM
+  while [ -f "$PENDING_FILE" ]; do
+    rm -f "$PENDING_FILE" 2>/dev/null || true
+    $STRATA_BIN sync "$WORKSPACE_ROOT" --json >/dev/null 2>&1 || true
+  done
+) </dev/null >/dev/null 2>&1 &
+echo "$!" > "$LOCK_DIR/pid" 2>/dev/null || true
+
+finish_ok
 `;
 
 export const USE_STRATA_CLAUDE_COMMAND = `---
-description: Deep frontend AST component inspection, component trees, reactivity tracking, routes, API contracts, architectural health audits, and deterministic patch planning using strata-mcp.
+description: Deep frontend AST component inspection, component trees, reactivity tracking, routes, API contracts, architectural health audits, and impact analysis using strata-mcp.
 ---
 
 # /use-strata
 
-Use \`strata-mcp\` tools for structural frontend intelligence rather than reading raw source files:
-- **Map & Survey:** Begin with \`find_code(action: "map")\` to survey files, then use \`inspect_component(view: "map")\` or \`outline: true\` and \`view: "source"\` with the returned \`source_ref\`.
-- **Component Contracts:** \`inspect_component\` extracts public contracts (props, emits, slots, models) & slices targeted functions without template bloat.
-- **Hierarchy & Blast Radius:** \`get_component_tree\` maps component hierarchies, props drilling, and upstream page consumers (upward/downward).
-- **Structural Code Search:** \`find_code\` matches code patterns and component usages structurally using AST matching.
-- **Reactivity Flow:** \`trace_state\` traces reactive state readers and mutators across store/context boundaries (Pinia, Context, Zustand).
-- **Architectural Health:** \`audit_frontend\` maps URL routes, api-contracts, and audits unused component/state candidates.
-- **Prescriptive Patching:** \`generate_patch_plan\` dry-runs hash-bound patches for renaming/removing props, events, models, and slots; flags \`DYNAMIC_PROP_SPREAD\` for review.
+Use \`strata-mcp\` v2 tools for structural frontend intelligence rather than reading raw source files:
+- **Map & Survey:** Begin with \`map_workspace(view: "overview" | "routes" | "files" | "health")\` to survey packages, URL routes, files, and unused component candidates.
+- **Component Contracts & Boundaries:** \`inspect_file(path, sections: ["outline", "contract", "boundaries", "imports"])\` extracts TypeChecker-resolved props/emits/slots/models, outlines, and outbound HTTP calls with \`backendTargetHint\`.
+- **Graph Navigation & Impact:** \`query_graph(query: "definition" | "references" | "call_hierarchy" | "component_tree" | "state_flow" | "impact")\` traces callers, component trees, state flow, and refactor impact (plus \`DYNAMIC_SPREAD\` omissions).
+- **Structural Code Search:** \`search_code(query: "...", kind: "symbol" | "component_usage" | "prop_usage" | "text")\` returns bounded matches with \`symbol_id\` and \`source_ref\`.
+- **Hash-Verified Slicing:** \`read_slice(source_ref: "..." | symbol_id: "..." | path + symbol/block/lines)\` reads targeted, hash-verified source regions.
 `;
 
 export const STRATA_CLAUDE_COMMAND = USE_STRATA_CLAUDE_COMMAND;
@@ -199,13 +340,13 @@ export const STRATA_CLAUDE_COMMAND = USE_STRATA_CLAUDE_COMMAND;
 export const STRATA_TS_RULE = `# RULE: Strata-MCP TypeScript / JavaScript Structural Intelligence Engine
 
 ## Directive & Tool Routing (Map First, Read Selectively)
-Prioritize \`strata-mcp\` tools (\`find_code\`, \`inspect_component\`) over reading whole TypeScript/JavaScript files sequentially:
-- **Survey Workspace Inventory:** Call \`find_code(action: "map", path: "...")\` to map files and review any excluded directories before broad scans.
-- **Structural & Literal Search:** Call \`find_code(pattern: "...", mode: "ast" | "literal" | "auto", path: "...")\` for AST patterns or exact case-sensitive literal line search.
-- **Module Outlines & 1-Hop Callees:** Call \`inspect_component(path, outline: true)\` to list functions, classes, methods, interfaces, types, enums, and exported constants with exact line ranges and cross-file callee coordinates.
-- **Map & Hash-Verified Slicing:** Call \`inspect_component(path, view: "map")\` to get UTF-16 offsets and SHA-256, then pass \`source_ref\` to \`inspect_component(path, view: "source", source_ref: ...)\` — or request \`inspect_component(path, symbol: "...")\` / \`source_range: { start_line, end_line }\`.
-- **Outbound HTTP Calls:** When auditing HTTP client calls, use \`audit_frontend(target: "api-contracts", path: "...")\`.
-- **Response & Evidence Discipline:** Prefer default \`format: "text"\`. Never guess truncated slices or ignore \`Decision: partial\` / excluded-directory notes.
+Prioritize \`strata-mcp\` v2 tools over reading whole TypeScript/JavaScript files sequentially:
+- **Survey Workspace Inventory:** Call \`map_workspace(view: "overview" | "files", path_prefix: "...")\` to map packages and files before broad scans.
+- **Structural & Literal Search:** Call \`search_code(query: "...", kind: "symbol" | "text", path_prefix: "...")\` for FTS5 symbol search or bounded literal text search returning \`symbol_id\` and \`source_ref\`.
+- **Module Outlines & HTTP Boundaries:** Call \`inspect_file(path, sections: ["outline", "boundaries", "imports"])\` to list functions, classes, interfaces, outbound HTTP calls, and imports without bodies.
+- **Graph Navigation:** Call \`query_graph(query: "definition" | "references" | "call_hierarchy", target: { symbol_id | file+symbol })\` to trace cross-file definitions, references, and callers.
+- **Hash-Verified Slicing:** Call \`read_slice(source_ref: "..." | symbol_id: "..." | path + symbol/lines)\` to read targeted, hash-verified source regions.
+- **Response & Evidence Discipline:** Prefer default \`format: "text"\`. Never guess truncated slices or ignore \`VERIFICATION\` tier / \`OMISSIONS\` notes.
 `;
 
 export const USE_STRATA_TS_SKILL_TEMPLATE = `---
@@ -248,30 +389,31 @@ Use \`strata-mcp\` tools (\`map_workspace\`, \`inspect_file\`, \`query_graph\`, 
 
 export const STRATA_GEMINI_MD_POINTER = `# strata-mcp Workspace Guidance
 
-Strata-MCP workspace rules are configured in \`.gemini/rules/strata-frontend.md\`. Follow those rules before reading full source files.
+Strata-MCP workspace rules are configured in \`.agents/rules/strata-frontend.md\`. Follow those rules before reading full source files.
 `;
 
 export const STRATA_RULE_REFERENCE_FROM_AGENTS = `# RULE: strata-mcp Workspace Reference
 
-The canonical \`strata-mcp\` rules for this workspace are already defined in \`AGENTS.md\` (use \`find_code(action: "map")\`, \`inspect_component(view: "map" | outline: true | symbol | source_range)\`, and \`view: "source"\` with \`source_ref\` before reading whole files).
+The canonical \`strata-mcp\` rules for this workspace are already defined in \`AGENTS.md\` (use \`map_workspace\`, \`inspect_file\`, \`query_graph\`, \`search_code\`, and \`read_slice\` before reading whole files).
 `;
 
 export const STRATA_RULE_REFERENCE_FROM_GEMINI = `# RULE: strata-mcp Workspace Reference
 
-The canonical \`strata-mcp\` rules for this workspace are already defined in \`GEMINI.md\` (use \`find_code(action: "map")\`, \`inspect_component(view: "map" | outline: true | symbol | source_range)\`, and \`view: "source"\` with \`source_ref\` before reading whole files).
+The canonical \`strata-mcp\` rules for this workspace are already defined in \`GEMINI.md\` (use \`map_workspace\`, \`inspect_file\`, \`query_graph\`, \`search_code\`, and \`read_slice\` before reading whole files).
 `;
 
-export const STRATA_GEMINI_HOOKS = JSON.stringify(
+export const STRATA_ANTIGRAVITY_HOOKS = JSON.stringify(
   {
     'strata-autosync': {
+      enabled: true,
       PostToolUse: [
         {
-          matcher: 'edit_file|write_file|replace_file_content|write_to_file',
+          matcher: 'write_file|edit_file|write_to_file|replace_file_content|multi_replace_file_content',
           hooks: [
             {
               type: 'command',
-              command:
-                "sh -c 'ROOT=\".\"; if [ ! -f \"$ROOT/.gemini/hooks/strata-post-write.sh\" ] && [ ! -f \"$ROOT/.agents/hooks/strata-post-write.sh\" ]; then ROOT=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\"; fi; if [ -f \"$ROOT/.gemini/hooks/strata-post-write.sh\" ]; then exec \"$ROOT/.gemini/hooks/strata-post-write.sh\" \"$@\"; elif [ -f \"$ROOT/.agents/hooks/strata-post-write.sh\" ]; then exec \"$ROOT/.agents/hooks/strata-post-write.sh\" \"$@\"; else strata sync --json 2>/dev/null || true; fi'",
+              command: './hooks/strata-post-write.sh --antigravity',
+              timeout: 10,
             },
           ],
         },
@@ -281,3 +423,96 @@ export const STRATA_GEMINI_HOOKS = JSON.stringify(
   null,
   2
 ) + '\n';
+
+export const STRATA_GEMINI_HOOKS = STRATA_ANTIGRAVITY_HOOKS;
+
+export const STRATA_OPENCODE_PLUGIN = `// managed-marker: opencode-v2 strata-autosync
+import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+
+const MUTATING_TOOLS = new Set(['write', 'edit', 'patch', 'morph_edit', 'apply_patch']);
+const INDEXED_EXT_RE = /\\.(?:vue|astro|svelte|tsx|jsx|ts|js|mts|cts|mjs|cjs)$/i;
+
+const inFlight = new Set<string>();
+const pending = new Set<string>();
+
+function extractCandidatePaths(input: Record<string, unknown>): string[] {
+  const paths: string[] = [];
+  const push = (v: unknown) => {
+    if (typeof v === 'string' && v.trim()) paths.push(v.trim());
+  };
+  push(input.filePath);
+  push(input.path);
+  push(input.file_path);
+  push(input.file);
+  push(input.TargetFile);
+  push(input.Path);
+  if (typeof input.command === 'string') {
+    for (const line of input.command.split(/\\r?\\n/)) {
+      const m =
+        line.match(/^\\*\\*\\* (?:Add|Update|Delete) File:\\s*(.+)$/) ||
+        line.match(/^\\*\\*\\* Move to:\\s*(.+)$/);
+      if (m && m[1]) push(m[1]);
+    }
+  }
+  return paths;
+}
+
+function triggerCoalescedSync(directory: string): void {
+  if (inFlight.has(directory)) {
+    pending.add(directory);
+    return;
+  }
+  inFlight.add(directory);
+  const localBin = join(directory, 'node_modules', '.bin', 'strata');
+  const cmd = existsSync(localBin) ? localBin : 'strata';
+  try {
+    const child = spawn(cmd, ['sync', directory, '--json'], {
+      cwd: directory,
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+    const finish = () => {
+      inFlight.delete(directory);
+      if (pending.delete(directory)) {
+        triggerCoalescedSync(directory);
+      }
+    };
+    child.on('error', () => {
+      inFlight.delete(directory);
+      pending.delete(directory);
+    });
+    child.on('close', finish);
+    child.unref();
+  } catch {
+    inFlight.delete(directory);
+    pending.delete(directory);
+  }
+}
+
+export default {
+  id: 'strata-autosync',
+  setup: (ctx: any) => {
+    const directory: string =
+      ctx?.location?.directory ?? ctx?.location?.path ?? ctx?.directory ?? process.cwd();
+
+    ctx?.tool?.hook?.('execute.after', async (s: any) => {
+      try {
+        if (s?.sessionID === '__health_probe__') return;
+        const tool = String(s?.tool ?? '');
+        if (!MUTATING_TOOLS.has(tool)) return;
+        if (!existsSync(join(directory, '.strata'))) return;
+
+        const input = (s?.input ?? {}) as Record<string, unknown>;
+        const paths = extractCandidatePaths(input);
+        if (!paths.some((p) => INDEXED_EXT_RE.test(p))) return;
+
+        triggerCoalescedSync(directory);
+      } catch {
+        // Fail open: post-write delta sync must never break tool execution
+      }
+    });
+  },
+};
+`;
