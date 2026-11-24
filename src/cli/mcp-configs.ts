@@ -4,6 +4,7 @@ import {
   STRATA_FRONTEND_RULE,
   STRATA_INSPECT_SKILL,
   STRATA_POST_WRITE_HOOK,
+  STRATA_OPENCODE_PLUGIN,
   STRATA_CLAUDE_COMMAND,
   STRATA_TS_RULE,
   STRATA_TS_SKILL,
@@ -42,8 +43,14 @@ export type ConfigReadResult<T = Record<string, any>> =
  */
 export async function readJsonConfigFile<T = Record<string, any>>(filePath: string): Promise<ConfigReadResult<T>> {
   if (!existsSync(filePath)) return { status: 'missing' };
+  let raw = '';
   try {
-    const raw = await fs.readFile(filePath, 'utf8');
+    raw = await fs.readFile(filePath, 'utf8');
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { status: 'malformed', error: `Unable to read file: ${message}`, raw: '' };
+  }
+  try {
     const parsed = JSON.parse(raw);
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
       return {
@@ -58,9 +65,39 @@ export async function readJsonConfigFile<T = Record<string, any>>(filePath: stri
     return {
       status: 'malformed',
       error: `Malformed JSON syntax: ${message}`,
-      raw: '',
+      raw,
     };
   }
+}
+
+/**
+ * Shared read-validate-merge-write helper for JSON config files.
+ * Preserves malformed JSON files untouched and returns structured ConfigAction.
+ */
+async function updateJsonConfigFile(
+  filePath: string,
+  displayLabel: string,
+  mutator: (existing: Record<string, any> | null) => Record<string, any> | null
+): Promise<{ action: ConfigAction; error?: string }> {
+  const dir = dirname(filePath);
+  if (!existsSync(dir)) {
+    await fs.mkdir(dir, { recursive: true });
+  }
+
+  const result = await readJsonConfigFile<Record<string, any>>(filePath);
+  if (result.status === 'malformed') {
+    console.error(`  ✕ Error: Malformed JSON in '${displayLabel}': ${result.error}. Preserving existing file without modification.`);
+    return { action: 'failed', error: result.error };
+  }
+
+  const existing = result.status === 'valid' ? result.data : null;
+  const next = mutator(existing);
+  if (next === null) {
+    return { action: 'skipped' };
+  }
+
+  await fs.writeFile(filePath, `${JSON.stringify(next, null, 2)}\n`, 'utf8');
+  return { action: existing ? 'updated' : 'created' };
 }
 
 /**
@@ -81,40 +118,20 @@ async function writeStandardMcpConfig(
   key: 'mcpServers' | 'servers' = 'mcpServers',
   force: boolean = false
 ): Promise<{ action: ConfigAction; error?: string }> {
-  const dir = dirname(filePath);
-  if (!existsSync(dir)) {
-    await fs.mkdir(dir, { recursive: true });
-  }
-
-  const result = await readJsonConfigFile<Record<string, any>>(filePath);
-  if (result.status === 'malformed') {
-    console.error(`  ✕ Error: Malformed JSON in '${filePath}': ${result.error}. Preserving existing file without modification.`);
-    return { action: 'failed', error: result.error };
-  }
-
-  const existing = result.status === 'valid' ? result.data : null;
-  const base = existing || {};
-  const servers = (base[key] && typeof base[key] === 'object' && !Array.isArray(base[key])) ? base[key] : {};
-
-  const strataExists = Boolean(servers.strata);
-
-  if (strataExists && !force) {
-    return { action: 'skipped' };
-  }
-
-  servers.strata = {
-    command: 'strata',
-    args: ['serve'],
-  };
-
-  base[key] = servers;
-
-  await fs.writeFile(filePath, `${JSON.stringify(base, null, 2)}\n`, 'utf8');
-  return { action: existing ? 'updated' : 'created' };
+  return updateJsonConfigFile(filePath, filePath, (existing) => {
+    const base = existing ? { ...existing } : {};
+    const servers = (base[key] && typeof base[key] === 'object' && !Array.isArray(base[key])) ? { ...base[key] } : {};
+    if (servers.strata && !force) {
+      return null;
+    }
+    servers.strata = { command: 'strata', args: ['serve'] };
+    base[key] = servers;
+    return base;
+  });
 }
 
 /**
- * Writes or merges OpenCode local MCP config in opencode.json.
+ * Writes or merges OpenCode local MCP config in opencode.json (`mcp.strata`).
  * Defensively skips writes if existing config is malformed to prevent data loss.
  * Preserves existing Strata configuration unless force is true (INIT-02).
  */
@@ -122,44 +139,37 @@ async function writeOpenCodeConfig(
   filePath: string,
   force: boolean = false
 ): Promise<{ action: ConfigAction; error?: string }> {
-  const dir = dirname(filePath);
-  if (!existsSync(dir)) {
-    await fs.mkdir(dir, { recursive: true });
-  }
+  return updateJsonConfigFile(filePath, filePath, (existing) => {
+    const base: Record<string, any> = existing
+      ? { ...existing }
+      : { $schema: 'https://opencode.ai/config.json' };
+    const mcp = (base.mcp && typeof base.mcp === 'object' && !Array.isArray(base.mcp)) ? { ...base.mcp } : {};
+    const legacyServers = (mcp.servers && typeof mcp.servers === 'object' && !Array.isArray(mcp.servers)) ? mcp.servers : null;
+    const strataExists = Boolean(mcp.strata || legacyServers?.strata);
 
-  const result = await readJsonConfigFile<Record<string, any>>(filePath);
-  if (result.status === 'malformed') {
-    console.error(`  ✕ Error: Malformed JSON in '${filePath}': ${result.error}. Preserving existing file without modification.`);
-    return { action: 'failed', error: result.error };
-  }
+    if (strataExists && !force && !legacyServers?.strata) {
+      return null;
+    }
 
-  const existing = result.status === 'valid' ? result.data : null;
-  const base = existing || {
-    $schema: 'https://opencode.ai/config.json',
-  };
+    mcp.strata = {
+      type: 'local',
+      command: ['strata', 'serve'],
+      enabled: true,
+    };
 
-  const mcp = (base.mcp && typeof base.mcp === 'object' && !Array.isArray(base.mcp)) ? base.mcp : {};
-  const servers = (mcp.servers && typeof mcp.servers === 'object' && !Array.isArray(mcp.servers)) ? mcp.servers : {};
-  const strataExists = Boolean(mcp.strata || servers.strata);
+    if (legacyServers?.strata) {
+      const cleanedServers = { ...legacyServers };
+      delete cleanedServers.strata;
+      if (Object.keys(cleanedServers).length === 0) {
+        delete mcp.servers;
+      } else {
+        mcp.servers = cleanedServers;
+      }
+    }
 
-  if (strataExists && !force) {
-    return { action: 'skipped' };
-  }
-
-  const strataServerDef = {
-    type: 'local',
-    command: ['strata', 'serve'],
-    enabled: true,
-  };
-
-  // Support both official OpenCode schema (mcp.servers.strata) and root mcp.strata
-  mcp.strata = strataServerDef;
-  servers.strata = strataServerDef;
-  mcp.servers = servers;
-  base.mcp = mcp;
-
-  await fs.writeFile(filePath, `${JSON.stringify(base, null, 2)}\n`, 'utf8');
-  return { action: existing ? 'updated' : 'created' };
+    base.mcp = mcp;
+    return base;
+  });
 }
 
 /**
@@ -259,205 +269,255 @@ export function appendTomlMcpServer(
   return { action: exists ? 'updated' : 'created' };
 }
 
+function isStrataManagedHookEntry(entry: unknown): boolean {
+  return JSON.stringify(entry ?? '').includes('strata-post-write');
+}
+
 /**
  * Configures Claude Code PostToolUse lifecycle hook to auto-sync Strata graph.
  */
-async function configureClaudeHooks(projectRoot: string): Promise<HarnessConfigResult | null> {
-  const claudeDir = join(projectRoot, '.claude');
-  if (!existsSync(claudeDir)) {
-    await fs.mkdir(claudeDir, { recursive: true });
-  }
-  const settingsPath = join(claudeDir, 'settings.json');
-  const result = await readJsonConfigFile<Record<string, any>>(settingsPath);
-  if (result.status === 'malformed') {
-    console.error(`  ✕ Error: Malformed JSON in '.claude/settings.json': ${result.error}. Preserving existing file without modification.`);
-    return { harness: 'Claude Code', file: '.claude/settings.json', action: 'failed', error: result.error };
-  }
-
-  const settings = result.status === 'valid' ? result.data : {};
-  const hooks = (typeof settings.hooks === 'object' && settings.hooks !== null && !Array.isArray(settings.hooks))
-    ? settings.hooks
-    : {};
-  const postToolHooks = Array.isArray(hooks.PostToolUse) ? hooks.PostToolUse : [];
-
-  const hasStrataHook = postToolHooks.some((h: any) =>
-    JSON.stringify(h).includes('strata-post-write')
-  );
-
+async function configureClaudeHooks(
+  projectRoot: string,
+  force: boolean = false
+): Promise<HarnessConfigResult> {
+  const settingsPath = join(projectRoot, '.claude', 'settings.json');
   const canonicalHook = {
-    matcher: 'Write|Edit|NotebookEdit',
+    matcher: 'Write|Edit|MultiEdit|NotebookEdit',
     hooks: [
       {
         type: 'command',
         command:
-          "sh -c 'ROOT=\".\"; if [ ! -f \"$ROOT/.claude/hooks/strata-post-write.sh\" ] && [ ! -f \"$ROOT/.agents/hooks/strata-post-write.sh\" ]; then ROOT=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\"; fi; if [ -f \"$ROOT/.claude/hooks/strata-post-write.sh\" ]; then exec \"$ROOT/.claude/hooks/strata-post-write.sh\" \"$CLAUDE_FILE_PATH\"; elif [ -f \"$ROOT/.agents/hooks/strata-post-write.sh\" ]; then exec \"$ROOT/.agents/hooks/strata-post-write.sh\" \"$CLAUDE_FILE_PATH\"; fi'",
+          'sh -c \'ROOT="${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd -P)}"; case "$ROOT" in */.claude|*/.codex|*/.agents|*/.gemini|*/opencode) ROOT="$(dirname "$ROOT")" ;; esac; for d in .claude .agents; do if [ -x "$ROOT/$d/hooks/strata-post-write.sh" ]; then exec "$ROOT/$d/hooks/strata-post-write.sh" --claude "$@"; fi; done; exit 0\'',
+        timeout: 10,
       },
     ],
   };
 
-  if (!hasStrataHook) {
-    postToolHooks.push(canonicalHook);
-    hooks.PostToolUse = postToolHooks;
-    settings.hooks = hooks;
-    await fs.writeFile(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, 'utf8');
-    return { harness: 'Claude Code', file: '.claude/settings.json', action: result.status === 'valid' ? 'updated' : 'created' };
-  }
+  const res = await updateJsonConfigFile(settingsPath, '.claude/settings.json', (existing) => {
+    const settings = existing ? { ...existing } : {};
+    const hooks = (typeof settings.hooks === 'object' && settings.hooks !== null && !Array.isArray(settings.hooks))
+      ? { ...settings.hooks }
+      : {};
+    const postToolHooks = Array.isArray(hooks.PostToolUse) ? hooks.PostToolUse : [];
 
-  return { harness: 'Claude Code', file: '.claude/settings.json', action: 'skipped' };
+    const managedEntries = postToolHooks.filter(isStrataManagedHookEntry);
+    const needsUpdate =
+      managedEntries.length !== 1 ||
+      force ||
+      JSON.stringify(managedEntries[0]) !== JSON.stringify(canonicalHook);
+
+    if (!needsUpdate) return null;
+
+    const preservedUserHooks = postToolHooks.filter((h: any) => !isStrataManagedHookEntry(h));
+    preservedUserHooks.push(canonicalHook);
+    hooks.PostToolUse = preservedUserHooks;
+    settings.hooks = hooks;
+    return settings;
+  });
+
+  return { harness: 'Claude Code', file: '.claude/settings.json', action: res.action, error: res.error };
 }
 
 /**
- * Configures Google Antigravity PostToolUse lifecycle hook to auto-sync Strata graph in .gemini/hooks.json.
+ * Removes legacy Strata managed hook from .gemini/hooks.json (Antigravity does not index workspace .gemini/).
+ * Preserves any user-authored entries and leaves malformed JSON untouched.
  */
-async function configureGeminiHooks(projectRoot: string): Promise<HarnessConfigResult | null> {
-  const geminiDir = join(projectRoot, '.gemini');
-  if (!existsSync(geminiDir)) {
-    await fs.mkdir(geminiDir, { recursive: true });
+async function cleanupLegacyGeminiHooks(projectRoot: string): Promise<void> {
+  const legacyPath = join(projectRoot, '.gemini', 'hooks.json');
+  const result = await readJsonConfigFile<Record<string, any>>(legacyPath);
+  if (result.status !== 'valid') return;
+  if (!('strata-autosync' in result.data)) return;
+
+  const updated = { ...result.data };
+  delete updated['strata-autosync'];
+  if (Object.keys(updated).length === 0) {
+    await fs.rm(legacyPath, { force: true });
+  } else {
+    await fs.writeFile(legacyPath, `${JSON.stringify(updated, null, 2)}\n`, 'utf8');
   }
-  const hooksPath = join(geminiDir, 'hooks.json');
+}
+
+/**
+ * Configures Google Antigravity / .agents PostToolUse lifecycle hook in .agents/hooks.json.
+ * Auto-migrates legacy invalid `hooks: [{ event: "post_tool_use", ... }]` arrays and `.gemini/hooks.json` entries.
+ */
+async function configureAntigravityAgentsHooks(
+  projectRoot: string,
+  harnessLabel: string,
+  force: boolean = false
+): Promise<HarnessConfigResult> {
+  const agentsDir = join(projectRoot, '.agents');
+  if (!existsSync(agentsDir)) {
+    await fs.mkdir(agentsDir, { recursive: true });
+  }
+
+  await cleanupLegacyGeminiHooks(projectRoot);
+
+  const hooksPath = join(agentsDir, 'hooks.json');
   const result = await readJsonConfigFile<Record<string, any>>(hooksPath);
   if (result.status === 'malformed') {
-    console.error(`  ✕ Error: Malformed JSON in '.gemini/hooks.json': ${result.error}. Preserving existing file without modification.`);
-    return { harness: 'Google Antigravity', file: '.gemini/hooks.json', action: 'failed', error: result.error };
+    console.error(`  ✕ Error: Malformed JSON in '.agents/hooks.json': ${result.error}. Preserving existing file without modification.`);
+    return { harness: harnessLabel, file: '.agents/hooks.json', action: 'failed', error: result.error };
   }
 
-  const config = result.status === 'valid' ? result.data : {};
-  if (config['strata-autosync']) {
-    return { harness: 'Google Antigravity', file: '.gemini/hooks.json', action: 'skipped' };
+  const config = result.status === 'valid' ? { ...result.data } : {};
+  let staleMigrated = false;
+
+  if (Array.isArray(config.hooks)) {
+    const filtered = config.hooks.filter((h: any) => !isStrataManagedHookEntry(h));
+    if (filtered.length !== config.hooks.length) {
+      staleMigrated = true;
+      if (filtered.length === 0) {
+        delete config.hooks;
+      } else {
+        config.hooks = filtered;
+      }
+    }
   }
 
-  config['strata-autosync'] = {
+  const canonicalNamespace = {
+    enabled: true,
     PostToolUse: [
       {
-        matcher: 'edit_file|write_file|replace_file_content|write_to_file',
+        matcher: 'write_file|edit_file|write_to_file|replace_file_content|multi_replace_file_content',
         hooks: [
           {
             type: 'command',
-            command:
-              "sh -c 'ROOT=\".\"; if [ ! -f \"$ROOT/.gemini/hooks/strata-post-write.sh\" ] && [ ! -f \"$ROOT/.agents/hooks/strata-post-write.sh\" ]; then ROOT=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\"; fi; if [ -f \"$ROOT/.gemini/hooks/strata-post-write.sh\" ]; then exec \"$ROOT/.gemini/hooks/strata-post-write.sh\" \"$@\"; elif [ -f \"$ROOT/.agents/hooks/strata-post-write.sh\" ]; then exec \"$ROOT/.agents/hooks/strata-post-write.sh\" \"$@\"; else strata sync --json 2>/dev/null || true; fi'",
+            command: './hooks/strata-post-write.sh --antigravity',
+            timeout: 10,
           },
         ],
       },
     ],
   };
 
+  const existingNamespace = config['strata-autosync'];
+  const needsUpdate =
+    staleMigrated ||
+    force ||
+    !existingNamespace ||
+    JSON.stringify(existingNamespace) !== JSON.stringify(canonicalNamespace);
+
+  if (!needsUpdate) {
+    return { harness: harnessLabel, file: '.agents/hooks.json', action: 'skipped' };
+  }
+
+  config['strata-autosync'] = canonicalNamespace;
   await fs.writeFile(hooksPath, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
-  return { harness: 'Google Antigravity', file: '.gemini/hooks.json', action: result.status === 'valid' ? 'updated' : 'created' };
+  return { harness: harnessLabel, file: '.agents/hooks.json', action: result.status === 'valid' ? 'updated' : 'created' };
 }
 
 /**
- * Configures Codex postToolUse lifecycle hook in .codex/hooks.json.
+ * Configures Codex PostToolUse lifecycle hook in .codex/hooks.json.
  */
-async function configureCodexHooks(projectRoot: string): Promise<HarnessConfigResult | null> {
-  const codexDir = join(projectRoot, '.codex');
-  if (!existsSync(codexDir)) {
-    await fs.mkdir(codexDir, { recursive: true });
-  }
-  const hooksPath = join(codexDir, 'hooks.json');
-  const result = await readJsonConfigFile<Record<string, any>>(hooksPath);
-  if (result.status === 'malformed') {
-    console.error(`  ✕ Error: Malformed JSON in '.codex/hooks.json': ${result.error}. Preserving existing file without modification.`);
-    return { harness: 'Codex', file: '.codex/hooks.json', action: 'failed', error: result.error };
-  }
+async function configureCodexHooks(
+  projectRoot: string,
+  force: boolean = false
+): Promise<HarnessConfigResult> {
+  const hooksPath = join(projectRoot, '.codex', 'hooks.json');
+  const canonicalHook = {
+    matcher: 'Write|Edit|MultiEdit|apply_patch|write_file|edit_file|replace_file_content|write_to_file',
+    hooks: [
+      {
+        type: 'command',
+        command:
+          'sh -c \'ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd -P)"; case "$ROOT" in */.claude|*/.codex|*/.agents|*/.gemini|*/opencode) ROOT="$(dirname "$ROOT")" ;; esac; for d in .codex .agents; do if [ -x "$ROOT/$d/hooks/strata-post-write.sh" ]; then exec "$ROOT/$d/hooks/strata-post-write.sh" --codex "$@"; fi; done; exit 0\'',
+        timeout: 10,
+      },
+    ],
+  };
 
-  const config = result.status === 'valid' ? result.data : {};
-  const hooks = (typeof config.hooks === 'object' && config.hooks !== null && !Array.isArray(config.hooks))
-    ? config.hooks
-    : {};
-  const postToolHooks = Array.isArray(hooks.PostToolUse) ? hooks.PostToolUse : [];
-  const hasStrataHook = postToolHooks.some((h: any) => JSON.stringify(h).includes('strata-post-write'));
+  const res = await updateJsonConfigFile(hooksPath, '.codex/hooks.json', (existing) => {
+    const config = existing ? { ...existing } : {};
+    const hooks = (typeof config.hooks === 'object' && config.hooks !== null && !Array.isArray(config.hooks))
+      ? { ...config.hooks }
+      : {};
+    const postToolHooks = Array.isArray(hooks.PostToolUse) ? hooks.PostToolUse : [];
 
-  if (!hasStrataHook) {
-    postToolHooks.push({
-      matcher: 'write|edit|write_file|edit_file|replace_file_content|write_to_file',
-      hooks: [
-        {
-          type: 'command',
-          command:
-            "sh -c 'ROOT=\".\"; if [ ! -f \"$ROOT/.codex/hooks/strata-post-write.sh\" ] && [ ! -f \"$ROOT/.agents/hooks/strata-post-write.sh\" ]; then ROOT=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\"; fi; if [ -f \"$ROOT/.codex/hooks/strata-post-write.sh\" ]; then exec \"$ROOT/.codex/hooks/strata-post-write.sh\" \"$@\"; elif [ -f \"$ROOT/.agents/hooks/strata-post-write.sh\" ]; then exec \"$ROOT/.agents/hooks/strata-post-write.sh\" \"$@\"; fi'",
-        },
-      ],
-    });
-    hooks.PostToolUse = postToolHooks;
+    const managedEntries = postToolHooks.filter(isStrataManagedHookEntry);
+    const needsUpdate =
+      managedEntries.length !== 1 ||
+      force ||
+      JSON.stringify(managedEntries[0]) !== JSON.stringify(canonicalHook);
+
+    if (!needsUpdate) return null;
+
+    const preservedUserHooks = postToolHooks.filter((h: any) => !isStrataManagedHookEntry(h));
+    preservedUserHooks.push(canonicalHook);
+    hooks.PostToolUse = preservedUserHooks;
     config.hooks = hooks;
-    await fs.writeFile(hooksPath, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
-    return { harness: 'Codex', file: '.codex/hooks.json', action: result.status === 'valid' ? 'updated' : 'created' };
-  }
+    return config;
+  });
 
-  return { harness: 'Codex', file: '.codex/hooks.json', action: 'skipped' };
+  return { harness: 'Codex', file: '.codex/hooks.json', action: res.action, error: res.error };
 }
 
 /**
- * Configures OpenCode postToolUse lifecycle hook in opencode/hooks.json.
+ * Configures OpenCode v2 lifecycle plugin in .opencode/plugin/strata-autosync.ts.
+ * Auto-migrates legacy opencode/hooks.json managed entries if present.
  */
-async function configureOpenCodeHooks(projectRoot: string): Promise<HarnessConfigResult | null> {
-  const opencodeDir = join(projectRoot, 'opencode');
-  if (!existsSync(opencodeDir)) {
-    await fs.mkdir(opencodeDir, { recursive: true });
-  }
-  const hooksPath = join(opencodeDir, 'hooks.json');
-  const result = await readJsonConfigFile<Record<string, any>>(hooksPath);
-  if (result.status === 'malformed') {
-    console.error(`  ✕ Error: Malformed JSON in 'opencode/hooks.json': ${result.error}. Preserving existing file without modification.`);
-    return { harness: 'OpenCode', file: 'opencode/hooks.json', action: 'failed', error: result.error };
-  }
-
-  const config = result.status === 'valid' ? result.data : { hooks: [] };
-  const hooks = Array.isArray(config.hooks) ? config.hooks : [];
-  const hasStrataHook = hooks.some((h: any) => JSON.stringify(h).includes('strata-post-write'));
-
-  if (!hasStrataHook) {
-    hooks.push({
-      event: 'post_tool_use',
-      matcher: 'write|edit|write_file|edit_file|replace_file_content|write_to_file',
-      command:
-        "sh -c 'ROOT=\".\"; if [ ! -f \"$ROOT/opencode/hooks/strata-post-write.sh\" ] && [ ! -f \"$ROOT/.agents/hooks/strata-post-write.sh\" ]; then ROOT=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\"; fi; if [ -f \"$ROOT/opencode/hooks/strata-post-write.sh\" ]; then exec \"$ROOT/opencode/hooks/strata-post-write.sh\" \"$@\"; elif [ -f \"$ROOT/.agents/hooks/strata-post-write.sh\" ]; then exec \"$ROOT/.agents/hooks/strata-post-write.sh\" \"$@\"; fi'",
-    });
-    config.hooks = hooks;
-    await fs.writeFile(hooksPath, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
-    return { harness: 'OpenCode', file: 'opencode/hooks.json', action: result.status === 'valid' ? 'updated' : 'created' };
+async function configureOpenCodeHooks(
+  projectRoot: string,
+  force: boolean = false
+): Promise<HarnessConfigResult> {
+  const legacyHooksPath = join(projectRoot, 'opencode', 'hooks.json');
+  const legacyResult = await readJsonConfigFile<Record<string, any>>(legacyHooksPath);
+  if (legacyResult.status === 'valid' && Array.isArray(legacyResult.data.hooks)) {
+    const filtered = legacyResult.data.hooks.filter((h: any) => !isStrataManagedHookEntry(h));
+    if (filtered.length !== legacyResult.data.hooks.length) {
+      const updated = { ...legacyResult.data };
+      if (filtered.length === 0) {
+        delete updated.hooks;
+      } else {
+        updated.hooks = filtered;
+      }
+      if (Object.keys(updated).length === 0) {
+        await fs.rm(legacyHooksPath, { force: true });
+      } else {
+        await fs.writeFile(legacyHooksPath, `${JSON.stringify(updated, null, 2)}\n`, 'utf8');
+      }
+    }
   }
 
-  return { harness: 'OpenCode', file: 'opencode/hooks.json', action: 'skipped' };
-}
-
-/**
- * Configures .agents general postToolUse lifecycle hook in .agents/hooks.json.
- */
-async function configureAgentsHooks(projectRoot: string): Promise<HarnessConfigResult | null> {
-  const agentsDir = join(projectRoot, '.agents');
-  if (!existsSync(agentsDir)) {
-    await fs.mkdir(agentsDir, { recursive: true });
-  }
-  const hooksPath = join(agentsDir, 'hooks.json');
-  const result = await readJsonConfigFile<Record<string, any>>(hooksPath);
-  if (result.status === 'malformed') {
-    console.error(`  ✕ Error: Malformed JSON in '.agents/hooks.json': ${result.error}. Preserving existing file without modification.`);
-    return { harness: '.agents (general)', file: '.agents/hooks.json', action: 'failed', error: result.error };
+  const legacyPluginAltPath = join(projectRoot, '.opencode', 'plugins', 'strata-autosync.ts');
+  if (existsSync(legacyPluginAltPath)) {
+    try {
+      const legacyAlt = await fs.readFile(legacyPluginAltPath, 'utf8');
+      if (legacyAlt.includes('strata-autosync') || legacyAlt.includes('strata sync')) {
+        await fs.rm(legacyPluginAltPath, { force: true });
+      }
+    } catch {}
   }
 
-  const config = result.status === 'valid' ? result.data : { hooks: [] };
-  const hooks = Array.isArray(config.hooks) ? config.hooks : [];
-  const hasStrataHook = hooks.some((h: any) => JSON.stringify(h).includes('strata-post-write'));
-
-  if (!hasStrataHook) {
-    hooks.push({
-      event: 'post_tool_use',
-      matcher: 'write|edit|write_file|edit_file|replace_file_content|write_to_file',
-      command:
-        "sh -c 'ROOT=\".\"; if [ ! -f \"$ROOT/.agents/hooks/strata-post-write.sh\" ]; then ROOT=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\"; fi; if [ -f \"$ROOT/.agents/hooks/strata-post-write.sh\" ]; then exec \"$ROOT/.agents/hooks/strata-post-write.sh\" \"$@\"; fi'",
-    });
-    config.hooks = hooks;
-    await fs.writeFile(hooksPath, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
-    return { harness: '.agents (general)', file: '.agents/hooks.json', action: result.status === 'valid' ? 'updated' : 'created' };
+  const pluginDir = join(projectRoot, '.opencode', 'plugin');
+  if (!existsSync(pluginDir)) {
+    await fs.mkdir(pluginDir, { recursive: true });
+  }
+  const pluginPath = join(pluginDir, 'strata-autosync.ts');
+  const exists = existsSync(pluginPath);
+  if (exists) {
+    const existing = await fs.readFile(pluginPath, 'utf8');
+    const isManagedV2 = existing.includes('// managed-marker: opencode-v2 strata-autosync');
+    const isLegacyManagedV1 =
+      (existing.includes('strata-autosync') || existing.includes('strata sync')) &&
+      (existing.includes('tool.execute.before') || existing.includes('tool.execute.after') || existing.includes('@opencode-ai/plugin'));
+    if (!isManagedV2 && !isLegacyManagedV1 && !force) {
+      return { harness: 'OpenCode', file: '.opencode/plugin/strata-autosync.ts', action: 'skipped' };
+    }
+    if (existing === STRATA_OPENCODE_PLUGIN) {
+      return { harness: 'OpenCode', file: '.opencode/plugin/strata-autosync.ts', action: 'skipped' };
+    }
+    await fs.writeFile(pluginPath, STRATA_OPENCODE_PLUGIN, 'utf8');
+    return { harness: 'OpenCode', file: '.opencode/plugin/strata-autosync.ts', action: 'updated' };
   }
 
-  return { harness: '.agents (general)', file: '.agents/hooks.json', action: 'skipped' };
+  await fs.writeFile(pluginPath, STRATA_OPENCODE_PLUGIN, 'utf8');
+  return { harness: 'OpenCode', file: '.opencode/plugin/strata-autosync.ts', action: 'created' };
 }
 
 /**
  * Configures local project MCP settings for selected agent harnesses.
- * Exclusively supports: Antigravity (.gemini), Claude Code (.claude), Codex (.codex),
+ * Exclusively supports: Antigravity (.agents), Claude Code (.claude), Codex (.codex),
  * Opencode (opencode/), and .agents (general).
  */
 export async function setupHarnessConfigs(
@@ -474,36 +534,45 @@ export async function setupHarnessConfigs(
     return results;
   }
 
-  // 1. Google Antigravity (.gemini/mcp_config.json & .gemini/hooks.json)
+  let agentsMcpHandledThisRun = false;
+  let agentsHooksHandledThisRun = false;
+
+  const ensureAgentsMcpAndHooks = async (harnessLabel: string) => {
+    if (!agentsMcpHandledThisRun) {
+      agentsMcpHandledThisRun = true;
+      const file = join(projectRoot, '.agents', 'mcp.json');
+      const res = await writeStandardMcpConfig(file, 'mcpServers', force);
+      if (res.action === 'failed') {
+        results.push({ harness: harnessLabel, file: '.agents/mcp.json', action: 'failed', error: res.error });
+      } else {
+        results.push({ harness: harnessLabel, file: '.agents/mcp.json', action: res.action });
+      }
+    }
+
+    if (!agentsHooksHandledThisRun) {
+      agentsHooksHandledThisRun = true;
+      const hookRes = await configureAntigravityAgentsHooks(projectRoot, harnessLabel, force);
+      results.push(hookRes);
+    }
+  };
+
+  // 1. Google Antigravity (.agents/mcp.json & .agents/hooks.json; global MCP notice printed by init)
   if (shouldApply('antigravity')) {
-    const geminiDir = join(projectRoot, '.gemini');
-    if (!existsSync(geminiDir)) {
-      await fs.mkdir(geminiDir, { recursive: true });
-    }
-    const file = join(geminiDir, 'mcp_config.json');
-    const res = await writeStandardMcpConfig(file, 'mcpServers', force);
-    const hookRes = await configureGeminiHooks(projectRoot);
-    if (res.action === 'failed') {
-      results.push({ harness: 'Google Antigravity', file: '.gemini/mcp_config.json', action: 'failed', error: res.error });
-    } else if (hookRes && hookRes.action === 'failed') {
-      results.push({ harness: 'Google Antigravity', file: '.gemini/hooks.json', action: 'failed', error: hookRes.error });
-    } else {
-      results.push({ harness: 'Google Antigravity', file: '.gemini/mcp_config.json', action: res.action });
-    }
+    await ensureAgentsMcpAndHooks('Google Antigravity');
   }
 
   // 2. Claude Code (.mcp.json & .claude/settings.json)
   if (shouldApply('claude')) {
     const file = join(projectRoot, '.mcp.json');
     const res = await writeStandardMcpConfig(file, 'mcpServers', force);
-    const hookRes = await configureClaudeHooks(projectRoot);
     if (res.action === 'failed') {
       results.push({ harness: 'Claude Code', file: '.mcp.json', action: 'failed', error: res.error });
-    } else if (hookRes && hookRes.action === 'failed') {
-      results.push({ harness: 'Claude Code', file: '.claude/settings.json', action: 'failed', error: hookRes.error });
     } else {
       results.push({ harness: 'Claude Code', file: '.mcp.json', action: res.action });
     }
+
+    const hookRes = await configureClaudeHooks(projectRoot, force);
+    results.push(hookRes);
   }
 
   // 3. OpenAI Codex (.codex/config.toml & .codex/hooks.json)
@@ -511,42 +580,33 @@ export async function setupHarnessConfigs(
     const codexDir = join(projectRoot, '.codex');
     const tomlPath = join(codexDir, 'config.toml');
     const res = appendTomlMcpServer(tomlPath, 'strata', 'strata', ['serve'], force);
-    const hookRes = await configureCodexHooks(projectRoot);
     if (res.action === 'failed') {
       results.push({ harness: 'Codex', file: '.codex/config.toml', action: 'failed', error: res.error });
-    } else if (hookRes && hookRes.action === 'failed') {
-      results.push({ harness: 'Codex', file: '.codex/hooks.json', action: 'failed', error: hookRes.error });
     } else {
       results.push({ harness: 'Codex', file: '.codex/config.toml', action: res.action });
     }
+
+    const hookRes = await configureCodexHooks(projectRoot, force);
+    results.push(hookRes);
   }
 
-  // 4. OpenCode (opencode.json & opencode/hooks.json)
+  // 4. OpenCode (opencode.json & .opencode/plugin/strata-autosync.ts)
   if (shouldApply('opencode')) {
     const file = join(projectRoot, 'opencode.json');
     const res = await writeOpenCodeConfig(file, force);
-    const hookRes = await configureOpenCodeHooks(projectRoot);
     if (res.action === 'failed') {
       results.push({ harness: 'OpenCode', file: 'opencode.json', action: 'failed', error: res.error });
-    } else if (hookRes && hookRes.action === 'failed') {
-      results.push({ harness: 'OpenCode', file: 'opencode/hooks.json', action: 'failed', error: hookRes.error });
     } else {
       results.push({ harness: 'OpenCode', file: 'opencode.json', action: res.action });
     }
+
+    const hookRes = await configureOpenCodeHooks(projectRoot, force);
+    results.push(hookRes);
   }
 
   // 5. .agents (general) (.agents/mcp.json & .agents/hooks.json)
   if (shouldApply('agents')) {
-    const file = join(projectRoot, '.agents', 'mcp.json');
-    const res = await writeStandardMcpConfig(file, 'mcpServers', force);
-    const hookRes = await configureAgentsHooks(projectRoot);
-    if (res.action === 'failed') {
-      results.push({ harness: '.agents (general)', file: '.agents/mcp.json', action: 'failed', error: res.error });
-    } else if (hookRes && hookRes.action === 'failed') {
-      results.push({ harness: '.agents (general)', file: '.agents/hooks.json', action: 'failed', error: hookRes.error });
-    } else {
-      results.push({ harness: '.agents (general)', file: '.agents/mcp.json', action: res.action });
-    }
+    await ensureAgentsMcpAndHooks('.agents (general)');
   }
 
   return results;
@@ -577,6 +637,51 @@ async function writeMarkdownGuidance(
 
   await fs.writeFile(filePath, content, 'utf8');
   return 'created';
+}
+
+/**
+ * Writes or auto-migrates a Strata-managed hook script (mode 0o755).
+ * Preserves user-authored scripts that lack the Strata marker unless force is true.
+ */
+async function writeManagedHookScript(
+  filePath: string,
+  force: boolean = false
+): Promise<ConfigAction> {
+  const dir = dirname(filePath);
+  if (!existsSync(dir)) {
+    await fs.mkdir(dir, { recursive: true });
+  }
+
+  if (existsSync(filePath)) {
+    const existing = await fs.readFile(filePath, 'utf8');
+    const isManaged =
+      existing.includes('Strata-MCP Post-Write') ||
+      existing.includes('managed-marker: strata-post-write');
+    if (!isManaged && !force) {
+      return 'skipped';
+    }
+    if (existing === STRATA_POST_WRITE_HOOK) {
+      await fs.chmod(filePath, 0o755);
+      return 'skipped';
+    }
+    await fs.writeFile(filePath, STRATA_POST_WRITE_HOOK, { encoding: 'utf8', mode: 0o755 });
+    await fs.chmod(filePath, 0o755);
+    return 'updated';
+  }
+
+  await fs.writeFile(filePath, STRATA_POST_WRITE_HOOK, { encoding: 'utf8', mode: 0o755 });
+  await fs.chmod(filePath, 0o755);
+  return 'created';
+}
+
+async function cleanupLegacyManagedFile(filePath: string, marker: string): Promise<void> {
+  if (!existsSync(filePath)) return;
+  try {
+    const existing = await fs.readFile(filePath, 'utf8');
+    if (existing.includes(marker)) {
+      await fs.rm(filePath, { force: true });
+    }
+  } catch {}
 }
 
 /**
@@ -648,7 +753,6 @@ export async function setupHarnessArtifacts(
   const agentsAlreadyHasStrata = await fileContainsStrataGuidance(agentsDocPath);
   const agentsWillHoldRule = agentsHarnessRequested || agentsAlreadyHasStrata;
   const geminiAlreadyHasStrata = await fileContainsStrataGuidance(geminiDocPath);
-  const sharedSkillWillExist = shouldApply('agents') || selectedSet.has('skip') || existsSync(sharedSkillPath);
 
   const record = (harness: string, file: string, action: ConfigAction) => {
     results.push({ harness, file, action });
@@ -663,32 +767,49 @@ export async function setupHarnessArtifacts(
     }
   };
 
-  // 1. Google Antigravity (.gemini/)
+  let sharedAgentsHookHandledThisRun = false;
+  const ensureAgentsHookScript = async (harnessLabel: string) => {
+    if (sharedAgentsHookHandledThisRun) return;
+    sharedAgentsHookHandledThisRun = true;
+    const hAction = await writeManagedHookScript(join(projectRoot, '.agents', 'hooks', 'strata-post-write.sh'), force);
+    record(harnessLabel, '.agents/hooks/strata-post-write.sh', hAction);
+  };
+
+  let sharedAgentsSkillHandledThisRun = false;
+  const ensureAgentsSkill = async (harnessLabel: string) => {
+    if (sharedAgentsSkillHandledThisRun) return;
+    sharedAgentsSkillHandledThisRun = true;
+    await cleanupLegacy(join(projectRoot, '.agents', 'skills', 'strata-inspect'));
+    const sAction = await writeDedicatedArtifact(sharedSkillPath, skillTemplate, force);
+    record(harnessLabel, '.agents/skills/use-strata/SKILL.md', sAction);
+  };
+
+  // 1. Google Antigravity (.agents/rules/, .agents/skills/, .agents/hooks/ — no .gemini/ directory)
   if (shouldApply('antigravity')) {
-    const geminiRuleContent = agentsWillHoldRule
+    const agentsRuleContent = agentsWillHoldRule
       ? STRATA_RULE_REFERENCE_FROM_AGENTS
       : geminiAlreadyHasStrata
         ? STRATA_RULE_REFERENCE_FROM_GEMINI
         : ruleTemplate;
 
-    const rAction = await writeDedicatedArtifact(join(projectRoot, '.gemini', 'rules', 'strata-frontend.md'), geminiRuleContent, force);
-    record('Google Antigravity', '.gemini/rules/strata-frontend.md', rAction);
+    const rAction = await writeDedicatedArtifact(join(projectRoot, '.agents', 'rules', 'strata-frontend.md'), agentsRuleContent, force);
+    record('Google Antigravity', '.agents/rules/strata-frontend.md', rAction);
 
-    // Avoid duplicating rules into GEMINI.md when AGENTS.md + .gemini/rules/ already cover workspace guidance;
+    // Avoid duplicating rules into GEMINI.md when AGENTS.md + .agents/rules/ already cover workspace guidance;
     // when Antigravity is configured standalone, write a compact pointer in GEMINI.md instead of copying all rule lines.
     if (!agentsHarnessRequested) {
       const gmAction = await writeMarkdownGuidance(geminiDocPath, STRATA_GEMINI_MD_POINTER, force);
       record('Google Antigravity', 'GEMINI.md', gmAction);
     }
 
+    // Clean up legacy .gemini/ strata-managed files (Antigravity does not index workspace .gemini/)
     await cleanupLegacy(join(projectRoot, '.gemini', 'skills', 'strata-inspect'));
-    if (!sharedSkillWillExist) {
-      const sAction = await writeDedicatedArtifact(join(projectRoot, '.gemini', 'skills', 'use-strata', 'SKILL.md'), skillTemplate, force);
-      record('Google Antigravity', '.gemini/skills/use-strata/SKILL.md', sAction);
-    }
+    await cleanupLegacy(join(projectRoot, '.gemini', 'skills', 'use-strata'));
+    await cleanupLegacyManagedFile(join(projectRoot, '.gemini', 'rules', 'strata-frontend.md'), 'Strata-MCP');
+    await cleanupLegacyManagedFile(join(projectRoot, '.gemini', 'hooks', 'strata-post-write.sh'), 'Strata-MCP Post-Write');
 
-    const hAction = await writeDedicatedArtifact(join(projectRoot, '.gemini', 'hooks', 'strata-post-write.sh'), STRATA_POST_WRITE_HOOK, force, 0o755);
-    record('Google Antigravity', '.gemini/hooks/strata-post-write.sh', hAction);
+    await ensureAgentsSkill('Google Antigravity');
+    await ensureAgentsHookScript('Google Antigravity');
   }
 
   // 2. Claude Code (.claude/)
@@ -704,7 +825,7 @@ export async function setupHarnessArtifacts(
     const cAction = await writeDedicatedArtifact(join(projectRoot, '.claude', 'commands', 'use-strata.md'), claudeCommandTemplate, force);
     record('Claude Code', '.claude/commands/use-strata.md', cAction);
 
-    const hAction = await writeDedicatedArtifact(join(projectRoot, '.claude', 'hooks', 'strata-post-write.sh'), STRATA_POST_WRITE_HOOK, force, 0o755);
+    const hAction = await writeManagedHookScript(join(projectRoot, '.claude', 'hooks', 'strata-post-write.sh'), force);
     record('Claude Code', '.claude/hooks/strata-post-write.sh', hAction);
   }
 
@@ -725,11 +846,11 @@ export async function setupHarnessArtifacts(
     const sAction = await writeDedicatedArtifact(join(projectRoot, '.codex', 'skills', 'use-strata', 'SKILL.md'), skillTemplate, force);
     record('Codex', '.codex/skills/use-strata/SKILL.md', sAction);
 
-    const hAction = await writeDedicatedArtifact(join(projectRoot, '.codex', 'hooks', 'strata-post-write.sh'), STRATA_POST_WRITE_HOOK, force, 0o755);
+    const hAction = await writeManagedHookScript(join(projectRoot, '.codex', 'hooks', 'strata-post-write.sh'), force);
     record('Codex', '.codex/hooks/strata-post-write.sh', hAction);
   }
 
-  // 4. OpenCode (opencode/)
+  // 4. OpenCode (opencode/ skills & .opencode/plugin/)
   if (shouldApply('opencode')) {
     await ensureAgentsGuidance('OpenCode');
 
@@ -737,32 +858,21 @@ export async function setupHarnessArtifacts(
     const sAction = await writeDedicatedArtifact(join(projectRoot, 'opencode', 'skills', 'use-strata', 'SKILL.md'), skillTemplate, force);
     record('OpenCode', 'opencode/skills/use-strata/SKILL.md', sAction);
 
-    const hAction = await writeDedicatedArtifact(join(projectRoot, 'opencode', 'hooks', 'strata-post-write.sh'), STRATA_POST_WRITE_HOOK, force, 0o755);
-    record('OpenCode', 'opencode/hooks/strata-post-write.sh', hAction);
+    await cleanupLegacyManagedFile(join(projectRoot, 'opencode', 'hooks', 'strata-post-write.sh'), 'Strata-MCP Post-Write');
   }
 
   // 5. .agents (general)
   if (shouldApply('agents')) {
     await ensureAgentsGuidance('.agents (general)');
-
-    await cleanupLegacy(join(projectRoot, '.agents', 'skills', 'strata-inspect'));
-    const sAction = await writeDedicatedArtifact(sharedSkillPath, skillTemplate, force);
-    record('.agents (general)', '.agents/skills/use-strata/SKILL.md', sAction);
-
-    const hAction = await writeDedicatedArtifact(join(projectRoot, '.agents', 'hooks', 'strata-post-write.sh'), STRATA_POST_WRITE_HOOK, force, 0o755);
-    record('.agents (general)', '.agents/hooks/strata-post-write.sh', hAction);
+    await ensureAgentsSkill('.agents (general)');
+    await ensureAgentsHookScript('.agents (general)');
   }
 
   // Fallback if skipping MCP config
   if (selectedSet.has('skip')) {
     await ensureAgentsGuidance('Fallback Guidance');
-
-    await cleanupLegacy(join(projectRoot, '.agents', 'skills', 'strata-inspect'));
-    const sAction = await writeDedicatedArtifact(sharedSkillPath, skillTemplate, force);
-    record('Fallback Skills', '.agents/skills/use-strata/SKILL.md', sAction);
-
-    const hAction = await writeDedicatedArtifact(join(projectRoot, '.agents', 'hooks', 'strata-post-write.sh'), STRATA_POST_WRITE_HOOK, force, 0o755);
-    record('Fallback Hooks', '.agents/hooks/strata-post-write.sh', hAction);
+    await ensureAgentsSkill('Fallback Skills');
+    await ensureAgentsHookScript('Fallback Hooks');
   }
 
   return results;

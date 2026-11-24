@@ -156,7 +156,11 @@ export function detectExistingHarnesses(projectRoot: string): Exclude<AgentHarne
   if (existsSync(join(projectRoot, '.codex'))) {
     detected.push('codex');
   }
-  if (existsSync(join(projectRoot, 'opencode.json')) || existsSync(join(projectRoot, 'opencode'))) {
+  if (
+    existsSync(join(projectRoot, 'opencode.json')) ||
+    existsSync(join(projectRoot, 'opencode')) ||
+    existsSync(join(projectRoot, '.opencode'))
+  ) {
     detected.push('opencode');
   }
   if (existsSync(join(projectRoot, '.agents'))) {
@@ -167,46 +171,64 @@ export function detectExistingHarnesses(projectRoot: string): Exclude<AgentHarne
 
 /**
  * Parses user input or CLI flags into recognized AgentHarness entries.
- * Focused exclusively on: Antigravity (.gemini), Claude Code (.claude), Codex (.codex),
- * Opencode (opencode/), and .agents (general).
+ * Supports single values and comma-separated lists (e.g. `claude,codex`).
  */
 export function parseHarnessArg(arg?: string): AgentHarness[] {
   if (!arg) return ['all'];
   const normalized = arg.toLowerCase().trim();
   if (!normalized) return ['all'];
-  switch (normalized) {
-    case '1':
-    case 'antigravity':
-    case 'gemini':
-      return ['antigravity'];
-    case '2':
-    case 'claude':
-    case 'claude-code':
-      return ['claude'];
-    case '3':
-    case 'codex':
-    case 'openai-codex':
-      return ['codex'];
-    case '4':
-    case 'opencode':
-      return ['opencode'];
-    case '5':
-    case 'agents':
-    case '.agents':
-    case 'general':
-      return ['agents'];
-    case '6':
-    case 'all':
-      return ['all'];
-    case '7':
-    case 'skip':
-    case 'none':
-      return ['skip'];
-    default:
-      throw new Error(
-        `Unknown agent harness: '${arg}'. Valid options: antigravity, claude, codex, opencode, agents, all, skip (or 1-7)`
-      );
+
+  const tokens = normalized.split(',').map((t) => t.trim()).filter(Boolean);
+  if (tokens.length === 0) return ['all'];
+
+  const parsed: AgentHarness[] = [];
+  for (const token of tokens) {
+    let mapped: AgentHarness;
+    switch (token) {
+      case '1':
+      case 'antigravity':
+      case 'gemini':
+        mapped = 'antigravity';
+        break;
+      case '2':
+      case 'claude':
+      case 'claude-code':
+        mapped = 'claude';
+        break;
+      case '3':
+      case 'codex':
+      case 'openai-codex':
+        mapped = 'codex';
+        break;
+      case '4':
+      case 'opencode':
+        mapped = 'opencode';
+        break;
+      case '5':
+      case 'agents':
+      case '.agents':
+      case 'general':
+        mapped = 'agents';
+        break;
+      case '6':
+      case 'all':
+        mapped = 'all';
+        break;
+      case '7':
+      case 'skip':
+      case 'none':
+        mapped = 'skip';
+        break;
+      default:
+        throw new Error(
+          `Unknown agent harness: '${token}'. Valid options: antigravity, claude, codex, opencode, agents, all, skip (or 1-7)`
+        );
+    }
+    if (!parsed.includes(mapped)) {
+      parsed.push(mapped);
+    }
   }
+  return parsed;
 }
 
 /**
@@ -224,10 +246,10 @@ async function promptHarnessChoice(detected: Exclude<AgentHarness, 'all' | 'skip
   const defaultChoice = detected.length === 1 ? singleDefaultMap[detected[0]!] : '6';
 
   console.log(`?  Select AI Agent Harness to configure for this project:`);
-  console.log(`   [1] Google Antigravity (.gemini/mcp_config.json, .gemini/rules/, .gemini/skills/, .gemini/hooks/)${mark('antigravity')}`);
+  console.log(`   [1] Google Antigravity (.agents/skills/, .agents/rules/, .agents/hooks/, .agents/mcp.json + global MCP notice)${mark('antigravity')}`);
   console.log(`   [2] Claude Code        (.mcp.json, .claude/settings.json, CLAUDE.md, .claude/skills/, .claude/hooks/)${mark('claude')}`);
   console.log(`   [3] OpenAI Codex       (.codex/config.toml, AGENTS.md, .codex/skills/, .codex/hooks/)${mark('codex')}`);
-  console.log(`   [4] OpenCode           (opencode.json, AGENTS.md, opencode/skills/, opencode/hooks/)${mark('opencode')}`);
+  console.log(`   [4] OpenCode           (opencode.json, AGENTS.md, opencode/skills/, .opencode/plugin/)${mark('opencode')}`);
   console.log(`   [5] .agents (General)  (.agents/mcp.json, AGENTS.md, .agents/skills/, .agents/hooks/)${mark('agents')}`);
   console.log(`   [6] All (Multi-Harness)`);
   console.log(`   [7] Skip MCP Config    (Guidance & SQLite index only)\n`);
@@ -391,5 +413,15 @@ export async function handleStrataInit(options: StrataInitOptions = {}): Promise
 
   console.log(`${cyan}│${reset}`);
   console.log(`${cyan}└${reset}  ${bold}${green}Initialization complete!${reset} Your project is equipped with Strata AST intelligence. 🚀`);
+
+  if (selectedHarnesses.includes('antigravity') || selectedHarnesses.includes('all')) {
+    console.log(`\n   \x1b[33m!\x1b[0m  ${bold}Antigravity Global MCP Notice:${reset}`);
+    console.log(`      Antigravity IDE & CLI only load MCP servers from global config (not workspace .agents/mcp.json).`);
+    console.log(`      If not already registered, add ${bold}strata${reset} manually to:`);
+    console.log(`        • IDE: ${cyan}~/.gemini/antigravity/mcp_config.json${reset}`);
+    console.log(`        • CLI: ${cyan}~/.gemini/antigravity-cli/mcp_config.json${reset}`);
+    console.log(`      ${dim}{ "mcpServers": { "strata": { "command": "strata", "args": ["serve"] } } }${reset}`);
+  }
+
   console.log(`   You can now run your AI agent in this directory (e.g. ${cyan}antigravity${reset}, ${cyan}claude${reset}, ${cyan}codex${reset}, ${cyan}opencode${reset}).\n`);
 }
