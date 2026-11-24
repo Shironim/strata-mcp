@@ -2,11 +2,17 @@
 
 ## Generated Post-Write Hook
 
-`src/cli/templates.ts` owns `STRATA_POST_WRITE_HOOK`.
-`src/cli/mcp-configs.ts` generates harness-specific configuration; the init command
-installs the selected artifacts. The script extracts a changed file path from the
-harness payload, environment or arguments, checks frontend extensions and invokes
-`strata sync` in the resolved workspace through an available executable.
+`src/cli/templates.ts` owns `STRATA_POST_WRITE_HOOK` and `STRATA_OPENCODE_PLUGIN`.
+`src/cli/mcp-configs.ts` generates harness-specific configuration; `src/cli/commands/init.ts` (`strata init`, supporting `--harness <id[,id]>`) installs the selected artifacts:
+
+- **Antigravity & `.agents`:** Scaffolds `.agents/hooks.json` (`strata-autosync` namespace, `PostToolUse` running `./hooks/strata-post-write.sh --antigravity`), `.agents/hooks/strata-post-write.sh`, `.agents/rules/strata-frontend.md`, `.agents/skills/use-strata/SKILL.md`, and `.agents/mcp.json` (without creating `.gemini/`). Because Antigravity IDE/CLI only load MCP servers globally, `strata init` prints manual setup instructions for `~/.gemini/antigravity/mcp_config.json` and `~/.gemini/antigravity-cli/mcp_config.json`.
+- **Claude Code:** Configures `.claude/settings.json` (`hooks.PostToolUse` with `$CLAUDE_PROJECT_DIR` and non-Git subdirectory `cwd` anchoring, `--claude` mode with empty `stdout`), `.claude/hooks/strata-post-write.sh`, and `.mcp.json`.
+- **OpenAI Codex CLI:** Configures `.codex/hooks.json` (`hooks.PostToolUse` matching `Write|Edit|MultiEdit|apply_patch|...` without `Bash`, `--codex` mode with empty `stdout`), `.codex/hooks/strata-post-write.sh`, and `.codex/config.toml` (`[mcp_servers.strata]`).
+- **OpenCode v2:** Configures `opencode.json` (`mcp.strata`) and `.opencode/plugin/strata-autosync.ts` (`export default { id, setup(ctx) }` with `ctx.tool.hook('execute.after', ...)` and `__health_probe__` guard, auto-migrating legacy `opencode/hooks.json` and v1 plugins).
+
+`strata-post-write.sh` anchors `WORKSPACE_ROOT` to the script location, parses polymorphic payloads (`toolCall.args`, `tool_input`, and `apply_patch` headers), checks indexed extensions, records internal coverage events (`synced`, `coalesced`, `skipped_unsupported_payload`, `skipped_missing_binary`) to `.strata/hook.log` (never `stdout`), and runs detached burst-coalesced `strata sync` using an atomic `.strata/sync.lock` directory and `.strata/sync.pending` marker.
+
+Malformed user JSON/TOML configs are preserved untouched, and existing user hooks are retained across re-initialization.
 
 Hook invocation depends on the installed client, its configuration and the edit
 mechanism. Generated artifacts and tests do not prove that every client invokes
@@ -65,4 +71,5 @@ On completion the dispatcher applies the [final response budget](retrieval-evide
 - `tests/core/v2-query-services.test.ts`: v2 workspace, inspection, graph, slice, and search service behavior.
 - `tests/core/scalability-optimizations.test.ts`: `AnalysisSupervisor` fast read-only concurrency, single-SQL `impact` pagination, `propUsage` SQL pre-filtering, and 1-hop graph HTTP boundary tracing.
 - `tests/cli/cli-v2.test.ts`: CLI v2 command dispatch and `init` artifact generation.
+- `tests/cli/hooks-multi-harness.test.ts`: Multi-harness hook scaffolding, non-destructive migration, malformed config preservation, wrapper `cwd` anchoring, OpenCode v2 plugin contract, and `.strata/hook.log` telemetry.
 - `tests/integration/mcp-v2-protocol.test.ts`: stdio JSON-RPC handshake, `_meta.progressToken` notifications, and text-mode `structuredContent` omission.
