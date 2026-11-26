@@ -1,12 +1,15 @@
 import { describe, expect, test } from 'bun:test';
 import { cp, mkdtemp, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
+import { pathToFileURL } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { ListRootsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { createMcpServer } from '../../src/mcp';
 import { ANALYSIS_LIMITS } from '../../src/analysis-supervisor';
 import { defaultSemanticPool, defaultWarmDbPool } from '../../src/engine/v2';
+import { clearLastKnownProjectRoot } from '../../src/engine/path-resolver';
 
 describe('Fase 5: MCP Protocol Integration for 5 Cognitive Tools (0.11.0)', () => {
   const monorepoSrc = resolve(import.meta.dir, '../mock-projects/monorepo-app');
@@ -194,4 +197,107 @@ describe('Fase 5: MCP Protocol Integration for 5 Cognitive Tools (0.11.0)', () =
       await rm(workDir, { recursive: true, force: true });
     }
   }, 30000);
+
+  test('resolves active workspace via MCP roots/list, tracks roots/list_changed, and respects explicit override', async () => {
+    const vueSrc = resolve(import.meta.dir, '../mock-projects/vue-app');
+    const reactSrc = resolve(import.meta.dir, '../mock-projects/react-app');
+    const workDir1 = await mkdtemp(join(tmpdir(), 'strata-mcp-root-1-'));
+    const workDir2 = await mkdtemp(join(tmpdir(), 'strata-mcp-root-2-'));
+    clearLastKnownProjectRoot();
+
+    let activeRoots = [{ uri: pathToFileURL(workDir1).href, name: 'vue-app' }];
+    const server = createMcpServer();
+    const client = new Client(
+      { name: 'strata-roots-test-client', version: '0.12.1' },
+      { capabilities: { roots: { listChanged: true } } }
+    );
+    client.setRequestHandler(ListRootsRequestSchema, async () => ({ roots: activeRoots }));
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+
+    try {
+      await cp(vueSrc, workDir1, { recursive: true });
+      await cp(reactSrc, workDir2, { recursive: true });
+      await server.connect(serverTransport);
+      await client.connect(clientTransport);
+
+      // 1. open-apps without workspace_path uses client root 1
+      const prompt1 = await client.getPrompt({ name: 'open-apps' });
+      const prompt1Text = prompt1.messages
+        .filter((m) => m.content.type === 'text')
+        .map((m) => (m.content as { type: 'text'; text: string }).text)
+        .join('\n');
+      expect(prompt1Text).toContain(workDir1);
+      expect(prompt1Text).not.toContain(workDir2);
+
+      // 2. map_workspace without root uses client root 1
+      const map1 = await client.callTool({ name: 'map_workspace', arguments: { view: 'overview' } });
+      expect(map1.isError).toBeFalsy();
+      expect((map1.content as Array<{ text: string }>)[0].text).toContain(workDir1);
+
+      // 3. Switching client roots + sending notifications/roots/list_changed updates active workspace
+      activeRoots = [{ uri: pathToFileURL(workDir2).href, name: 'react-app' }];
+      await client.sendRootsListChanged();
+
+      const overview2 = await client.readResource({ uri: 'strata://project/overview' });
+      const overview2Json = JSON.parse((overview2.contents[0] as { text?: string })?.text ?? '{}');
+      expect(overview2Json.scope).toBe(workDir2);
+
+      // 4. Explicit workspace_path argument still overrides client root
+      const explicitPrompt = await client.getPrompt({
+        name: 'open-apps',
+        arguments: { workspace_path: workDir1 },
+      });
+      const explicitText = explicitPrompt.messages
+        .filter((m) => m.content.type === 'text')
+        .map((m) => (m.content as { type: 'text'; text: string }).text)
+        .join('\n');
+      expect(explicitText).toContain(workDir1);
+    } finally {
+      clearLastKnownProjectRoot();
+      await client.close();
+      await server.close();
+      defaultSemanticPool.disposeAll();
+      defaultWarmDbPool.close(workDir1);
+      defaultWarmDbPool.close(workDir2);
+      await rm(workDir1, { recursive: true, force: true });
+      await rm(workDir2, { recursive: true, force: true });
+    }
+  }, 30000);
+
+  test('guards against auto-scanning $HOME when client provides no roots and no explicit root is passed', async () => {
+    const originalCwd = process.cwd();
+    clearLastKnownProjectRoot();
+    const server = createMcpServer();
+    const client = new Client({ name: 'strata-no-roots-client', version: '0.12.1' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+
+    try {
+      process.chdir(homedir());
+      await server.connect(serverTransport);
+      await client.connect(clientTransport);
+
+      // 1. open-apps skips scanning $HOME and instructs the agent to substitute <active-workspace-root>
+      const promptRes = await client.getPrompt({ name: 'open-apps' });
+      expect(promptRes.messages.length).toBe(1);
+      const text = (promptRes.messages[0]?.content as { type: 'text'; text: string }).text;
+      expect(text).toContain('<active-workspace-root>');
+      expect(text).toContain('automatic scanning was skipped');
+
+      // 2. Resource read without ?workspace returns WORKSPACE_ROOT_REQUIRED diagnostic
+      const resOverview = await client.readResource({ uri: 'strata://project/overview' });
+      const overviewJson = JSON.parse((resOverview.contents[0] as { text?: string })?.text ?? '{}');
+      expect(overviewJson.workspace_root).toBeNull();
+      expect(overviewJson.diagnostics?.[0]?.code).toBe('WORKSPACE_ROOT_REQUIRED');
+
+      // 3. Tool call without root returns WORKSPACE_ROOT_REQUIRED error
+      const mapRes = await client.callTool({ name: 'map_workspace', arguments: { view: 'overview' } });
+      expect(mapRes.isError).toBe(true);
+      expect((mapRes.content as Array<{ text: string }>)[0].text).toContain('WORKSPACE_ROOT_REQUIRED');
+    } finally {
+      process.chdir(originalCwd);
+      clearLastKnownProjectRoot();
+      await client.close();
+      await server.close();
+    }
+  }, 15000);
 });

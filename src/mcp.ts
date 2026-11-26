@@ -2,6 +2,7 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import {
@@ -12,6 +13,7 @@ import {
   ListResourceTemplatesRequestSchema,
   ListToolsRequestSchema,
   ReadResourceRequestSchema,
+  RootsListChangedNotificationSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { TOOLS, findTool } from './tools';
 import {
@@ -28,7 +30,9 @@ import { StrataTelemetry, runWithTelemetryStage } from './engine/telemetry';
 import { defaultSyncCoordinator } from './engine/v2';
 import { enforceResponseLimit } from './engine/context-budget';
 import {
+  canonicalizePath,
   getLastKnownProjectRoot,
+  isBroadOrHomeDirectory,
   runWithRequestProjectRoot,
   setLastKnownProjectRoot,
 } from './engine/path-resolver';
@@ -78,20 +82,95 @@ export function createMcpServer(): Server {
     }
   );
 
+  let clientRoots: string[] = [];
+  let rootsLoadedOnce = false;
+  let rootsSyncInFlight: Promise<string[]> | undefined;
+
+  const parseFileRootUris = (roots: Array<{ uri: string }>): string[] => {
+    const parsed: string[] = [];
+    const seen = new Set<string>();
+    for (const root of roots) {
+      if (!root?.uri || !root.uri.startsWith('file:')) continue;
+      try {
+        const fsPath = canonicalizePath(fileURLToPath(root.uri));
+        if (!existsSync(fsPath) || seen.has(fsPath)) continue;
+        seen.add(fsPath);
+        parsed.push(fsPath);
+      } catch {
+        // Ignore malformed or non-local file URIs
+      }
+    }
+    return parsed;
+  };
+
+  const refreshClientRoots = (warmup = false): Promise<string[]> => {
+    if (!server.getClientCapabilities()?.roots) {
+      rootsLoadedOnce = true;
+      clientRoots = [];
+      return Promise.resolve([]);
+    }
+    if (rootsSyncInFlight) return rootsSyncInFlight;
+    rootsSyncInFlight = server
+      .listRoots(undefined, { timeout: 3000 })
+      .then((res) => {
+        clientRoots = parseFileRootUris(res.roots ?? []);
+        rootsLoadedOnce = true;
+        if (warmup && clientRoots[0] && !isBroadOrHomeDirectory(clientRoots[0])) {
+          defaultSyncCoordinator.warmupInBackground(clientRoots[0]);
+        }
+        return clientRoots;
+      })
+      .catch(() => {
+        rootsLoadedOnce = true;
+        return clientRoots;
+      })
+      .finally(() => {
+        rootsSyncInFlight = undefined;
+      });
+    return rootsSyncInFlight;
+  };
+
+  const ensureClientRoots = async (): Promise<string[]> => {
+    if (rootsSyncInFlight) {
+      return await rootsSyncInFlight;
+    }
+    if (rootsLoadedOnce || !server.getClientCapabilities()?.roots) {
+      return clientRoots;
+    }
+    return await refreshClientRoots(false);
+  };
+
+  server.oninitialized = () => {
+    if (server.getClientCapabilities()?.roots) {
+      void refreshClientRoots(true);
+    } else if (!isBroadOrHomeDirectory(process.cwd())) {
+      defaultSyncCoordinator.warmupInBackground(process.cwd());
+    }
+  };
+  server.setNotificationHandler(RootsListChangedNotificationSchema, async () => {
+    rootsLoadedOnce = false;
+    await refreshClientRoots(true);
+  });
+
   server.setRequestHandler(ListResourcesRequestSchema, async () => listStrataResources());
   server.setRequestHandler(ListResourceTemplatesRequestSchema, async () =>
     listStrataResourceTemplates()
   );
   server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
-    const rootHint = getLastKnownProjectRoot();
+    const roots = await ensureClientRoots();
+    const rootHint = roots[0] ?? getLastKnownProjectRoot();
     return await runWithRequestProjectRoot(rootHint, () =>
       readStrataResource(request.params.uri, rootHint)
     );
   });
   server.setRequestHandler(ListPromptsRequestSchema, async () => listStrataPrompts());
-  server.setRequestHandler(GetPromptRequestSchema, async (request) =>
-    getStrataPrompt(request.params.name, request.params.arguments)
-  );
+  server.setRequestHandler(GetPromptRequestSchema, async (request) => {
+    const roots = await ensureClientRoots();
+    const rootHint = roots[0] ?? getLastKnownProjectRoot();
+    return await runWithRequestProjectRoot(rootHint, () =>
+      getStrataPrompt(request.params.name, request.params.arguments, rootHint)
+    );
+  });
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: TOOLS.map(({ name, description, inputSchema, annotations, _meta }) => ({
@@ -131,11 +210,13 @@ export function createMcpServer(): Server {
       args.session_id || args.sessionId
         ? String(args.session_id || args.sessionId)
         : undefined;
+    const roots = await ensureClientRoots();
     const explicitRoot =
       typeof args.root === 'string' && args.root.trim() ? args.root.trim() : undefined;
     const requestRootHint =
       explicitRoot ??
       (sessionId ? sessionRoots.get(sessionId) : undefined) ??
+      roots[0] ??
       getLastKnownProjectRoot();
 
     if (!tool) {
@@ -301,7 +382,6 @@ export async function startMcpServer(): Promise<void> {
   process.on('SIGINT', () => void shutdown());
   process.on('SIGTERM', () => void shutdown());
   await server.connect(transport);
-  defaultSyncCoordinator.warmupInBackground(process.cwd());
 }
 
 if (import.meta.main) {

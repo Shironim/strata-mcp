@@ -11,7 +11,11 @@ import {
   type SourceBlockKind,
   type WorkspaceMapView,
 } from '../../engine/v2';
-import { getLastKnownProjectRoot, setLastKnownProjectRoot } from '../../engine/path-resolver';
+import {
+  getLastKnownProjectRoot,
+  isBroadOrHomeDirectory,
+  setLastKnownProjectRoot,
+} from '../../engine/path-resolver';
 import type { McpToolDefinition, ToolCallResponse } from '../types';
 import { V2_TOOL_CATALOG, type StrataToolName } from './catalog';
 import {
@@ -26,9 +30,19 @@ import {
 
 function resolveRoot(args: Record<string, unknown>): string {
   const explicit = typeof args.root === 'string' && args.root.trim() ? args.root.trim() : undefined;
-  const root = explicit ?? getLastKnownProjectRoot() ?? process.cwd();
-  setLastKnownProjectRoot(root);
-  return root;
+  const known = explicit ?? getLastKnownProjectRoot();
+  if (!known) {
+    const cwd = process.cwd();
+    if (isBroadOrHomeDirectory(cwd)) {
+      throw new Error(
+        `WORKSPACE_ROOT_REQUIRED: Refused to auto-scan broad directory "${cwd}" because no explicit "root" argument or MCP client workspace root was provided. Pass { root: "<active-workspace-root>" }.`
+      );
+    }
+    setLastKnownProjectRoot(cwd);
+    return cwd;
+  }
+  setLastKnownProjectRoot(known);
+  return known;
 }
 
 function resolveFormat(args: Record<string, unknown>): 'text' | 'json' {

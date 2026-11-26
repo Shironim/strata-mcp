@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { getLastKnownProjectRoot } from './engine/path-resolver';
+import { getLastKnownProjectRoot, isBroadOrHomeDirectory } from './engine/path-resolver';
 import {
   inspectFile,
   mapWorkspace,
@@ -97,9 +97,25 @@ export function listStrataPrompts() {
   return { prompts: [...STRATA_PROMPTS] };
 }
 
-function resolveWorkspaceRoot(explicitRoot?: string): string {
-  const candidate = explicitRoot?.trim() || getLastKnownProjectRoot() || process.cwd();
-  return resolve(candidate);
+interface ResolvedWorkspaceRoot {
+  workspaceRoot: string;
+  isUnsafeFallback: boolean;
+}
+
+function resolveWorkspaceRoot(explicitRoot?: string): ResolvedWorkspaceRoot {
+  const explicit = explicitRoot?.trim();
+  if (explicit) {
+    return { workspaceRoot: resolve(explicit), isUnsafeFallback: false };
+  }
+  const known = getLastKnownProjectRoot();
+  if (known) {
+    return { workspaceRoot: resolve(known), isUnsafeFallback: false };
+  }
+  const cwd = resolve(process.cwd());
+  return {
+    workspaceRoot: cwd,
+    isUnsafeFallback: isBroadOrHomeDirectory(cwd),
+  };
 }
 
 function parseResourceUri(uri: string): { baseUri: string; workspaceParam?: string } {
@@ -196,7 +212,31 @@ export async function readStrataResource(uri: string, explicitRoot?: string) {
     };
   }
 
-  const workspaceRoot = resolveWorkspaceRoot(workspaceParam ?? explicitRoot);
+  const { workspaceRoot, isUnsafeFallback } = resolveWorkspaceRoot(workspaceParam ?? explicitRoot);
+
+  if (isUnsafeFallback) {
+    return {
+      contents: [
+        {
+          uri,
+          mimeType: 'application/json',
+          text: JSON.stringify(
+            {
+              workspace_root: null,
+              diagnostics: [
+                {
+                  code: 'WORKSPACE_ROOT_REQUIRED',
+                  message: `Refused to auto-scan broad directory "${workspaceRoot}" because no explicit workspace root or MCP client root was provided. Pass "?workspace=<absolute-path>" or call map_workspace({ root: "<active-workspace-root>" }).`,
+                },
+              ],
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  }
 
   if (baseUri === 'strata://apps') {
     const guide = await buildAppsGuide(workspaceRoot);
@@ -277,19 +317,42 @@ export async function getStrataPrompt(
   explicitRoot?: string
 ) {
   const args = rawArgs ?? {};
-  const workspaceRoot = resolveWorkspaceRoot(explicitRoot ?? args.workspace_path ?? args.root);
+  const explicitArg = args.workspace_path?.trim() || args.root?.trim();
+  const { workspaceRoot, isUnsafeFallback } = resolveWorkspaceRoot(explicitArg || explicitRoot);
   const playbook = findWorkflowPlaybook(name);
   if (!playbook) {
     throw new Error(`Unknown prompt: '${name}'`);
   }
 
-  const overview = await mapWorkspace({ workspaceRoot, view: 'overview' });
   const targetArg =
     playbook.name === 'trace-bug'
       ? (args.target ?? '').trim() || '<target>'
       : playbook.name === 'safe-refactor'
         ? (args.component ?? '').trim() || '<component>'
         : (args.package ?? '').trim();
+
+  if (isUnsafeFallback) {
+    const ctx = {
+      target: targetArg,
+      workspaceRoot: '<active-workspace-root>',
+      refactorType: args.member ?? args.refactor_type,
+    };
+    const guardrailNote = `Note: No workspace root was provided by the MCP client and the server's default cwd (\`${workspaceRoot}\`) is a home/root directory, so automatic scanning was skipped. Replace \`<active-workspace-root>\` below with the absolute path of the user's currently open workspace.`;
+    return {
+      description: playbook.promptDescription,
+      messages: [
+        {
+          role: 'user' as const,
+          content: {
+            type: 'text' as const,
+            text: [guardrailNote, '', playbook.intro(ctx), ...playbook.steps(ctx)].join('\n'),
+          },
+        },
+      ],
+    };
+  }
+
+  const overview = await mapWorkspace({ workspaceRoot, view: 'overview' });
 
   const ctx = {
     target: targetArg,
