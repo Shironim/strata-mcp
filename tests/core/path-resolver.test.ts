@@ -1,5 +1,6 @@
 import { describe, expect, it, beforeEach } from 'bun:test';
-import { join } from 'node:path';
+import { homedir } from 'node:os';
+import { join, parse } from 'node:path';
 import {
   findProjectRoot,
   resolveWorkspacePath,
@@ -7,6 +8,7 @@ import {
   setLastKnownProjectRoot,
   getLastKnownProjectRoot,
   clearLastKnownProjectRoot,
+  isBroadOrHomeDirectory,
   PROJECT_ROOT_MARKERS,
 } from '../../src/engine/path-resolver';
 
@@ -88,5 +90,12 @@ describe('Sprint 1 — Path Resolver & Project Root Auto-Discovery', () => {
     expect(resolveWorkspacePath('src/components/ProductCard.vue', rootHint).replace(/\\/g, '/')).toContain(
       '/mock-workspace/vue-app/src/components/ProductCard.vue'
     );
+  });
+
+  it('identifies home and filesystem root directories as broad fallback directories', () => {
+    expect(isBroadOrHomeDirectory(homedir())).toBe(true);
+    expect(isBroadOrHomeDirectory(parse(process.cwd()).root)).toBe(true);
+    expect(isBroadOrHomeDirectory('')).toBe(true);
+    expect(isBroadOrHomeDirectory(join(import.meta.dir, '../fixtures'))).toBe(false);
   });
 });

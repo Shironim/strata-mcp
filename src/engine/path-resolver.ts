@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { existsSync, promises as fs, statSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, normalize, resolve } from 'node:path';
 
 /**
@@ -67,6 +68,30 @@ export function getLastKnownProjectRoot(): string | undefined {
 
 export function clearLastKnownProjectRoot(): void {
   lastKnownProjectRoot = undefined;
+}
+
+/**
+ * Returns true when `dirPath` is the user's home directory or a filesystem root
+ * (e.g. `/`, `C:\`). Used as a guardrail against accidentally auto-scanning broad
+ * non-project directories when an MCP server is spawned globally with `cwd = $HOME`.
+ */
+export function isBroadOrHomeDirectory(dirPath: string): boolean {
+  if (!dirPath || typeof dirPath !== 'string' || !dirPath.trim()) {
+    return true;
+  }
+  const canonical = canonicalizePath(dirPath);
+  if (dirname(canonical) === canonical) {
+    return true;
+  }
+  try {
+    const home = homedir();
+    if (home && canonical === canonicalizePath(home)) {
+      return true;
+    }
+  } catch {
+    // Ignore if homedir() is unavailable in restricted environments
+  }
+  return false;
 }
 
 /**
